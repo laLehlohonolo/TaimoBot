@@ -246,3 +246,7 @@ def close_paper_trade(trade_id, exit_price):
         "new_balance": round(new_balance, 2),
         "mode": "paper_trading"
     }
+from .safety import require_trading_enabled
+if not account_id or not client_order_id:
+    raise ValueError("Account ID and order ID are required.")
+        require_trading_enabled()
