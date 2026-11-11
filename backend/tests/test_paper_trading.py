@@ -22,12 +22,10 @@ class PaperTradingTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
-
         database.DB_PATH = Path(self.temp_dir.name) / "test.db"
 
         deactivate_emergency_stop()
         init_db()
-
         create_paper_account("TEST-001", 10000)
 
     def tearDown(self):
@@ -117,3 +115,4 @@ class PaperTradingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
