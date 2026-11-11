@@ -1,11 +1,34 @@
 
-from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from typing import Literal
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from .database import init_db
+from .risk import calculate_position_size, RiskError
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
 
 app = FastAPI(
     title="TaimoBot API",
     description="Paper trading backend for TaimoBot",
-    version="0.1.0"
+    version="0.2.0",
+    lifespan=lifespan
 )
+
+
+class RiskPreviewRequest(BaseModel):
+    account_balance: float = Field(gt=0)
+    entry_price: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    risk_percent: float = Field(gt=0, le=1.0)
+    side: Literal["BUY", "SELL"]
 
 
 @app.get("/")
@@ -26,3 +49,24 @@ def health_check():
         "api": "TaimoBot",
         "trading_mode": "paper"
     }
+
+
+@app.post("/risk/preview")
+def risk_preview(request: RiskPreviewRequest):
+    try:
+        result = calculate_position_size(
+            account_balance=request.account_balance,
+            entry_price=request.entry_price,
+            stop_loss=request.stop_loss,
+            risk_percent=request.risk_percent,
+            side=request.side
+        )
+
+        return result
+
+    except RiskError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=str(error)
+        )
+
