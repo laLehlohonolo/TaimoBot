@@ -1,10 +1,11 @@
 
+
 import uuid
-import sqlite3
 from contextlib import contextmanager
 
 from .database import get_connection
 from .risk import calculate_position_size, validate_positive_number
+from .safety import require_trading_enabled
 
 
 @contextmanager
@@ -74,6 +75,8 @@ def open_paper_trade(
     if not account_id or not client_order_id:
         raise ValueError("Account ID and order ID are required.")
 
+    require_trading_enabled()
+
     if side not in ("BUY", "SELL"):
         raise ValueError("Side must be BUY or SELL.")
 
@@ -81,6 +84,7 @@ def open_paper_trade(
     stop = validate_positive_number(stop_loss, "Stop loss")
 
     target = None
+
     if take_profit is not None:
         target = validate_positive_number(
             take_profit, "Take profit"
@@ -246,7 +250,3 @@ def close_paper_trade(trade_id, exit_price):
         "new_balance": round(new_balance, 2),
         "mode": "paper_trading"
     }
-from .safety import require_trading_enabled
-if not account_id or not client_order_id:
-    raise ValueError("Account ID and order ID are required.")
-        require_trading_enabled()
