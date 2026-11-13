@@ -1,4 +1,5 @@
 
+import re
 import uuid
 from contextlib import contextmanager
 
@@ -10,9 +11,12 @@ from .risk import (
 from .safety import require_trading_enabled
 
 
+DEFAULT_SYMBOL = "XAUUSD"
+
+
 @contextmanager
 def transaction():
-    """Run database changes as one atomic transaction."""
+    """Execute database changes atomically."""
     connection = get_connection()
 
     try:
@@ -24,6 +28,22 @@ def transaction():
         raise
     finally:
         connection.close()
+
+
+def validate_symbol(symbol):
+    """Validate and normalize a trading instrument symbol."""
+    value = str(symbol).strip().upper()
+
+    if not value:
+        raise ValueError("Instrument symbol is required.")
+
+    if len(value) > 30:
+        raise ValueError("Instrument symbol is too long.")
+
+    if not re.fullmatch(r"[A-Z0-9._/-]+", value):
+        raise ValueError("Instrument symbol contains invalid characters.")
+
+    return value
 
 
 def create_paper_account(account_id, starting_balance):
@@ -67,8 +87,7 @@ def create_paper_account(account_id, starting_balance):
 
 
 def get_open_risk(connection, account_id):
-    """Calculate total allocated risk of all OPEN positions."""
-
+    """Return total reserved risk across all open instruments."""
     result = connection.execute(
         """
         SELECT COALESCE(SUM(risk_amount), 0) AS total_open_risk
@@ -89,11 +108,13 @@ def open_paper_trade(
     entry_price,
     stop_loss,
     risk_percent,
-    take_profit=None
+    take_profit=None,
+    symbol=DEFAULT_SYMBOL
 ):
     account_id = str(account_id).strip()
     client_order_id = str(client_order_id).strip()
     side = str(side).upper().strip()
+    symbol = validate_symbol(symbol)
 
     if not account_id or not client_order_id:
         raise ValueError("Account ID and order ID are required.")
@@ -128,7 +149,6 @@ def open_paper_trade(
             )
 
     with transaction() as connection:
-
         duplicate = connection.execute(
             """
             SELECT trade_id
@@ -195,7 +215,7 @@ def open_paper_trade(
                 trade_id,
                 account_id,
                 client_order_id,
-                "XAUUSD",
+                symbol,
                 side,
                 risk["position_size"],
                 entry,
@@ -209,7 +229,7 @@ def open_paper_trade(
         "trade_id": trade_id,
         "account_id": account_id,
         "client_order_id": client_order_id,
-        "symbol": "XAUUSD",
+        "symbol": symbol,
         "side": side,
         "quantity": risk["position_size"],
         "entry_price": entry,
@@ -236,7 +256,6 @@ def close_paper_trade(trade_id, exit_price):
         raise ValueError("Trade ID is required.")
 
     with transaction() as connection:
-
         trade = connection.execute(
             """
             SELECT *
@@ -272,6 +291,9 @@ def close_paper_trade(trade_id, exit_price):
             (trade["account_id"],)
         ).fetchone()
 
+        if account is None:
+            raise ValueError("Paper account not found.")
+
         new_balance = account["balance"] + pnl
 
         if new_balance < 0:
@@ -279,16 +301,7 @@ def close_paper_trade(trade_id, exit_price):
                 "Close rejected: result would make balance negative."
             )
 
-        connection.execute(
-            """
-            UPDATE paper_accounts
-            SET balance = ?
-            WHERE account_id = ?
-            """,
-            (new_balance, trade["account_id"])
-        )
-
-        connection.execute(
+        update_result = connection.execute(
             """
             UPDATE trades
             SET status = 'CLOSED',
@@ -300,12 +313,27 @@ def close_paper_trade(trade_id, exit_price):
             (pnl, trade_id)
         )
 
+        if update_result.rowcount != 1:
+            raise ValueError(
+                "Trade could not be closed. It may already be closed."
+            )
+
+        connection.execute(
+            """
+            UPDATE paper_accounts
+            SET balance = ?
+            WHERE account_id = ?
+            """,
+            (new_balance, trade["account_id"])
+        )
+
         remaining_open_risk = get_open_risk(
             connection, trade["account_id"]
         )
 
     return {
         "trade_id": trade_id,
+        "symbol": trade["symbol"],
         "status": "CLOSED",
         "exit_price": exit_value,
         "realized_pnl": round(pnl, 2),
