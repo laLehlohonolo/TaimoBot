@@ -6,12 +6,18 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from .database import init_db, get_connection
-from .risk import calculate_position_size, RiskError, MAX_RISK_PERCENT
+from .risk import (
+    calculate_position_size,
+    RiskError,
+    MAX_RISK_PERCENT
+)
 from .execution import (
     create_paper_account,
     open_paper_trade,
     close_paper_trade,
-    get_open_risk
+    get_open_risk,
+    validate_symbol,
+    DEFAULT_SYMBOL
 )
 from .history import (
     get_account_history,
@@ -32,8 +38,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="TaimoBot API",
-    description="Paper trading backend for TaimoBot",
-    version="0.5.0",
+    description="Multi-instrument paper trading backend for TaimoBot",
+    version="0.6.0",
     lifespan=lifespan
 )
 
@@ -52,8 +58,14 @@ class AccountRequest(BaseModel):
 
 
 class TradeRequest(BaseModel):
-    account_id: str
+    account_id: str = Field(min_length=1, max_length=100)
     client_order_id: str = Field(min_length=1, max_length=100)
+    symbol: str = Field(
+        default=DEFAULT_SYMBOL,
+        min_length=1,
+        max_length=30,
+        pattern=r"^[A-Za-z0-9._/-]+$"
+    )
     side: Literal["BUY", "SELL"]
     entry_price: float = Field(gt=0)
     stop_loss: float = Field(gt=0)
@@ -71,7 +83,8 @@ def home():
         "application": "TaimoBot",
         "status": "running",
         "mode": "paper_trading",
-        "market": "XAUUSD",
+        "market_coverage": "broker_supported_instruments",
+        "default_symbol": DEFAULT_SYMBOL,
         "timezone": "Africa/Johannesburg"
     }
 
@@ -201,6 +214,8 @@ def trade_history(account_id: str, limit: int = 50):
 @app.post("/trades")
 def create_trade(request: TradeRequest):
     try:
+        symbol = validate_symbol(request.symbol)
+
         return open_paper_trade(
             account_id=request.account_id,
             client_order_id=request.client_order_id,
@@ -208,9 +223,12 @@ def create_trade(request: TradeRequest):
             entry_price=request.entry_price,
             stop_loss=request.stop_loss,
             risk_percent=request.risk_percent,
-            take_profit=request.take_profit
+            take_profit=request.take_profit,
+            symbol=symbol
         )
-    except (ValueError, RuntimeError) as error:
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except RuntimeError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
 
