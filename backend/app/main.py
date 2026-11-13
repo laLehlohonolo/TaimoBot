@@ -19,7 +19,10 @@ from .execution import (
     close_paper_trade,
     get_open_risk,
     validate_symbol,
-    DEFAULT_SYMBOL
+    DEFAULT_SYMBOL,
+    create_copy_relationship,
+    get_copy_relationships,
+    update_copy_relationship_status
 )
 from .history import (
     get_account_history,
@@ -96,6 +99,10 @@ class CloseTradeRequest(BaseModel):
 
 class CloseGroupRequest(BaseModel):
     exit_price: float = Field(gt=0)
+
+
+class CopyRelationshipRequest(BaseModel):
+    source_account_id: str = Field(min_length=1, max_length=100)
 
 
 @app.get("/")
@@ -339,3 +346,66 @@ def close_trade(
             status_code=400,
             detail=str(error)
     )
+
+
+@app.post("/accounts/{follower_account_id}/copy-relationships")
+def create_copy_relationship_route(
+    follower_account_id: str,
+    request: CopyRelationshipRequest
+):
+    try:
+        return create_copy_relationship(
+            follower_account_id=follower_account_id,
+            source_account_id=request.source_account_id
+        )
+    except ValueError as error:
+        status_code = (
+            404 if "not found" in str(error).lower()
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=str(error))
+
+
+@app.get("/accounts/{follower_account_id}/copy-relationships")
+def list_copy_relationships_route(follower_account_id: str):
+    try:
+        return get_copy_relationships(follower_account_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.post("/copy-relationships/{relationship_id}/pause")
+def pause_copy_relationship_route(relationship_id: str):
+    try:
+        return update_copy_relationship_status(relationship_id, "PAUSED")
+    except ValueError as error:
+        status_code = (
+            404 if "not found" in str(error).lower()
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=str(error))
+
+
+@app.post("/copy-relationships/{relationship_id}/resume")
+def resume_copy_relationship_route(relationship_id: str):
+    try:
+        return update_copy_relationship_status(relationship_id, "ACTIVE")
+    except ValueError as error:
+        status_code = (
+            404 if "not found" in str(error).lower()
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=str(error))
+
+
+@app.post("/copy-relationships/{relationship_id}/stop")
+def stop_copy_relationship_route(relationship_id: str):
+    try:
+        return update_copy_relationship_status(relationship_id, "STOPPED")
+    except ValueError as error:
+        status_code = (
+            404 if "not found" in str(error).lower()
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=str(error))
+
