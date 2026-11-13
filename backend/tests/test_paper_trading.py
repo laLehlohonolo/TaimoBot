@@ -11,7 +11,8 @@ from app.main import app
 from app.execution import (
     create_paper_account,
     open_paper_trade,
-    close_paper_trade
+    close_paper_trade,
+    validate_symbol
 )
 from app.risk import (
     calculate_position_size,
@@ -42,14 +43,15 @@ class PaperTradingTests(unittest.TestCase):
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
-    def open_trade(self, order_id, risk_percent=0.5):
+    def open_trade(self, order_id, risk_percent=0.5, symbol="XAUUSD"):
         return open_paper_trade(
             account_id="TEST-001",
             client_order_id=order_id,
             side="BUY",
             entry_price=4000,
             stop_loss=3990,
-            risk_percent=risk_percent
+            risk_percent=risk_percent,
+            symbol=symbol
         )
 
     def test_one_percent_risk_calculation(self):
@@ -102,7 +104,6 @@ class PaperTradingTests(unittest.TestCase):
         self.assertNotEqual(first["trade_id"], second["trade_id"])
         self.assertNotEqual(second["trade_id"], third["trade_id"])
         self.assertNotEqual(third["trade_id"], fourth["trade_id"])
-
         self.assertEqual(fourth["total_open_risk"], 100)
 
     def test_duplicate_order_is_rejected(self):
@@ -141,7 +142,6 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(close_result["remaining_open_risk"], 50)
 
         third = self.open_trade("ORDER-003", 0.5)
-
         self.assertEqual(third["total_open_risk"], 100)
 
     def test_trade_closing_updates_account_balance(self):
@@ -167,7 +167,8 @@ class PaperTradingTests(unittest.TestCase):
             side="BUY",
             entry_price=4000,
             stop_loss=3990,
-            risk_percent=1.0
+            risk_percent=1.0,
+            symbol="EURUSD"
         )
 
         self.assertEqual(
@@ -209,8 +210,85 @@ class PaperTradingTests(unittest.TestCase):
 
     def test_account_risk_endpoint_rejects_unknown_account(self):
         response = self.client.get("/accounts/UNKNOWN/risk")
-
         self.assertEqual(response.status_code, 404)
+
+    def test_symbol_is_normalized_to_uppercase(self):
+        self.assertEqual(validate_symbol("eurusd"), "EURUSD")
+
+    def test_symbol_with_supported_separator_is_valid(self):
+        self.assertEqual(validate_symbol("EUR/USD"), "EUR/USD")
+
+    def test_empty_symbol_is_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_symbol("")
+
+    def test_invalid_symbol_characters_are_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_symbol("EUR USD!")
+
+    def test_symbol_length_is_limited(self):
+        with self.assertRaises(ValueError):
+            validate_symbol("A" * 31)
+
+    def test_different_instruments_can_open_separate_positions(self):
+        eur = self.open_trade("ORDER-EUR", 0.5, "EURUSD")
+        gold = self.open_trade("ORDER-GOLD", 0.5, "XAUUSD")
+
+        self.assertEqual(eur["symbol"], "EURUSD")
+        self.assertEqual(gold["symbol"], "XAUUSD")
+        self.assertNotEqual(eur["trade_id"], gold["trade_id"])
+        self.assertEqual(gold["total_open_risk"], 100)
+
+    def test_different_instruments_share_one_risk_limit(self):
+        self.open_trade("ORDER-EUR", 0.5, "EURUSD")
+        self.open_trade("ORDER-GOLD", 0.5, "XAUUSD")
+
+        with self.assertRaises(RiskError):
+            self.open_trade("ORDER-BTC", 0.1, "BTCUSD")
+
+    def test_api_accepts_a_valid_instrument_symbol(self):
+        response = self.client.post(
+            "/trades",
+            json={
+                "account_id": "TEST-001",
+                "client_order_id": "API-EUR-001",
+                "symbol": "EURUSD",
+                "side": "BUY",
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["symbol"], "EURUSD")
+
+    def test_api_rejects_invalid_symbol_format(self):
+        response = self.client.post(
+            "/trades",
+            json={
+                "account_id": "TEST-001",
+                "client_order_id": "API-BAD-001",
+                "symbol": "EUR USD!",
+                "side": "BUY",
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5
+            }
+        )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_closing_trade_returns_its_instrument_symbol(self):
+        trade = self.open_trade("ORDER-CLOSE-SYMBOL", 0.5, "GBPUSD")
+
+        result = close_paper_trade(
+            trade_id=trade["trade_id"],
+            exit_price=4000
+        )
+
+        self.assertEqual(result["symbol"], "GBPUSD")
+        self.assertEqual(result["status"], "CLOSED")
 
 
 if __name__ == "__main__":
