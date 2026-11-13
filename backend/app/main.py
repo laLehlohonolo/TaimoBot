@@ -24,6 +24,7 @@ from .execution import (
     get_copy_relationships,
     update_copy_relationship_status
 )
+from .copy_trading import replicate_open_trade
 from .history import (
     get_account_history,
     get_trade_history
@@ -308,7 +309,7 @@ def create_trade(request: TradeRequest):
     try:
         symbol = validate_symbol(request.symbol)
 
-        return open_paper_trade(
+        trade = open_paper_trade(
             account_id=request.account_id,
             client_order_id=request.client_order_id,
             side=request.side,
@@ -319,6 +320,10 @@ def create_trade(request: TradeRequest):
             symbol=symbol,
             position_group_id=request.position_group_id
         )
+
+        # Copy attempts are isolated per follower and never undo the source trade.
+        trade["copy_summary"] = replicate_open_trade(trade["trade_id"])
+        return trade
     except ValueError as error:
         raise HTTPException(
             status_code=400,
