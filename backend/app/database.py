@@ -61,6 +61,36 @@ def migrate_trade_columns(connection):
             )
 
 
+def migrate_account_risk_profiles(connection):
+    """Add and assign persistent risk profiles to existing accounts."""
+
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(
+            "PRAGMA table_info(paper_accounts)"
+        ).fetchall()
+    }
+
+    if "risk_profile" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE paper_accounts "
+            "ADD COLUMN risk_profile TEXT"
+        )
+
+    connection.execute(
+        """
+        UPDATE paper_accounts
+        SET risk_profile = CASE
+            WHEN starting_balance < 5000 THEN 'STARTER'
+            WHEN starting_balance < 25000 THEN 'STANDARD'
+            ELSE 'PREMIUM'
+        END
+        WHERE risk_profile IS NULL
+           OR risk_profile = ''
+        """
+    )
+
+
 def init_db():
     """Create tables and safely migrate existing paper-trading data."""
 
@@ -73,6 +103,7 @@ def init_db():
                     CHECK (starting_balance > 0),
                 balance REAL NOT NULL
                     CHECK (balance >= 0),
+                risk_profile TEXT,
                 created_at TEXT NOT NULL
                     DEFAULT CURRENT_TIMESTAMP
             );
@@ -137,6 +168,7 @@ def init_db():
         )
 
         migrate_trade_columns(connection)
+        migrate_account_risk_profiles(connection)
 
         connection.execute(
             """
