@@ -37,8 +37,33 @@ def get_connection():
     return connection
 
 
+def migrate_trade_columns(connection):
+    """Add new trade fields without deleting existing data."""
+
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(
+            "PRAGMA table_info(trades)"
+        ).fetchall()
+    }
+
+    new_columns = {
+        "position_group_id": "TEXT",
+        "copied_from_trade_id": "TEXT",
+        "copy_group_id": "TEXT"
+    }
+
+    for column_name, column_type in new_columns.items():
+        if column_name not in existing_columns:
+            connection.execute(
+                f"ALTER TABLE trades ADD COLUMN "
+                f"{column_name} {column_type}"
+            )
+
+
 def init_db():
-    """Create the TaimoBot paper-trading tables."""
+    """Create tables and safely migrate existing paper-trading data."""
+
     with get_connection() as connection:
         connection.executescript(
             """
@@ -87,11 +112,50 @@ def init_db():
                     REFERENCES paper_accounts(account_id)
             );
 
+            CREATE TABLE IF NOT EXISTS position_groups (
+                group_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL
+                    CHECK (side IN ('BUY', 'SELL')),
+                status TEXT NOT NULL DEFAULT 'OPEN'
+                    CHECK (status IN ('OPEN', 'CLOSED')),
+                created_at TEXT NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+                closed_at TEXT,
+
+                FOREIGN KEY (account_id)
+                    REFERENCES paper_accounts(account_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_trades_account
                 ON trades(account_id);
 
             CREATE INDEX IF NOT EXISTS idx_trades_status
                 ON trades(status);
+            """
+        )
+
+        migrate_trade_columns(connection)
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trades_position_group
+            ON trades(position_group_id)
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trades_copy_group
+            ON trades(copy_group_id)
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_position_groups_account
+            ON position_groups(account_id)
             """
         )
 
