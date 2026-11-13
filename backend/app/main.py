@@ -1,0 +1,168 @@
+
+from contextlib import asynccontextmanager
+from typing import Literal
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from .database import init_db
+from .risk import calculate_position_size, RiskError
+from .execution import (
+    create_paper_account,
+    open_paper_trade,
+    close_paper_trade
+)
+from .history import (
+    get_account_history,
+    get_trade_history
+)
+from .safety import (
+    activate_emergency_stop,
+    deactivate_emergency_stop,
+    is_emergency_stop_active
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(
+    title="TaimoBot API",
+    description="Paper trading backend for TaimoBot",
+    version="0.4.0",
+    lifespan=lifespan
+)
+
+
+class RiskPreviewRequest(BaseModel):
+    account_balance: float = Field(gt=0)
+    entry_price: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    risk_percent: float = Field(gt=0, le=1.0)
+    side: Literal["BUY", "SELL"]
+
+
+class AccountRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=100)
+    starting_balance: float = Field(gt=0)
+
+
+class TradeRequest(BaseModel):
+    account_id: str
+    client_order_id: str = Field(min_length=1, max_length=100)
+    side: Literal["BUY", "SELL"]
+    entry_price: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    risk_percent: float = Field(gt=0, le=1.0)
+    take_profit: float | None = Field(default=None, gt=0)
+
+
+class CloseTradeRequest(BaseModel):
+    exit_price: float = Field(gt=0)
+
+
+@app.get("/")
+def home():
+    return {
+        "application": "TaimoBot",
+        "status": "running",
+        "mode": "paper_trading",
+        "market": "XAUUSD",
+        "timezone": "Africa/Johannesburg"
+    }
+
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "api": "TaimoBot",
+        "trading_mode": "paper"
+    }
+
+
+@app.get("/safety/status")
+def safety_status():
+    active = is_emergency_stop_active()
+    return {
+        "emergency_stop": active,
+        "new_orders_allowed": not active
+    }
+
+
+@app.post("/safety/emergency-stop")
+def emergency_stop():
+    return activate_emergency_stop()
+
+
+@app.post("/safety/resume")
+def resume_trading():
+    return deactivate_emergency_stop()
+
+
+@app.post("/risk/preview")
+def risk_preview(request: RiskPreviewRequest):
+    try:
+        return calculate_position_size(
+            account_balance=request.account_balance,
+            entry_price=request.entry_price,
+            stop_loss=request.stop_loss,
+            risk_percent=request.risk_percent,
+            side=request.side
+        )
+    except RiskError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+
+
+@app.post("/accounts")
+def create_account(request: AccountRequest):
+    try:
+        return create_paper_account(
+            request.account_id,
+            request.starting_balance
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.get("/accounts/{account_id}")
+def account_history(account_id: str):
+    try:
+        return get_account_history(account_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.get("/accounts/{account_id}/trades")
+def trade_history(account_id: str, limit: int = 50):
+    try:
+        return get_trade_history(account_id, limit)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.post("/trades")
+def create_trade(request: TradeRequest):
+    try:
+        return open_paper_trade(
+            account_id=request.account_id,
+            client_order_id=request.client_order_id,
+            side=request.side,
+            entry_price=request.entry_price,
+            stop_loss=request.stop_loss,
+            risk_percent=request.risk_percent,
+            take_profit=request.take_profit
+        )
+    except (ValueError, RuntimeError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.post("/trades/{trade_id}/close")
+def close_trade(trade_id: str, request: CloseTradeRequest):
+    try:
+        return close_paper_trade(trade_id, request.exit_price)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
