@@ -714,3 +714,160 @@ def close_position_group(group_id, exit_price):
         ),
         "mode": "paper_trading"
     }
+
+
+def create_copy_relationship(follower_account_id, source_account_id):
+    """Create a follower-to-source relationship for paper trading."""
+    follower_id = str(follower_account_id).strip()
+    source_id = str(source_account_id).strip()
+
+    if not follower_id or not source_id:
+        raise ValueError("Follower and source account IDs are required.")
+
+    if follower_id == source_id:
+        raise ValueError("An account cannot follow itself.")
+
+    relationship_id = str(uuid.uuid4())
+
+    with transaction() as connection:
+        accounts = connection.execute(
+            """
+            SELECT account_id
+            FROM paper_accounts
+            WHERE account_id IN (?, ?)
+            """,
+            (follower_id, source_id)
+        ).fetchall()
+
+        if len(accounts) != 2:
+            raise ValueError("Source or follower paper account not found.")
+
+        existing = connection.execute(
+            """
+            SELECT relationship_id
+            FROM copy_relationships
+            WHERE source_account_id = ?
+              AND follower_account_id = ?
+            """,
+            (source_id, follower_id)
+        ).fetchone()
+
+        if existing:
+            raise ValueError("Copy relationship already exists.")
+
+        connection.execute(
+            """
+            INSERT INTO copy_relationships (
+                relationship_id,
+                source_account_id,
+                follower_account_id,
+                status
+            )
+            VALUES (?, ?, ?, 'ACTIVE')
+            """,
+            (relationship_id, source_id, follower_id)
+        )
+
+    return {
+        "relationship_id": relationship_id,
+        "source_account_id": source_id,
+        "follower_account_id": follower_id,
+        "status": "ACTIVE",
+        "mode": "paper_trading"
+    }
+
+
+def get_copy_relationships(follower_account_id):
+    """List copy relationships owned by a follower account."""
+    follower_id = str(follower_account_id).strip()
+
+    if not follower_id:
+        raise ValueError("Follower account ID is required.")
+
+    with get_connection() as connection:
+        account = connection.execute(
+            """
+            SELECT account_id
+            FROM paper_accounts
+            WHERE account_id = ?
+            """,
+            (follower_id,)
+        ).fetchone()
+
+        if account is None:
+            raise ValueError("Follower paper account not found.")
+
+        rows = connection.execute(
+            """
+            SELECT
+                relationship_id,
+                source_account_id,
+                follower_account_id,
+                status,
+                created_at,
+                updated_at
+            FROM copy_relationships
+            WHERE follower_account_id = ?
+            ORDER BY created_at DESC, relationship_id
+            """,
+            (follower_id,)
+        ).fetchall()
+
+    return {
+        "follower_account_id": follower_id,
+        "relationships": [dict(row) for row in rows],
+        "count": len(rows),
+        "mode": "paper_trading"
+    }
+
+
+def update_copy_relationship_status(relationship_id, new_status):
+    """Pause, resume, or permanently stop a copy relationship."""
+    relationship_id = str(relationship_id).strip()
+    target = str(new_status).strip().upper()
+
+    if not relationship_id:
+        raise ValueError("Copy relationship ID is required.")
+
+    if target not in ("ACTIVE", "PAUSED", "STOPPED"):
+        raise ValueError("Invalid copy relationship status.")
+
+    with transaction() as connection:
+        relationship = connection.execute(
+            """
+            SELECT *
+            FROM copy_relationships
+            WHERE relationship_id = ?
+            """,
+            (relationship_id,)
+        ).fetchone()
+
+        if relationship is None:
+            raise ValueError("Copy relationship not found.")
+
+        current = relationship["status"]
+
+        if current == "STOPPED":
+            raise ValueError("A stopped copy relationship cannot be changed.")
+
+        if current == target:
+            raise ValueError("Copy relationship is already in that status.")
+
+        connection.execute(
+            """
+            UPDATE copy_relationships
+            SET status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE relationship_id = ?
+            """,
+            (target, relationship_id)
+        )
+
+    return {
+        "relationship_id": relationship_id,
+        "source_account_id": relationship["source_account_id"],
+        "follower_account_id": relationship["follower_account_id"],
+        "previous_status": current,
+        "status": target,
+        "mode": "paper_trading"
+    }
+
