@@ -5,12 +5,13 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .database import init_db
-from .risk import calculate_position_size, RiskError
+from .database import init_db, get_connection
+from .risk import calculate_position_size, RiskError, MAX_RISK_PERCENT
 from .execution import (
     create_paper_account,
     open_paper_trade,
-    close_paper_trade
+    close_paper_trade,
+    get_open_risk
 )
 from .history import (
     get_account_history,
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TaimoBot API",
     description="Paper trading backend for TaimoBot",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan
 )
 
@@ -87,6 +88,7 @@ def health_check():
 @app.get("/safety/status")
 def safety_status():
     active = is_emergency_stop_active()
+
     return {
         "emergency_stop": active,
         "new_orders_allowed": not active
@@ -115,6 +117,58 @@ def risk_preview(request: RiskPreviewRequest):
         )
     except RiskError as error:
         raise HTTPException(status_code=422, detail=str(error))
+
+
+@app.get("/accounts/{account_id}/risk")
+def account_risk_status(account_id: str):
+    connection = get_connection()
+
+    try:
+        account = connection.execute(
+            """
+            SELECT balance
+            FROM paper_accounts
+            WHERE account_id = ?
+            """,
+            (account_id,)
+        ).fetchone()
+
+        if account is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Paper account not found."
+            )
+
+        balance = float(account["balance"])
+        open_risk = get_open_risk(connection, account_id)
+
+        maximum_risk = balance * (MAX_RISK_PERCENT / 100)
+        remaining_risk = max(0.0, maximum_risk - open_risk)
+
+        open_positions = connection.execute(
+            """
+            SELECT COUNT(*) AS position_count
+            FROM trades
+            WHERE account_id = ?
+              AND status = 'OPEN'
+            """,
+            (account_id,)
+        ).fetchone()
+
+        return {
+            "account_id": account_id,
+            "account_balance": round(balance, 2),
+            "open_positions": open_positions["position_count"],
+            "current_open_risk": round(open_risk, 2),
+            "maximum_risk_percent": MAX_RISK_PERCENT,
+            "maximum_risk_amount": round(maximum_risk, 2),
+            "remaining_risk_budget": round(remaining_risk, 2),
+            "risk_limit_reached": open_risk >= maximum_risk,
+            "mode": "paper_trading"
+        }
+
+    finally:
+        connection.close()
 
 
 @app.post("/accounts")
