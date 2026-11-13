@@ -1,10 +1,12 @@
 
-
 import uuid
 from contextlib import contextmanager
 
 from .database import get_connection
-from .risk import calculate_position_size, validate_positive_number
+from .risk import (
+    calculate_position_size,
+    validate_positive_number
+)
 from .safety import require_trading_enabled
 
 
@@ -26,6 +28,7 @@ def transaction():
 
 def create_paper_account(account_id, starting_balance):
     account_id = str(account_id).strip()
+
     balance = validate_positive_number(
         starting_balance, "Starting balance"
     )
@@ -35,7 +38,11 @@ def create_paper_account(account_id, starting_balance):
 
     with transaction() as connection:
         existing = connection.execute(
-            "SELECT account_id FROM paper_accounts WHERE account_id = ?",
+            """
+            SELECT account_id
+            FROM paper_accounts
+            WHERE account_id = ?
+            """,
             (account_id,)
         ).fetchone()
 
@@ -59,6 +66,22 @@ def create_paper_account(account_id, starting_balance):
     }
 
 
+def get_open_risk(connection, account_id):
+    """Calculate total allocated risk of all OPEN positions."""
+
+    result = connection.execute(
+        """
+        SELECT COALESCE(SUM(risk_amount), 0) AS total_open_risk
+        FROM trades
+        WHERE account_id = ?
+          AND status = 'OPEN'
+        """,
+        (account_id,)
+    ).fetchone()
+
+    return float(result["total_open_risk"])
+
+
 def open_paper_trade(
     account_id,
     client_order_id,
@@ -80,8 +103,12 @@ def open_paper_trade(
     if side not in ("BUY", "SELL"):
         raise ValueError("Side must be BUY or SELL.")
 
-    entry = validate_positive_number(entry_price, "Entry price")
-    stop = validate_positive_number(stop_loss, "Stop loss")
+    entry = validate_positive_number(
+        entry_price, "Entry price"
+    )
+    stop = validate_positive_number(
+        stop_loss, "Stop loss"
+    )
 
     target = None
 
@@ -91,23 +118,35 @@ def open_paper_trade(
         )
 
         if side == "BUY" and target <= entry:
-            raise ValueError("BUY take profit must be above entry.")
+            raise ValueError(
+                "BUY take profit must be above entry."
+            )
 
         if side == "SELL" and target >= entry:
-            raise ValueError("SELL take profit must be below entry.")
+            raise ValueError(
+                "SELL take profit must be below entry."
+            )
 
     with transaction() as connection:
+
         duplicate = connection.execute(
-            "SELECT trade_id FROM trades WHERE client_order_id = ?",
+            """
+            SELECT trade_id
+            FROM trades
+            WHERE client_order_id = ?
+            """,
             (client_order_id,)
         ).fetchone()
 
         if duplicate:
-            raise ValueError("Duplicate order ID. Trade not opened.")
+            raise ValueError(
+                "Duplicate order ID. Trade not opened."
+            )
 
         account = connection.execute(
             """
-            SELECT balance FROM paper_accounts
+            SELECT balance
+            FROM paper_accounts
             WHERE account_id = ?
             """,
             (account_id,)
@@ -116,12 +155,17 @@ def open_paper_trade(
         if account is None:
             raise ValueError("Paper account not found.")
 
+        current_open_risk = get_open_risk(
+            connection, account_id
+        )
+
         risk = calculate_position_size(
             account_balance=account["balance"],
             entry_price=entry,
             stop_loss=stop,
             risk_percent=risk_percent,
-            side=side
+            side=side,
+            current_open_risk=current_open_risk
         )
 
         trade_id = str(uuid.uuid4())
@@ -142,7 +186,10 @@ def open_paper_trade(
                 risk_amount,
                 opened_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, CURRENT_TIMESTAMP)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                'OPEN', ?, CURRENT_TIMESTAMP
+            )
             """,
             (
                 trade_id,
@@ -169,6 +216,10 @@ def open_paper_trade(
         "stop_loss": stop,
         "take_profit": target,
         "risk_amount": risk["risk_amount"],
+        "current_open_risk": risk["current_open_risk"],
+        "total_open_risk": risk["projected_total_open_risk"],
+        "remaining_risk": risk["remaining_risk_after_trade"],
+        "maximum_risk_percent": risk["maximum_risk_percent"],
         "status": "OPEN",
         "mode": "paper_trading"
     }
@@ -176,6 +227,7 @@ def open_paper_trade(
 
 def close_paper_trade(trade_id, exit_price):
     trade_id = str(trade_id).strip()
+
     exit_value = validate_positive_number(
         exit_price, "Exit price"
     )
@@ -184,9 +236,11 @@ def close_paper_trade(trade_id, exit_price):
         raise ValueError("Trade ID is required.")
 
     with transaction() as connection:
+
         trade = connection.execute(
             """
-            SELECT * FROM trades
+            SELECT *
+            FROM trades
             WHERE trade_id = ?
             """,
             (trade_id,)
@@ -196,7 +250,9 @@ def close_paper_trade(trade_id, exit_price):
             raise ValueError("Trade not found.")
 
         if trade["status"] != "OPEN":
-            raise ValueError("Only open trades can be closed.")
+            raise ValueError(
+                "Only open trades can be closed."
+            )
 
         if trade["side"] == "BUY":
             pnl = (
@@ -209,7 +265,8 @@ def close_paper_trade(trade_id, exit_price):
 
         account = connection.execute(
             """
-            SELECT balance FROM paper_accounts
+            SELECT balance
+            FROM paper_accounts
             WHERE account_id = ?
             """,
             (trade["account_id"],)
@@ -237,9 +294,14 @@ def close_paper_trade(trade_id, exit_price):
             SET status = 'CLOSED',
                 realized_pnl = ?,
                 closed_at = CURRENT_TIMESTAMP
-            WHERE trade_id = ? AND status = 'OPEN'
+            WHERE trade_id = ?
+              AND status = 'OPEN'
             """,
             (pnl, trade_id)
+        )
+
+        remaining_open_risk = get_open_risk(
+            connection, trade["account_id"]
         )
 
     return {
@@ -248,5 +310,8 @@ def close_paper_trade(trade_id, exit_price):
         "exit_price": exit_value,
         "realized_pnl": round(pnl, 2),
         "new_balance": round(new_balance, 2),
+        "remaining_open_risk": round(
+            remaining_open_risk, 2
+        ),
         "mode": "paper_trading"
     }
