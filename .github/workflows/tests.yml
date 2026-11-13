@@ -17,19 +17,7 @@ jobs:
 
     steps:
       - name: Get repository code
-        uses: action/checkout@v4- name: Start FastAPI and test health endpoint
-        run: |
-          uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/taimobot-api.log 2>&1 &
-
-          for i in {1..10}; do
-            if curl -fsS http://127.0.0.1:8000/health; then
-              exit 0
-            fi
-            sleep 2
-          done
-
-          cat /tmp/taimobot-api.log
-          exit 1
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,3 +32,17 @@ jobs:
 
       - name: Verify FastAPI application
         run: python -c "from app.main import app; print(app.title)"
+
+      - name: Start FastAPI and test health endpoint
+        run: |
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/taimobot-api.log 2>&1 &
+
+          for i in {1..10}; do
+            if curl -fsS http://127.0.0.1:8000/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat /tmp/taimobot-api.log
+          exit 1
