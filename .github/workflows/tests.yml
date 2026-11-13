@@ -1,4 +1,4 @@
-
+⁹
 name: TaimoBot backend tests
 
 on:
@@ -28,3 +28,8 @@ jobs:
 
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
+              - name: Run backend tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Verify FastAPI application
+        run: python -c "from app.main import app; print(app.title)"
