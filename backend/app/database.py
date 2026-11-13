@@ -4,16 +4,32 @@ import sqlite3
 from pathlib import Path
 
 
-# Database location
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "taimobot.db"
 DB_PATH = Path(os.getenv("TAIMOBOT_DB_PATH", str(DEFAULT_DB_PATH)))
 
 
+class ClosingConnection(sqlite3.Connection):
+    """SQLite connection that closes after a context-manager block."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(
+                exc_type, exc_value, traceback
+            )
+        finally:
+            self.close()
+
+
 def get_connection():
-    """Create a database connection."""
+    """Create a database connection with safe defaults."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(DB_PATH, timeout=30)
+    connection = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+        factory=ClosingConnection
+    )
+
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 30000")
@@ -28,9 +44,12 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS paper_accounts (
                 account_id TEXT PRIMARY KEY,
-                starting_balance REAL NOT NULL CHECK (starting_balance > 0),
-                balance REAL NOT NULL CHECK (balance >= 0),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                starting_balance REAL NOT NULL
+                    CHECK (starting_balance > 0),
+                balance REAL NOT NULL
+                    CHECK (balance >= 0),
+                created_at TEXT NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS trades (
@@ -40,9 +59,12 @@ def init_db():
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL
                     CHECK (side IN ('BUY', 'SELL')),
-                quantity REAL NOT NULL CHECK (quantity > 0),
-                entry_price REAL NOT NULL CHECK (entry_price > 0),
-                stop_loss REAL NOT NULL CHECK (stop_loss > 0),
+                quantity REAL NOT NULL
+                    CHECK (quantity > 0),
+                entry_price REAL NOT NULL
+                    CHECK (entry_price > 0),
+                stop_loss REAL NOT NULL
+                    CHECK (stop_loss > 0),
                 take_profit REAL,
                 status TEXT NOT NULL DEFAULT 'PENDING'
                     CHECK (
@@ -53,11 +75,13 @@ def init_db():
                             'REJECTED'
                         )
                     ),
-                risk_amount REAL NOT NULL CHECK (risk_amount >= 0),
+                risk_amount REAL NOT NULL
+                    CHECK (risk_amount >= 0),
                 realized_pnl REAL NOT NULL DEFAULT 0,
                 opened_at TEXT,
                 closed_at TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TEXT NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
 
                 FOREIGN KEY (account_id)
                     REFERENCES paper_accounts(account_id)
