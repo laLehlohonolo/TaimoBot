@@ -1,4 +1,3 @@
-
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -13,6 +12,9 @@ from .risk import (
 )
 from .execution import (
     create_paper_account,
+    create_position_group,
+    get_position_group,
+    close_position_group,
     open_paper_trade,
     close_paper_trade,
     get_open_risk,
@@ -39,7 +41,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TaimoBot API",
     description="Multi-instrument paper trading backend for TaimoBot",
-    version="0.6.0",
+    version="0.7.0",
     lifespan=lifespan
 )
 
@@ -57,6 +59,16 @@ class AccountRequest(BaseModel):
     starting_balance: float = Field(gt=0)
 
 
+class PositionGroupRequest(BaseModel):
+    symbol: str = Field(
+        default=DEFAULT_SYMBOL,
+        min_length=1,
+        max_length=30,
+        pattern=r"^[A-Za-z0-9._/-]+$"
+    )
+    side: Literal["BUY", "SELL"]
+
+
 class TradeRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=100)
     client_order_id: str = Field(min_length=1, max_length=100)
@@ -71,9 +83,18 @@ class TradeRequest(BaseModel):
     stop_loss: float = Field(gt=0)
     risk_percent: float = Field(gt=0, le=1.0)
     take_profit: float | None = Field(default=None, gt=0)
+    position_group_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100
+    )
 
 
 class CloseTradeRequest(BaseModel):
+    exit_price: float = Field(gt=0)
+
+
+class CloseGroupRequest(BaseModel):
     exit_price: float = Field(gt=0)
 
 
@@ -129,7 +150,10 @@ def risk_preview(request: RiskPreviewRequest):
             side=request.side
         )
     except RiskError as error:
-        raise HTTPException(status_code=422, detail=str(error))
+        raise HTTPException(
+            status_code=422,
+            detail=str(error)
+        )
 
 
 @app.get("/accounts/{account_id}/risk")
@@ -192,7 +216,10 @@ def create_account(request: AccountRequest):
             request.starting_balance
         )
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
 
 
 @app.get("/accounts/{account_id}")
@@ -200,7 +227,10 @@ def account_history(account_id: str):
     try:
         return get_account_history(account_id)
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error))
+        raise HTTPException(
+            status_code=404,
+            detail=str(error)
+        )
 
 
 @app.get("/accounts/{account_id}/trades")
@@ -208,7 +238,62 @@ def trade_history(account_id: str, limit: int = 50):
     try:
         return get_trade_history(account_id, limit)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
+
+
+@app.post("/accounts/{account_id}/groups")
+def create_group(
+    account_id: str,
+    request: PositionGroupRequest
+):
+    try:
+        symbol = validate_symbol(request.symbol)
+
+        return create_position_group(
+            account_id=account_id,
+            symbol=symbol,
+            side=request.side
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
+
+
+@app.get("/groups/{group_id}")
+def group_details(group_id: str):
+    try:
+        return get_position_group(group_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404,
+            detail=str(error)
+        )
+
+
+@app.post("/groups/{group_id}/close")
+def close_group(
+    group_id: str,
+    request: CloseGroupRequest
+):
+    try:
+        return close_position_group(
+            group_id=group_id,
+            exit_price=request.exit_price
+        )
+    except ValueError as error:
+        status_code = (
+            404 if "not found" in str(error).lower()
+            else 400
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail=str(error)
+        )
 
 
 @app.post("/trades")
@@ -224,17 +309,33 @@ def create_trade(request: TradeRequest):
             stop_loss=request.stop_loss,
             risk_percent=request.risk_percent,
             take_profit=request.take_profit,
-            symbol=symbol
+            symbol=symbol,
+            position_group_id=request.position_group_id
         )
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
     except RuntimeError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
 
 
 @app.post("/trades/{trade_id}/close")
-def close_trade(trade_id: str, request: CloseTradeRequest):
+def close_trade(
+    trade_id: str,
+    request: CloseTradeRequest
+):
     try:
-        return close_paper_trade(trade_id, request.exit_price)
+        return close_paper_trade(
+            trade_id,
+            request.exit_price
+        )
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+    )
