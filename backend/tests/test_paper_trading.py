@@ -1,4 +1,5 @@
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -289,6 +290,102 @@ class PaperTradingTests(unittest.TestCase):
 
         self.assertEqual(result["symbol"], "GBPUSD")
         self.assertEqual(result["status"], "CLOSED")
+
+    def test_legacy_database_migration_preserves_existing_trades(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy.db"
+        database.DB_PATH = legacy_path
+
+        with sqlite3.connect(legacy_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE paper_accounts (
+                    account_id TEXT PRIMARY KEY,
+                    starting_balance REAL NOT NULL,
+                    balance REAL NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE trades (
+                    trade_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL UNIQUE,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    stop_loss REAL NOT NULL,
+                    take_profit REAL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    risk_amount REAL NOT NULL,
+                    realized_pnl REAL NOT NULL DEFAULT 0,
+                    opened_at TEXT,
+                    closed_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (account_id)
+                        REFERENCES paper_accounts(account_id)
+                );
+
+                INSERT INTO paper_accounts (
+                    account_id, starting_balance, balance
+                ) VALUES ('LEGACY-001', 10000, 10000);
+
+                INSERT INTO trades (
+                    trade_id, account_id, client_order_id,
+                    symbol, side, quantity, entry_price,
+                    stop_loss, status, risk_amount
+                ) VALUES (
+                    'OLD-TRADE-001', 'LEGACY-001', 'OLD-ORDER-001',
+                    'XAUUSD', 'BUY', 10, 4000,
+                    3990, 'OPEN', 100
+                );
+                """
+            )
+
+        # First migration adds the new structure.
+        init_db()
+
+        # Second migration must be safe and repeatable.
+        init_db()
+
+        with database.get_connection() as connection:
+            trade = connection.execute(
+                """
+                SELECT trade_id, account_id, symbol, status,
+                       position_group_id, copied_from_trade_id,
+                       copy_group_id
+                FROM trades
+                WHERE trade_id = ?
+                """,
+                ("OLD-TRADE-001",)
+            ).fetchone()
+
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(trades)"
+                ).fetchall()
+            }
+
+            group_table = connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'position_groups'
+                """
+            ).fetchone()
+
+        self.assertIsNotNone(trade)
+        self.assertEqual(trade["account_id"], "LEGACY-001")
+        self.assertEqual(trade["symbol"], "XAUUSD")
+        self.assertEqual(trade["status"], "OPEN")
+        self.assertIsNone(trade["position_group_id"])
+        self.assertIsNone(trade["copied_from_trade_id"])
+        self.assertIsNone(trade["copy_group_id"])
+
+        self.assertIn("position_group_id", columns)
+        self.assertIn("copied_from_trade_id", columns)
+        self.assertIn("copy_group_id", columns)
+        self.assertIsNotNone(group_table)
 
 
 if __name__ == "__main__":
