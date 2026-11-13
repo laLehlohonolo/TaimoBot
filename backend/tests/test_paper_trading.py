@@ -3,8 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from app import database
 from app.database import init_db
+from app.main import app
 from app.execution import (
     create_paper_account,
     open_paper_trade,
@@ -31,7 +34,10 @@ class PaperTradingTests(unittest.TestCase):
         init_db()
         create_paper_account("TEST-001", 10000)
 
+        self.client = TestClient(app)
+
     def tearDown(self):
+        self.client.close()
         deactivate_emergency_stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
@@ -167,6 +173,44 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(
             second_account_trade["total_open_risk"], 100
         )
+
+    def test_account_risk_endpoint_reports_open_risk(self):
+        self.open_trade("ORDER-API-001", 0.5)
+        self.open_trade("ORDER-API-002", 0.5)
+
+        response = self.client.get("/accounts/TEST-001/risk")
+
+        self.assertEqual(response.status_code, 200)
+
+        result = response.json()
+
+        self.assertEqual(result["account_id"], "TEST-001")
+        self.assertEqual(result["account_balance"], 10000)
+        self.assertEqual(result["open_positions"], 2)
+        self.assertEqual(result["current_open_risk"], 100)
+        self.assertEqual(result["maximum_risk_percent"], 1.0)
+        self.assertEqual(result["maximum_risk_amount"], 100)
+        self.assertEqual(result["remaining_risk_budget"], 0)
+        self.assertTrue(result["risk_limit_reached"])
+
+    def test_account_risk_endpoint_reports_unused_budget(self):
+        self.open_trade("ORDER-API-003", 0.25)
+
+        response = self.client.get("/accounts/TEST-001/risk")
+
+        self.assertEqual(response.status_code, 200)
+
+        result = response.json()
+
+        self.assertEqual(result["open_positions"], 1)
+        self.assertEqual(result["current_open_risk"], 25)
+        self.assertEqual(result["remaining_risk_budget"], 75)
+        self.assertFalse(result["risk_limit_reached"])
+
+    def test_account_risk_endpoint_rejects_unknown_account(self):
+        response = self.client.get("/accounts/UNKNOWN/risk")
+
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":
