@@ -128,15 +128,16 @@ class CopyTradeReplicationTests(unittest.TestCase):
 
     def test_follower_risk_rejection_is_recorded_without_affecting_source(self):
         # Consume the follower's full combined risk budget first.
-        open_paper_trade(
-            account_id="FOLLOWER",
-            client_order_id="FOLLOWER-EXISTING",
-            side="BUY",
-            entry_price=4000,
-            stop_loss=3990,
-            risk_percent=1,
-            symbol="EURUSD"
-        )
+        for number, symbol in enumerate(("EURUSD", "GBPUSD"), start=1):
+            open_paper_trade(
+                account_id="FOLLOWER",
+                client_order_id=f"FOLLOWER-EXISTING-{number}",
+                side="BUY",
+                entry_price=4000,
+                stop_loss=3990,
+                risk_percent=1,
+                symbol=symbol
+            )
         source = self.create_source_trade()
         result = replicate_open_trade(source["trade_id"])
 
