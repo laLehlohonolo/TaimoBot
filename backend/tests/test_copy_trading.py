@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.app import database
+from app import database
 
 
 class CopyTradingDatabaseTests(unittest.TestCase):
