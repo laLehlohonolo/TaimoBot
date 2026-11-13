@@ -159,6 +159,55 @@ def init_db():
                     REFERENCES paper_accounts(account_id)
             );
 
+            CREATE TABLE IF NOT EXISTS copy_relationships (
+                relationship_id TEXT PRIMARY KEY,
+                source_account_id TEXT NOT NULL,
+                follower_account_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE'
+                    CHECK (status IN ('ACTIVE', 'PAUSED', 'STOPPED')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK (source_account_id <> follower_account_id),
+                UNIQUE (source_account_id, follower_account_id),
+                FOREIGN KEY (source_account_id)
+                    REFERENCES paper_accounts(account_id),
+                FOREIGN KEY (follower_account_id)
+                    REFERENCES paper_accounts(account_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS copy_executions (
+                copy_execution_id TEXT PRIMARY KEY,
+                relationship_id TEXT NOT NULL,
+                source_trade_id TEXT NOT NULL,
+                copied_trade_id TEXT,
+                status TEXT NOT NULL DEFAULT 'PENDING'
+                    CHECK (
+                        status IN ('PENDING', 'COPIED', 'FAILED', 'CLOSED')
+                    ),
+                failure_reason TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (relationship_id, source_trade_id),
+                FOREIGN KEY (relationship_id)
+                    REFERENCES copy_relationships(relationship_id),
+                FOREIGN KEY (source_trade_id)
+                    REFERENCES trades(trade_id),
+                FOREIGN KEY (copied_trade_id)
+                    REFERENCES trades(trade_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_copy_relationships_source
+                ON copy_relationships(source_account_id, status);
+
+            CREATE INDEX IF NOT EXISTS idx_copy_relationships_follower
+                ON copy_relationships(follower_account_id, status);
+
+            CREATE INDEX IF NOT EXISTS idx_copy_executions_source_trade
+                ON copy_executions(source_trade_id);
+
+            CREATE INDEX IF NOT EXISTS idx_copy_executions_copied_trade
+                ON copy_executions(copied_trade_id);
+
             CREATE INDEX IF NOT EXISTS idx_trades_account
                 ON trades(account_id);
 
