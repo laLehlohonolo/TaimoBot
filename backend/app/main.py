@@ -322,8 +322,8 @@ def create_trade(request: TradeRequest):
         )
 
         # Copy attempts are isolated per follower and never undo the source trade.
-        trade["copy_summary"] = replicate_open_trade(trade["trade_id"])
-        return trade
+        copy_summary = replicate_open_trade(trade["trade_id"])
+        return {**trade, "copy_summary": copy_summary}
     except ValueError as error:
         raise HTTPException(
             status_code=400,
