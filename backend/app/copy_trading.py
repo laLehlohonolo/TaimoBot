@@ -1,7 +1,8 @@
 import uuid
 
 from .database import get_connection
-from .execution import open_paper_trade, transaction
+from .execution import open_paper_trade, transaction, get_open_risk
+from .risk import get_risk_profile, MAX_RISK_PERCENT
 
 
 def replicate_open_trade(source_trade_id):
@@ -15,11 +16,7 @@ def replicate_open_trade(source_trade_id):
 
     with get_connection() as connection:
         source = connection.execute(
-            """
-            SELECT *
-            FROM trades
-            WHERE trade_id = ?
-            """,
+            "SELECT * FROM trades WHERE trade_id = ?",
             (source_trade_id,)
         ).fetchone()
 
@@ -31,6 +28,9 @@ def replicate_open_trade(source_trade_id):
                 "source_trade_id": source_trade_id,
                 "status": "SKIPPED",
                 "reason": "Copied trades cannot trigger further copies.",
+                "eligible_followers": 0,
+                "successful_copies": 0,
+                "failed_copies": 0,
                 "copies": [],
                 "mode": "paper_trading"
             }
@@ -42,21 +42,16 @@ def replicate_open_trade(source_trade_id):
             """
             SELECT relationship_id, follower_account_id
             FROM copy_relationships
-            WHERE source_account_id = ?
-              AND status = 'ACTIVE'
+            WHERE source_account_id = ? AND status = 'ACTIVE'
             ORDER BY created_at, relationship_id
             """,
             (source["account_id"],)
         ).fetchall()
 
-    results = []
-    for relationship in relationships:
-        results.append(
-            _copy_for_relationship(
-                dict(relationship),
-                dict(source)
-            )
-        )
+    results = [
+        _copy_for_relationship(dict(relationship), dict(source))
+        for relationship in relationships
+    ]
 
     return {
         "source_trade_id": source_trade_id,
@@ -78,7 +73,7 @@ def _copy_for_relationship(relationship, source):
     source_trade_id = source["trade_id"]
     order_id = f"COPY-{relationship_id}-{source_trade_id}"
 
-    # Reserve the unique relationship/source pair before attempting a copy.
+    # The unique relationship/source row is the idempotency record.
     with transaction() as connection:
         current = connection.execute(
             """
@@ -89,33 +84,60 @@ def _copy_for_relationship(relationship, source):
             (relationship_id, source_trade_id)
         ).fetchone()
 
-        if current and current["status"] in ("COPIED", "FAILED", "CLOSED"):
+        if current is not None:
+            stored_status = current["status"]
             return {
                 "relationship_id": relationship_id,
                 "follower_account_id": follower_id,
-                "status": current["status"],
+                "status": (
+                    "DUPLICATE" if stored_status == "COPIED"
+                    else stored_status
+                ),
                 "copied_trade_id": current["copied_trade_id"],
                 "failure_reason": current["failure_reason"],
                 "duplicate_prevented": True
             }
 
-        if current is None:
-            execution_id = str(uuid.uuid4())
-            connection.execute(
-                """
-                INSERT INTO copy_executions (
-                    copy_execution_id, relationship_id,
-                    source_trade_id, status
-                )
-                VALUES (?, ?, ?, 'PENDING')
-                """,
-                (execution_id, relationship_id, source_trade_id)
+        execution_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO copy_executions (
+                copy_execution_id, relationship_id,
+                source_trade_id, status
             )
+            VALUES (?, ?, ?, 'PENDING')
+            """,
+            (execution_id, relationship_id, source_trade_id)
+        )
 
     try:
-        # Recover safely if a previous attempt opened the trade but did not
-        # finish updating the copy-execution record.
+        # Reject before opening if the follower's own combined risk budget
+        # cannot accommodate its assigned per-trade allocation.
         with get_connection() as connection:
+            account = connection.execute(
+                """
+                SELECT balance, starting_balance
+                FROM paper_accounts
+                WHERE account_id = ?
+                """,
+                (follower_id,)
+            ).fetchone()
+
+            if account is None:
+                raise ValueError("Follower paper account not found.")
+
+            balance = float(account["balance"])
+            profile = get_risk_profile(account["starting_balance"])
+            current_open_risk = get_open_risk(connection, follower_id)
+            requested_risk = balance * profile["risk_percent"] / 100
+            maximum_risk = balance * MAX_RISK_PERCENT / 100
+
+            if current_open_risk + requested_risk > maximum_risk + 1e-9:
+                raise ValueError(
+                    "Copy rejected: follower's combined open risk "
+                    "would exceed the 1% account maximum."
+                )
+
             existing_trade = connection.execute(
                 """
                 SELECT trade_id
@@ -144,8 +166,7 @@ def _copy_for_relationship(relationship, source):
                 """
                 UPDATE trades
                 SET copied_from_trade_id = ?
-                WHERE trade_id = ?
-                  AND account_id = ?
+                WHERE trade_id = ? AND account_id = ?
                 """,
                 (source_trade_id, copied_trade_id, follower_id)
             )
