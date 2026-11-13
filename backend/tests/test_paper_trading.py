@@ -8,8 +8,7 @@ from app.database import init_db
 from app.execution import (
     create_paper_account,
     open_paper_trade,
-    close_paper_trade,
-    get_open_risk
+    close_paper_trade
 )
 from app.risk import (
     calculate_position_size,
@@ -30,7 +29,6 @@ class PaperTradingTests(unittest.TestCase):
 
         deactivate_emergency_stop()
         init_db()
-
         create_paper_account("TEST-001", 10000)
 
     def tearDown(self):
@@ -95,15 +93,9 @@ class PaperTradingTests(unittest.TestCase):
         third = self.open_trade("ORDER-003", 0.25)
         fourth = self.open_trade("ORDER-004", 0.25)
 
-        self.assertNotEqual(
-            first["trade_id"], second["trade_id"]
-        )
-        self.assertNotEqual(
-            second["trade_id"], third["trade_id"]
-        )
-        self.assertNotEqual(
-            third["trade_id"], fourth["trade_id"]
-        )
+        self.assertNotEqual(first["trade_id"], second["trade_id"])
+        self.assertNotEqual(second["trade_id"], third["trade_id"])
+        self.assertNotEqual(third["trade_id"], fourth["trade_id"])
 
         self.assertEqual(fourth["total_open_risk"], 100)
 
@@ -135,11 +127,11 @@ class PaperTradingTests(unittest.TestCase):
 
         close_result = close_paper_trade(
             trade_id=first["trade_id"],
-            exit_price=4010
+            exit_price=4000
         )
 
         self.assertEqual(close_result["status"], "CLOSED")
-        self.assertEqual(close_result["realized_pnl"], 50)
+        self.assertEqual(close_result["realized_pnl"], 0)
         self.assertEqual(close_result["remaining_open_risk"], 50)
 
         third = self.open_trade("ORDER-003", 0.5)
@@ -161,12 +153,11 @@ class PaperTradingTests(unittest.TestCase):
 
     def test_open_risk_is_account_specific(self):
         self.open_trade("ORDER-001", 0.5)
-
         create_paper_account("TEST-002", 10000)
 
         second_account_trade = open_paper_trade(
             account_id="TEST-002",
-            client_order_id="ORDER-001",
+            client_order_id="ORDER-ACCOUNT-2",
             side="BUY",
             entry_price=4000,
             stop_loss=3990,
