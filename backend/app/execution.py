@@ -1,4 +1,3 @@
-
 import re
 import uuid
 from contextlib import contextmanager
@@ -6,7 +5,8 @@ from contextlib import contextmanager
 from .database import get_connection
 from .risk import (
     calculate_position_size,
-    validate_positive_number
+    validate_positive_number,
+    get_risk_profile
 )
 from .safety import require_trading_enabled
 
@@ -58,6 +58,8 @@ def create_paper_account(account_id, starting_balance):
     if not account_id:
         raise ValueError("Account ID is required.")
 
+    profile = get_risk_profile(balance)
+
     with transaction() as connection:
         existing = connection.execute(
             """
@@ -74,16 +76,29 @@ def create_paper_account(account_id, starting_balance):
         connection.execute(
             """
             INSERT INTO paper_accounts
-            (account_id, starting_balance, balance)
-            VALUES (?, ?, ?)
+            (
+                account_id,
+                starting_balance,
+                balance,
+                risk_profile
+            )
+            VALUES (?, ?, ?, ?)
             """,
-            (account_id, balance, balance)
+            (
+                account_id,
+                balance,
+                balance,
+                profile["profile"]
+            )
         )
 
     return {
         "account_id": account_id,
         "starting_balance": balance,
         "balance": balance,
+        "risk_profile": profile["profile"],
+        "per_trade_risk_percent": profile["risk_percent"],
+        "maximum_combined_risk_percent": 1.0,
         "mode": "paper_trading"
     }
 
@@ -241,11 +256,18 @@ def open_paper_trade(
     side,
     entry_price,
     stop_loss,
-    risk_percent,
+    risk_percent=None,
     take_profit=None,
     symbol=DEFAULT_SYMBOL,
     position_group_id=None
 ):
+    """
+    Open a paper trade using the account's assigned risk profile.
+
+    The supplied risk_percent is deliberately ignored.
+    Participants cannot override their assigned risk allowance.
+    """
+
     account_id = str(account_id).strip()
     client_order_id = str(client_order_id).strip()
     side = str(side).upper().strip()
@@ -306,7 +328,10 @@ def open_paper_trade(
 
         account = connection.execute(
             """
-            SELECT balance
+            SELECT
+                balance,
+                starting_balance,
+                risk_profile
             FROM paper_accounts
             WHERE account_id = ?
             """,
@@ -315,6 +340,18 @@ def open_paper_trade(
 
         if account is None:
             raise ValueError("Paper account not found.")
+
+        assigned_profile = get_risk_profile(
+            account["starting_balance"]
+        )
+
+        if account["risk_profile"] != assigned_profile["profile"]:
+            raise ValueError(
+                "Account risk profile does not match its "
+                "original funding. Account requires review."
+            )
+
+        assigned_risk_percent = assigned_profile["risk_percent"]
 
         if position_group_id is not None:
             group = connection.execute(
@@ -355,7 +392,7 @@ def open_paper_trade(
             account_balance=account["balance"],
             entry_price=entry,
             stop_loss=stop,
-            risk_percent=risk_percent,
+            risk_percent=assigned_risk_percent,
             side=side,
             current_open_risk=current_open_risk
         )
@@ -410,6 +447,8 @@ def open_paper_trade(
         "stop_loss": stop,
         "take_profit": target,
         "position_group_id": position_group_id,
+        "risk_profile": assigned_profile["profile"],
+        "risk_percent": assigned_risk_percent,
         "risk_amount": risk["risk_amount"],
         "current_open_risk": risk["current_open_risk"],
         "total_open_risk": risk["projected_total_open_risk"],
