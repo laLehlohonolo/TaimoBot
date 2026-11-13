@@ -17,6 +17,7 @@ from app.execution import (
 )
 from app.risk import (
     calculate_position_size,
+    get_risk_profile,
     RiskError
 )
 from app.safety import (
@@ -80,6 +81,82 @@ class PaperTradingTests(unittest.TestCase):
                 side="BUY"
             )
 
+    def test_funding_profile_boundaries(self):
+        cases = [
+            (4999.99, "STARTER", 0.25),
+            (5000, "STANDARD", 0.50),
+            (24999.99, "STANDARD", 0.50),
+            (25000, "PREMIUM", 1.00)
+        ]
+
+        for funding, expected_profile, expected_risk in cases:
+            with self.subTest(funding=funding):
+                result = get_risk_profile(funding)
+                self.assertEqual(
+                    result["profile"], expected_profile
+                )
+                self.assertEqual(
+                    result["risk_percent"], expected_risk
+                )
+
+    def test_standard_profile_uses_half_percent(self):
+        result = self.open_trade("ORDER-STANDARD")
+        self.assertEqual(result["risk_profile"], "STANDARD")
+        self.assertEqual(result["risk_percent"], 0.50)
+        self.assertEqual(result["risk_amount"], 50)
+
+    def test_submitted_risk_cannot_increase_standard_profile(self):
+        result = self.open_trade(
+            "ORDER-OVERRIDE-HIGH",
+            risk_percent=1.0
+        )
+
+        self.assertEqual(result["risk_percent"], 0.50)
+        self.assertEqual(result["risk_amount"], 50)
+
+    def test_submitted_risk_cannot_reduce_standard_profile(self):
+        result = self.open_trade(
+            "ORDER-OVERRIDE-LOW",
+            risk_percent=0.01
+        )
+
+        self.assertEqual(result["risk_percent"], 0.50)
+        self.assertEqual(result["risk_amount"], 50)
+
+    def test_starter_profile_uses_quarter_percent(self):
+        create_paper_account("STARTER-001", 4000)
+
+        result = open_paper_trade(
+            account_id="STARTER-001",
+            client_order_id="STARTER-ORDER-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=1.0,
+            symbol="EURUSD"
+        )
+
+        self.assertEqual(result["risk_profile"], "STARTER")
+        self.assertEqual(result["risk_percent"], 0.25)
+        self.assertEqual(result["risk_amount"], 10)
+
+    def test_premium_profile_uses_one_percent(self):
+        create_paper_account("PREMIUM-001", 30000)
+
+        result = open_paper_trade(
+            account_id="PREMIUM-001",
+            client_order_id="PREMIUM-ORDER-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.25,
+            symbol="XAUUSD"
+        )
+
+        self.assertEqual(result["risk_profile"], "PREMIUM")
+        self.assertEqual(result["risk_percent"], 1.0)
+        self.assertEqual(result["risk_amount"], 300)
+
     def test_two_positions_can_share_one_percent_budget(self):
         first = self.open_trade("ORDER-001", 0.5)
         second = self.open_trade("ORDER-002", 0.5)
@@ -96,28 +173,42 @@ class PaperTradingTests(unittest.TestCase):
         with self.assertRaises(RiskError):
             self.open_trade("ORDER-003", 0.1)
 
-    def test_intentional_additional_position_is_allowed(self):
-        first = self.open_trade("ORDER-001", 0.25)
-        second = self.open_trade("ORDER-002", 0.25)
-        third = self.open_trade("ORDER-003", 0.25)
-        fourth = self.open_trade("ORDER-004", 0.25)
+    def test_starter_can_open_four_positions_within_limit(self):
+        create_paper_account("STARTER-002", 4000)
 
-        self.assertNotEqual(first["trade_id"], second["trade_id"])
-        self.assertNotEqual(second["trade_id"], third["trade_id"])
-        self.assertNotEqual(third["trade_id"], fourth["trade_id"])
-        self.assertEqual(fourth["total_open_risk"], 100)
+        results = []
+
+        for number in range(1, 5):
+            results.append(
+                open_paper_trade(
+                    account_id="STARTER-002",
+                    client_order_id=f"STARTER-{number}",
+                    side="BUY",
+                    entry_price=4000,
+                    stop_loss=3990,
+                    risk_percent=1.0,
+                    symbol="XAUUSD"
+                )
+            )
+
+        self.assertEqual(
+            results[-1]["total_open_risk"], 40
+        )
+        self.assertEqual(
+            results[-1]["maximum_risk_percent"], 1.0
+        )
 
     def test_duplicate_order_is_rejected(self):
-        self.open_trade("ORDER-DUPLICATE", 0.5)
+        self.open_trade("ORDER-DUPLICATE")
 
         with self.assertRaises(ValueError):
-            self.open_trade("ORDER-DUPLICATE", 0.5)
+            self.open_trade("ORDER-DUPLICATE")
 
     def test_emergency_stop_blocks_new_orders(self):
         activate_emergency_stop()
 
         with self.assertRaises(RuntimeError):
-            self.open_trade("ORDER-STOPPED", 0.5)
+            self.open_trade("ORDER-STOPPED")
 
     def test_invalid_buy_stop_loss_is_rejected(self):
         with self.assertRaises(RiskError):
@@ -130,8 +221,8 @@ class PaperTradingTests(unittest.TestCase):
             )
 
     def test_closing_trade_releases_risk_budget(self):
-        first = self.open_trade("ORDER-001", 0.5)
-        self.open_trade("ORDER-002", 0.5)
+        first = self.open_trade("ORDER-001")
+        self.open_trade("ORDER-002")
 
         close_result = close_paper_trade(
             trade_id=first["trade_id"],
@@ -142,7 +233,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(close_result["realized_pnl"], 0)
         self.assertEqual(close_result["remaining_open_risk"], 50)
 
-        third = self.open_trade("ORDER-003", 0.5)
+        third = self.open_trade("ORDER-003")
         self.assertEqual(third["total_open_risk"], 100)
 
     def test_trade_closing_updates_account_balance(self):
@@ -154,12 +245,12 @@ class PaperTradingTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "CLOSED")
-        self.assertEqual(result["realized_pnl"], 100)
-        self.assertEqual(result["new_balance"], 10100)
+        self.assertEqual(result["realized_pnl"], 50)
+        self.assertEqual(result["new_balance"], 10050)
         self.assertEqual(result["remaining_open_risk"], 0)
 
     def test_open_risk_is_account_specific(self):
-        self.open_trade("ORDER-001", 0.5)
+        self.open_trade("ORDER-001")
         create_paper_account("TEST-002", 10000)
 
         second_account_trade = open_paper_trade(
@@ -173,12 +264,12 @@ class PaperTradingTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            second_account_trade["total_open_risk"], 100
+            second_account_trade["total_open_risk"], 50
         )
 
     def test_account_risk_endpoint_reports_open_risk(self):
-        self.open_trade("ORDER-API-001", 0.5)
-        self.open_trade("ORDER-API-002", 0.5)
+        self.open_trade("ORDER-API-001")
+        self.open_trade("ORDER-API-002")
 
         response = self.client.get("/accounts/TEST-001/risk")
 
@@ -196,7 +287,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertTrue(result["risk_limit_reached"])
 
     def test_account_risk_endpoint_reports_unused_budget(self):
-        self.open_trade("ORDER-API-003", 0.25)
+        self.open_trade("ORDER-API-003")
 
         response = self.client.get("/accounts/TEST-001/risk")
 
@@ -205,8 +296,8 @@ class PaperTradingTests(unittest.TestCase):
         result = response.json()
 
         self.assertEqual(result["open_positions"], 1)
-        self.assertEqual(result["current_open_risk"], 25)
-        self.assertEqual(result["remaining_risk_budget"], 75)
+        self.assertEqual(result["current_open_risk"], 50)
+        self.assertEqual(result["remaining_risk_budget"], 50)
         self.assertFalse(result["risk_limit_reached"])
 
     def test_account_risk_endpoint_rejects_unknown_account(self):
@@ -263,6 +354,26 @@ class PaperTradingTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["symbol"], "EURUSD")
+        self.assertEqual(response.json()["risk_percent"], 0.5)
+        self.assertEqual(response.json()["risk_amount"], 50)
+
+    def test_api_cannot_override_assigned_risk_profile(self):
+        response = self.client.post(
+            "/trades",
+            json={
+                "account_id": "TEST-001",
+                "client_order_id": "API-RISK-OVERRIDE",
+                "symbol": "EURUSD",
+                "side": "BUY",
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 1.0
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["risk_percent"], 0.5)
+        self.assertEqual(response.json()["risk_amount"], 50)
 
     def test_api_rejects_invalid_symbol_format(self):
         response = self.client.post(
@@ -281,7 +392,9 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
 
     def test_closing_trade_returns_its_instrument_symbol(self):
-        trade = self.open_trade("ORDER-CLOSE-SYMBOL", 0.5, "GBPUSD")
+        trade = self.open_trade(
+            "ORDER-CLOSE-SYMBOL", 0.5, "GBPUSD"
+        )
 
         result = close_paper_trade(
             trade_id=trade["trade_id"],
@@ -341,10 +454,7 @@ class PaperTradingTests(unittest.TestCase):
                 """
             )
 
-        # First migration adds the new structure.
         init_db()
-
-        # Second migration must be safe and repeatable.
         init_db()
 
         with database.get_connection() as connection:
@@ -374,6 +484,14 @@ class PaperTradingTests(unittest.TestCase):
                 """
             ).fetchone()
 
+            migrated_account = connection.execute(
+                """
+                SELECT risk_profile
+                FROM paper_accounts
+                WHERE account_id = 'LEGACY-001'
+                """
+            ).fetchone()
+
         self.assertIsNotNone(trade)
         self.assertEqual(trade["account_id"], "LEGACY-001")
         self.assertEqual(trade["symbol"], "XAUUSD")
@@ -386,6 +504,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertIn("copied_from_trade_id", columns)
         self.assertIn("copy_group_id", columns)
         self.assertIsNotNone(group_table)
+        self.assertEqual(migrated_account["risk_profile"], "STANDARD")
 
 
 if __name__ == "__main__":
