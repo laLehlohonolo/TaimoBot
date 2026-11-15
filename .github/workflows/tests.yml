@@ -1,5 +1,4 @@
-
-name: TaimoBot backend tests
+name: TaimoBot application checks
 
 on:
   push:
@@ -8,41 +7,49 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  backend:
     runs-on: ubuntu-latest
-
     defaults:
       run:
         working-directory: backend
-
     steps:
       - name: Get repository code
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install dependencies
+      - name: Install backend dependencies
         run: pip install -r requirements.txt
-
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
-
       - name: Verify FastAPI application
         run: python -c "from app.main import app; print(app.title)"
-
       - name: Start FastAPI and test health endpoint
         run: |
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/taimobot-api.log 2>&1 &
-
           for i in {1..10}; do
             if curl -fsS http://127.0.0.1:8000/health; then
               exit 0
             fi
             sleep 2
           done
-
           cat /tmp/taimobot-api.log
           exit 1
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Get repository code
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build React frontend
+        run: npm run build
