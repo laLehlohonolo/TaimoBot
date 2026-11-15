@@ -1,6 +1,7 @@
 import hashlib
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -267,7 +268,7 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         )
         headers = {"Authorization": "Bearer " + login.json()["access_token"]}
 
-        with __import__("unittest").mock.patch.dict(
+        with patch.dict(
             "os.environ",
             {"TAIMOBOT_ADMIN_EMAILS": "admin@example.com"},
             clear=True
