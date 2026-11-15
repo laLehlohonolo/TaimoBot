@@ -231,6 +231,35 @@ def account_risk_status(account_id: str, user=Depends(current_user)):
         connection.close()
 
 
+@app.get("/accounts")
+def list_accounts(user=Depends(current_user)):
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT account_id, starting_balance, balance, risk_profile, created_at
+            FROM paper_accounts
+            WHERE owner_user_id = ?
+            ORDER BY created_at DESC, account_id
+            """,
+            (user["user_id"],)
+        ).fetchall()
+
+    return {
+        "count": len(rows),
+        "accounts": [
+            {
+                "account_id": row["account_id"],
+                "starting_balance": float(row["starting_balance"]),
+                "balance": float(row["balance"]),
+                "risk_profile": row["risk_profile"],
+                "created_at": row["created_at"],
+                "mode": "paper_trading"
+            }
+            for row in rows
+        ]
+    }
+
+
 @app.post("/accounts")
 def create_account(request: AccountRequest, user=Depends(current_user)):
     try:
