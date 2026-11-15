@@ -3,7 +3,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from .auth import (
-    AuthenticationError, authenticate_user, create_session,
+    AuthenticationError, AuthenticationRateLimitError,
+    authenticate_user, create_session,
     get_session_user, register_user, revoke_session
 )
 
@@ -51,6 +52,8 @@ def auth_login(request: LoginRequest):
     try:
         user = authenticate_user(request.email, request.password)
         return {**create_session(user["user_id"]), "user": user}
+    except AuthenticationRateLimitError:
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Try again later.")
     except AuthenticationError:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
