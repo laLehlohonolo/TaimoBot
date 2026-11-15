@@ -2,6 +2,8 @@
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -687,6 +689,79 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0]["status"], "CLOSED")
         self.assertEqual(trades[0]["realized_pnl"], 50)
+
+
+    def test_concurrent_duplicate_order_requests_create_only_one_trade(self):
+        start = Barrier(2)
+
+        def submit_duplicate():
+            start.wait()
+            try:
+                result = self.open_trade("ORDER-CONCURRENT-DUPLICATE")
+                return ("created", result["trade_id"])
+            except ValueError:
+                return ("rejected", None)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(
+                lambda _: submit_duplicate(), range(2)
+            ))
+
+        self.assertEqual(
+            sum(1 for status, _ in outcomes if status == "created"), 1
+        )
+        self.assertEqual(
+            sum(1 for status, _ in outcomes if status == "rejected"), 1
+        )
+
+        with database.get_connection() as connection:
+            count = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE client_order_id = 'ORDER-CONCURRENT-DUPLICATE'
+                """
+            ).fetchone()["total"]
+
+        self.assertEqual(count, 1)
+
+    def test_concurrent_orders_cannot_exceed_combined_one_percent_risk(self):
+        start = Barrier(2)
+
+        def submit_order(order_id):
+            start.wait()
+            try:
+                result = self.open_trade(order_id, risk_percent=0.5)
+                return ("created", result["risk_amount"])
+            except RiskError:
+                return ("risk_rejected", None)
+
+        order_ids = ("ORDER-CONCURRENT-RISK-A", "ORDER-CONCURRENT-RISK-B")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(submit_order, order_ids))
+
+        self.assertEqual(
+            sum(1 for status, _ in outcomes if status == "created"), 1
+        )
+        self.assertEqual(
+            sum(1 for status, _ in outcomes if status == "risk_rejected"), 1
+        )
+
+        with database.get_connection() as connection:
+            totals = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS open_positions,
+                    COALESCE(SUM(risk_amount), 0) AS total_open_risk
+                FROM trades
+                WHERE account_id = 'TEST-001'
+                  AND status = 'OPEN'
+                """
+            ).fetchone()
+
+        self.assertEqual(totals["open_positions"], 1)
+        self.assertEqual(totals["total_open_risk"], 50)
+        self.assertLessEqual(totals["total_open_risk"], 100)
 
 
 if __name__ == "__main__":
