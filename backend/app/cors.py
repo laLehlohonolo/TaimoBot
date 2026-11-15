@@ -2,6 +2,8 @@
 
 from urllib.parse import urlsplit
 
+from fastapi.middleware.cors import CORSMiddleware
+
 
 def parse_cors_origins(value):
     """Return unique HTTP(S) origins; reject wildcards and URL paths."""
@@ -29,4 +31,18 @@ def parse_cors_origins(value):
         if origin not in origins:
             origins.append(origin)
 
+    return origins
+
+
+def configure_cors(app, value):
+    """Attach restrictive CORS middleware when trusted origins are configured."""
+    origins = parse_cors_origins(value)
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Accept", "Authorization", "Content-Type"],
+        )
     return origins
