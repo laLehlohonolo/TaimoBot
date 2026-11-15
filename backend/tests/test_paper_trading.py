@@ -680,6 +680,48 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+    def test_maintenance_blocks_service_and_api_entries_but_allows_close(self):
+        existing_trade = self.open_trade("ORDER-BEFORE-MAINTENANCE")
+
+        with patch("app.safety.is_maintenance_window", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "maintenance window"):
+                self.open_trade("ORDER-DURING-MAINTENANCE")
+
+            response = self.client.post(
+                "/trades",
+                json={
+                    "account_id": "TEST-001",
+                    "client_order_id": "API-DURING-MAINTENANCE",
+                    "symbol": "XAUUSD",
+                    "side": "BUY",
+                    "entry_price": 4000,
+                    "stop_loss": 3990,
+                    "risk_percent": 0.5
+                }
+            )
+            self.assertEqual(response.status_code, 400)
+
+            # Maintenance blocks entries, never the ability to reduce risk.
+            close_result = close_paper_trade(
+                trade_id=existing_trade["trade_id"],
+                exit_price=4010
+            )
+            self.assertEqual(close_result["status"], "CLOSED")
+
+        with database.get_connection() as connection:
+            rejected_count = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE client_order_id IN (
+                    'ORDER-DURING-MAINTENANCE',
+                    'API-DURING-MAINTENANCE'
+                )
+                """
+            ).fetchone()["total"]
+
+        self.assertEqual(rejected_count, 0)
+
     def test_emergency_stop_blocks_new_orders_but_allows_safe_close(self):
         existing_trade = self.open_trade("ORDER-BEFORE-EMERGENCY-STOP")
 
