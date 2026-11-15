@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -6,6 +7,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from .database import init_db, get_connection
+from .maintenance_scheduler import maintenance_scheduler
 from .cors import configure_cors
 from .risk import (
     calculate_position_size,
