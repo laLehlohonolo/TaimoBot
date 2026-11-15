@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import patch
 from pathlib import Path
 
@@ -46,14 +48,14 @@ class CopyTradeReplicationTests(unittest.TestCase):
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
-    def create_source_trade(self):
+    def create_source_trade(self, order_id="SOURCE-ORDER-001", risk_percent=1):
         return open_paper_trade(
             account_id="SOURCE",
-            client_order_id="SOURCE-ORDER-001",
+            client_order_id=order_id,
             side="BUY",
             entry_price=4000,
             stop_loss=3990,
-            risk_percent=1,
+            risk_percent=risk_percent,
             symbol="XAUUSD"
         )
 
@@ -226,6 +228,74 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(source_status, "OPEN")
         self.assertEqual(follower_open_count, 0)
         self.assertEqual(copy_status, "FAILED")
+
+
+    def test_concurrent_copy_entries_cannot_exceed_followers_combined_risk(self):
+        # The follower has a 0.5% allocation per copy. One existing
+        # position consumes half of its 1% combined-risk allowance.
+        open_paper_trade(
+            account_id="FOLLOWER",
+            client_order_id="FOLLOWER-EXISTING-RISK",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="EURUSD"
+        )
+
+        first_source = self.create_source_trade(
+            order_id="SOURCE-CONCURRENT-COPY-A",
+            risk_percent=0.5
+        )
+        second_source = self.create_source_trade(
+            order_id="SOURCE-CONCURRENT-COPY-B",
+            risk_percent=0.5
+        )
+        start = Barrier(2)
+
+        def replicate(source_trade_id):
+            start.wait()
+            return replicate_open_trade(source_trade_id)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(
+                replicate,
+                (first_source["trade_id"], second_source["trade_id"])
+            ))
+
+        successful = sum(result["successful_copies"] for result in results)
+        failed = sum(result["failed_copies"] for result in results)
+        self.assertEqual(successful, 1)
+        self.assertEqual(failed, 1)
+
+        with database.get_connection() as connection:
+            totals = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS open_positions,
+                    COALESCE(SUM(risk_amount), 0) AS total_open_risk
+                FROM trades
+                WHERE account_id = 'FOLLOWER'
+                  AND status = 'OPEN'
+                """
+            ).fetchone()
+            executions = connection.execute(
+                """
+                SELECT status
+                FROM copy_executions
+                WHERE source_trade_id IN (?, ?)
+                ORDER BY source_trade_id
+                """,
+                (first_source["trade_id"], second_source["trade_id"])
+            ).fetchall()
+
+        self.assertEqual(totals["open_positions"], 2)
+        self.assertEqual(totals["total_open_risk"], 50)
+        self.assertLessEqual(totals["total_open_risk"], 50)
+        self.assertEqual(
+            sorted(row["status"] for row in executions),
+            ["COPIED", "FAILED"]
+        )
 
 
 if __name__ == "__main__":
