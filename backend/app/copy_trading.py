@@ -1,7 +1,10 @@
 import uuid
 
 from .database import get_connection
-from .execution import (\n    open_paper_trade, transaction, get_open_risk,\n    _calculate_trade_pnl\n)
+from .execution import (
+    open_paper_trade, transaction, get_open_risk,
+    _calculate_trade_pnl
+)
 from .risk import get_risk_profile, MAX_RISK_PERCENT
 
 
