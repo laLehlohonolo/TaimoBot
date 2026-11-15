@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from .database import init_db, get_connection
@@ -33,7 +33,14 @@ from .history import (
     get_account_history,
     get_trade_history
 )
-from .auth_routes import router as auth_router
+from .auth_routes import (
+    router as auth_router,
+    current_user,
+    require_account_access,
+    require_group_access,
+    require_trade_access,
+    require_relationship_access,
+)
 from .safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
@@ -145,12 +152,12 @@ def safety_status():
 
 
 @app.post("/safety/emergency-stop")
-def emergency_stop():
+def emergency_stop(user=Depends(current_user)):
     return activate_emergency_stop()
 
 
 @app.post("/safety/resume")
-def resume_trading():
+def resume_trading(user=Depends(current_user)):
     return deactivate_emergency_stop()
 
 
@@ -172,7 +179,8 @@ def risk_preview(request: RiskPreviewRequest):
 
 
 @app.get("/accounts/{account_id}/risk")
-def account_risk_status(account_id: str):
+def account_risk_status(account_id: str, user=Depends(current_user)):
+    require_account_access(account_id, user)
     connection = get_connection()
 
     try:
@@ -224,11 +232,12 @@ def account_risk_status(account_id: str):
 
 
 @app.post("/accounts")
-def create_account(request: AccountRequest):
+def create_account(request: AccountRequest, user=Depends(current_user)):
     try:
         return create_paper_account(
             request.account_id,
-            request.starting_balance
+            request.starting_balance,
+            owner_user_id=user["user_id"]
         )
     except ValueError as error:
         raise HTTPException(
@@ -238,7 +247,8 @@ def create_account(request: AccountRequest):
 
 
 @app.get("/accounts/{account_id}")
-def account_history(account_id: str):
+def account_history(account_id: str, user=Depends(current_user)):
+    require_account_access(account_id, user)
     try:
         return get_account_history(account_id)
     except ValueError as error:
@@ -249,7 +259,8 @@ def account_history(account_id: str):
 
 
 @app.get("/accounts/{account_id}/trades")
-def trade_history(account_id: str, limit: int = 50):
+def trade_history(account_id: str, limit: int = 50, user=Depends(current_user)):
+    require_account_access(account_id, user)
     try:
         return get_trade_history(account_id, limit)
     except ValueError as error:
@@ -262,8 +273,10 @@ def trade_history(account_id: str, limit: int = 50):
 @app.post("/accounts/{account_id}/groups")
 def create_group(
     account_id: str,
-    request: PositionGroupRequest
+    request: PositionGroupRequest,
+    user=Depends(current_user)
 ):
+    require_account_access(account_id, user)
     try:
         symbol = validate_symbol(request.symbol)
 
@@ -280,7 +293,8 @@ def create_group(
 
 
 @app.get("/groups/{group_id}")
-def group_details(group_id: str):
+def group_details(group_id: str, user=Depends(current_user)):
+    require_group_access(group_id, user)
     try:
         return get_position_group(group_id)
     except ValueError as error:
@@ -293,8 +307,10 @@ def group_details(group_id: str):
 @app.post("/groups/{group_id}/close")
 def close_group(
     group_id: str,
-    request: CloseGroupRequest
+    request: CloseGroupRequest,
+    user=Depends(current_user)
 ):
+    require_group_access(group_id, user)
     try:
         return close_position_group_with_copies(
             group_id=group_id,
@@ -312,7 +328,10 @@ def close_group(
 
 
 @app.post("/trades")
-def create_trade(request: TradeRequest):
+def create_trade(request: TradeRequest, user=Depends(current_user)):
+    require_account_access(request.account_id, user)
+    if request.position_group_id:
+        require_group_access(request.position_group_id, user)
     try:
         symbol = validate_symbol(request.symbol)
 
@@ -346,8 +365,10 @@ def create_trade(request: TradeRequest):
 @app.post("/trades/{trade_id}/close")
 def close_trade(
     trade_id: str,
-    request: CloseTradeRequest
+    request: CloseTradeRequest,
+    user=Depends(current_user)
 ):
+    require_trade_access(trade_id, user)
     try:
         return close_trade_with_copies(
             trade_id,
@@ -363,8 +384,11 @@ def close_trade(
 @app.post("/accounts/{follower_account_id}/copy-relationships")
 def create_copy_relationship_route(
     follower_account_id: str,
-    request: CopyRelationshipRequest
+    request: CopyRelationshipRequest,
+    user=Depends(current_user)
 ):
+    require_account_access(follower_account_id, user)
+    require_account_access(request.source_account_id, user)
     try:
         return create_copy_relationship(
             follower_account_id=follower_account_id,
@@ -379,7 +403,8 @@ def create_copy_relationship_route(
 
 
 @app.get("/accounts/{follower_account_id}/copy-relationships")
-def list_copy_relationships_route(follower_account_id: str):
+def list_copy_relationships_route(follower_account_id: str, user=Depends(current_user)):
+    require_account_access(follower_account_id, user)
     try:
         return get_copy_relationships(follower_account_id)
     except ValueError as error:
@@ -387,7 +412,8 @@ def list_copy_relationships_route(follower_account_id: str):
 
 
 @app.post("/copy-relationships/{relationship_id}/pause")
-def pause_copy_relationship_route(relationship_id: str):
+def pause_copy_relationship_route(relationship_id: str, user=Depends(current_user)):
+    require_relationship_access(relationship_id, user)
     try:
         return update_copy_relationship_status(relationship_id, "PAUSED")
     except ValueError as error:
@@ -399,7 +425,8 @@ def pause_copy_relationship_route(relationship_id: str):
 
 
 @app.post("/copy-relationships/{relationship_id}/resume")
-def resume_copy_relationship_route(relationship_id: str):
+def resume_copy_relationship_route(relationship_id: str, user=Depends(current_user)):
+    require_relationship_access(relationship_id, user)
     try:
         return update_copy_relationship_status(relationship_id, "ACTIVE")
     except ValueError as error:
@@ -411,7 +438,8 @@ def resume_copy_relationship_route(relationship_id: str):
 
 
 @app.post("/copy-relationships/{relationship_id}/stop")
-def stop_copy_relationship_route(relationship_id: str):
+def stop_copy_relationship_route(relationship_id: str, user=Depends(current_user)):
+    require_relationship_access(relationship_id, user)
     try:
         return update_copy_relationship_status(relationship_id, "STOPPED")
     except ValueError as error:
