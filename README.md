@@ -42,3 +42,19 @@ in process memory. It therefore remains active across API process restarts and i
 shared by backend workers using the same database. If the singleton safety-state
 record is unexpectedly missing, the API treats the state as stopped until an
 authorized administrator repairs or resumes it.
+
+
+## Strategy knowledge repository
+
+The authenticated `GET /strategies` endpoint returns built-in reference techniques
+and the signed-in user's own research notes. The initial reference library includes
+scalping, day trading, swing trading, trend following, breakout, mean reversion,
+price action, support and resistance, momentum, multi-timeframe analysis,
+volatility-aware and session-based techniques.
+
+Users can add research notes through `POST /strategies`. User contributions are
+private to their owner. Every reference and new contribution is marked
+`UNVALIDATED`: storing a technique does not mean it is profitable, tested, approved
+or enabled for execution. The repository is the first foundation for later
+backtesting, strategy comparison, strategy synthesis and explainable AI. Those
+engines are not yet implemented.
