@@ -13,6 +13,16 @@ React + Vite dashboard for the TaimoBot FastAPI paper-trading backend.
 
 Set `VITE_API_BASE_URL` to the API base path or URL. The default is `/api`.
 
-**Security boundary:** VITE variables are compiled into browser-visible assets. Never put API keys, passwords, signing secrets, broker credentials, or private tokens in them. The current dashboard is intentionally read-only. The backend API currently has no user authentication, so do not expose it to the public internet or add order/control actions to a public frontend until authentication and authorization are implemented server-side.
+## Authentication and security
 
-The UI reports backend health and emergency-stop status. All order and risk decisions remain server-side.
+- Register and sign in through the backend authentication endpoints.
+- Private account, trade, position-group and copy-relationship endpoints require a bearer session and verify account ownership server-side.
+- Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes. Session tokens are random, expire after 12 hours, and are stored server-side only as SHA-256 hashes.
+- Repeated failed logins are temporarily throttled.
+- The frontend keeps the bearer token in React memory only. Refreshing the page clears the session and requires signing in again. The token is not written to localStorage or sessionStorage.
+- The dashboard is read-only for trade execution. It can create paper accounts and inspect account balances, risk and trade history, but it cannot place or close orders.
+- Health and emergency-stop status are public read-only endpoints. Emergency-stop activation and resume require authentication.
+
+**Deployment warning:** the backend currently has no administrator role or user-management workflow. Do not expose emergency-stop controls to untrusted users, and do not expose the backend publicly until HTTPS, production CORS/origin restrictions, secret management, backups, monitoring and deployment hardening have been configured. Never place API keys, signing secrets, passwords or broker credentials in `VITE_*` variables; these are visible in browser assets.
+
+All trading and risk decisions remain server-side. The system remains paper-trading only; no live broker execution is enabled.
