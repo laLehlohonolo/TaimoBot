@@ -55,7 +55,15 @@ from .safety import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    yield
+    maintenance_task = asyncio.create_task(maintenance_scheduler())
+    try:
+        yield
+    finally:
+        maintenance_task.cancel()
+        try:
+            await maintenance_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
