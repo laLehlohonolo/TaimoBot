@@ -7,10 +7,13 @@ def _set_emergency_stop(active):
     with get_connection() as connection:
         connection.execute(
             """
-            UPDATE system_safety_state
-            SET emergency_stop_active = ?,
+            INSERT INTO system_safety_state (
+                singleton_id, emergency_stop_active, updated_at
+            )
+            VALUES (1, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(singleton_id) DO UPDATE SET
+                emergency_stop_active = excluded.emergency_stop_active,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE singleton_id = 1
             """,
             (1 if active else 0,)
         )
