@@ -33,6 +33,7 @@ from .history import (
     get_account_history,
     get_trade_history
 )
+from .auth_routes import router as auth_router
 from .safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
@@ -52,6 +53,8 @@ app = FastAPI(
     version="0.7.0",
     lifespan=lifespan
 )
+
+app.include_router(auth_router)
 
 
 class RiskPreviewRequest(BaseModel):
