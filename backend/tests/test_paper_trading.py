@@ -726,17 +726,31 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(count, 1)
 
     def test_concurrent_orders_cannot_exceed_combined_one_percent_risk(self):
+        # A PREMIUM account risks 1% per order, so two simultaneous
+        # requests must not both consume the same 1% account allowance.
+        create_paper_account("CONCURRENT-PREMIUM", 30000)
         start = Barrier(2)
 
         def submit_order(order_id):
             start.wait()
             try:
-                result = self.open_trade(order_id, risk_percent=0.5)
+                result = open_paper_trade(
+                    account_id="CONCURRENT-PREMIUM",
+                    client_order_id=order_id,
+                    side="BUY",
+                    entry_price=4000,
+                    stop_loss=3990,
+                    risk_percent=0.5,
+                    symbol="XAUUSD"
+                )
                 return ("created", result["risk_amount"])
             except RiskError:
                 return ("risk_rejected", None)
 
-        order_ids = ("ORDER-CONCURRENT-RISK-A", "ORDER-CONCURRENT-RISK-B")
+        order_ids = (
+            "ORDER-CONCURRENT-RISK-A",
+            "ORDER-CONCURRENT-RISK-B"
+        )
         with ThreadPoolExecutor(max_workers=2) as executor:
             outcomes = list(executor.map(submit_order, order_ids))
 
@@ -754,14 +768,14 @@ class PaperTradingTests(unittest.TestCase):
                     COUNT(*) AS open_positions,
                     COALESCE(SUM(risk_amount), 0) AS total_open_risk
                 FROM trades
-                WHERE account_id = 'TEST-001'
+                WHERE account_id = 'CONCURRENT-PREMIUM'
                   AND status = 'OPEN'
                 """
             ).fetchone()
 
         self.assertEqual(totals["open_positions"], 1)
-        self.assertEqual(totals["total_open_risk"], 50)
-        self.assertLessEqual(totals["total_open_risk"], 100)
+        self.assertEqual(totals["total_open_risk"], 300)
+        self.assertLessEqual(totals["total_open_risk"], 300)
 
 
 if __name__ == "__main__":
