@@ -507,5 +507,61 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(migrated_account["risk_profile"], "STANDARD")
 
 
+    def test_invalid_sell_stop_loss_is_rejected(self):
+        with self.assertRaises(RiskError):
+            calculate_position_size(
+                account_balance=10000,
+                entry_price=4000,
+                stop_loss=3990,
+                risk_percent=0.5,
+                side="SELL"
+            )
+
+    def test_stop_loss_equal_to_entry_is_rejected(self):
+        with self.assertRaises(RiskError):
+            calculate_position_size(
+                account_balance=10000,
+                entry_price=4000,
+                stop_loss=4000,
+                risk_percent=0.5,
+                side="BUY"
+            )
+
+    def test_non_finite_prices_are_rejected(self):
+        for bad_value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad_value):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=10000,
+                        entry_price=bad_value,
+                        stop_loss=3990,
+                        risk_percent=0.5,
+                        side="BUY"
+                    )
+
+    def test_rejected_stop_loss_does_not_create_trade(self):
+        with self.assertRaises(RiskError):
+            open_paper_trade(
+                account_id="TEST-001",
+                client_order_id="ORDER-INVALID-STOP",
+                side="BUY",
+                entry_price=4000,
+                stop_loss=4000,
+                risk_percent=0.5,
+                symbol="XAUUSD"
+            )
+
+        with database.get_connection() as connection:
+            count = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE client_order_id = 'ORDER-INVALID-STOP'
+                """
+            ).fetchone()["total"]
+
+        self.assertEqual(count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
