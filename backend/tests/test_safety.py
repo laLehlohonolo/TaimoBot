@@ -1,9 +1,11 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from app import database
 from app.database import init_db
+from app.main import safety_status
 from app.safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
@@ -22,6 +24,34 @@ class PersistentEmergencyStopTests(unittest.TestCase):
     def tearDown(self):
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
+
+
+    def test_safety_status_blocks_new_orders_during_maintenance(self):
+        with patch("app.main.is_emergency_stop_active", return_value=False), patch(
+            "app.main.is_maintenance_window", return_value=True
+        ), patch(
+            "app.main.get_maintenance_status",
+            return_value={"last_run_date": None, "last_run_status": "NOT_RUN"},
+        ):
+            status = safety_status()
+
+        self.assertTrue(status["maintenance_window_active"])
+        self.assertFalse(status["new_orders_allowed"])
+        self.assertEqual(status["block_reason"], "DAILY_MAINTENANCE")
+        self.assertEqual(status["trading_mode"], "paper")
+
+    def test_safety_status_allows_new_orders_outside_maintenance_when_stop_off(self):
+        with patch("app.main.is_emergency_stop_active", return_value=False), patch(
+            "app.main.is_maintenance_window", return_value=False
+        ), patch(
+            "app.main.get_maintenance_status",
+            return_value={"last_run_date": "2026-11-15", "last_run_status": "COMPLETE"},
+        ):
+            status = safety_status()
+
+        self.assertFalse(status["maintenance_window_active"])
+        self.assertTrue(status["new_orders_allowed"])
+        self.assertIsNone(status["block_reason"])
 
     def test_emergency_stop_survives_database_reinitialization(self):
         result = activate_emergency_stop()
