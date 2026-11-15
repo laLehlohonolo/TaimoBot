@@ -156,6 +156,56 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 400)
 
+    def test_private_account_routes_reject_anonymous_requests(self):
+        response = self.client.get("/accounts/PRIVATE-001")
+        emergency = self.client.post("/safety/emergency-stop")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(emergency.status_code, 401)
+
+    def test_user_cannot_access_another_users_paper_account_or_trade(self):
+        owner = self.client.post(
+            "/auth/register",
+            json={"email": "owner@example.com", "password": "OwnerPassphrase-2026!"}
+        )
+        self.assertEqual(owner.status_code, 200)
+        owner_login = self.client.post(
+            "/auth/login",
+            json={"email": "owner@example.com", "password": "OwnerPassphrase-2026!"}
+        )
+        owner_headers = {"Authorization": "Bearer " + owner_login.json()["access_token"]}
+        created = self.client.post(
+            "/accounts",
+            json={"account_id": "OWNER-ACCOUNT", "starting_balance": 10000},
+            headers=owner_headers
+        )
+        self.assertEqual(created.status_code, 200)
+
+        stranger = self.client.post(
+            "/auth/register",
+            json={"email": "stranger@example.com", "password": "StrangerPassphrase-2026!"}
+        )
+        self.assertEqual(stranger.status_code, 200)
+        stranger_login = self.client.post(
+            "/auth/login",
+            json={"email": "stranger@example.com", "password": "StrangerPassphrase-2026!"}
+        )
+        stranger_headers = {"Authorization": "Bearer " + stranger_login.json()["access_token"]}
+
+        account = self.client.get("/accounts/OWNER-ACCOUNT", headers=stranger_headers)
+        trade = self.client.post(
+            "/trades",
+            json={
+                "account_id": "OWNER-ACCOUNT",
+                "client_order_id": "STRANGER-ORDER",
+                "symbol": "XAUUSD", "side": "BUY",
+                "entry_price": 4000, "stop_loss": 3990,
+                "risk_percent": 0.5
+            },
+            headers=stranger_headers
+        )
+        self.assertEqual(account.status_code, 404)
+        self.assertEqual(trade.status_code, 404)
+
     def test_expired_session_is_rejected(self):
         user = register_user("expired@example.com", "StrongPassphrase123!")
         session = create_session(user["user_id"])
