@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -10,6 +11,7 @@ from app.maintenance import (
     is_maintenance_window,
     verify_restore_candidate,
 )
+from app.safety import deactivate_emergency_stop, require_trading_enabled
 
 
 class DailyMaintenanceTests(unittest.TestCase):
@@ -19,6 +21,17 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertTrue(is_maintenance_window(datetime(2026, 11, 15, 23, 59, tzinfo=zone)))
         self.assertFalse(is_maintenance_window(datetime(2026, 11, 16, 0, 0, tzinfo=zone)))
         self.assertFalse(is_maintenance_window(datetime(2026, 11, 15, 22, 59, tzinfo=zone)))
+
+    def test_new_trades_are_blocked_during_maintenance_window(self):
+        deactivate_emergency_stop()
+        with patch("app.safety.is_maintenance_window", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "maintenance window"):
+                require_trading_enabled()
+
+    def test_new_trades_are_allowed_outside_maintenance_when_safety_is_clear(self):
+        deactivate_emergency_stop()
+        with patch("app.safety.is_maintenance_window", return_value=False):
+            require_trading_enabled()
 
     def test_backup_is_created_and_integrity_verified(self):
         with tempfile.TemporaryDirectory() as directory:
