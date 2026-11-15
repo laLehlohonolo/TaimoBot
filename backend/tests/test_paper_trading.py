@@ -563,5 +563,75 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+    def test_emergency_stop_blocks_new_orders_but_allows_safe_close(self):
+        existing_trade = self.open_trade("ORDER-BEFORE-EMERGENCY-STOP")
+
+        activate_emergency_stop()
+
+        with self.assertRaises(RuntimeError):
+            self.open_trade("ORDER-DURING-EMERGENCY-STOP")
+
+        close_result = close_paper_trade(
+            trade_id=existing_trade["trade_id"],
+            exit_price=4010
+        )
+
+        self.assertEqual(close_result["status"], "CLOSED")
+        self.assertEqual(close_result["realized_pnl"], 50)
+        self.assertEqual(close_result["new_balance"], 10050)
+
+        with database.get_connection() as connection:
+            account = connection.execute(
+                """
+                SELECT starting_balance, balance
+                FROM paper_accounts
+                WHERE account_id = 'TEST-001'
+                """
+            ).fetchone()
+            rejected_order_count = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE client_order_id = 'ORDER-DURING-EMERGENCY-STOP'
+                """
+            ).fetchone()["total"]
+
+        self.assertEqual(account["balance"], 10050)
+        self.assertEqual(rejected_order_count, 0)
+
+    def test_account_balance_reconciles_with_all_realized_pnl(self):
+        first = self.open_trade("ORDER-RECONCILE-001")
+        second = self.open_trade("ORDER-RECONCILE-002")
+
+        close_paper_trade(first["trade_id"], 3990)
+        close_paper_trade(second["trade_id"], 4010)
+
+        with database.get_connection() as connection:
+            account = connection.execute(
+                """
+                SELECT starting_balance, balance
+                FROM paper_accounts
+                WHERE account_id = 'TEST-001'
+                """
+            ).fetchone()
+            totals = connection.execute(
+                """
+                SELECT
+                    COALESCE(SUM(realized_pnl), 0) AS realized_total,
+                    SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END)
+                        AS open_positions
+                FROM trades
+                WHERE account_id = 'TEST-001'
+                """
+            ).fetchone()
+
+        expected_balance = (
+            account["starting_balance"] + totals["realized_total"]
+        )
+        self.assertEqual(account["balance"], expected_balance)
+        self.assertEqual(totals["realized_total"], 0)
+        self.assertEqual(totals["open_positions"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
