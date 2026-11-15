@@ -11,7 +11,7 @@ from app.auth import register_user, create_session
 from app.execution import create_paper_account, open_paper_trade
 from app.main import app
 from app.copy_trading import replicate_open_trade
-from app.safety import deactivate_emergency_stop
+from app.safety import activate_emergency_stop, deactivate_emergency_stop
 
 
 class CopyTradeReplicationTests(unittest.TestCase):
@@ -164,6 +164,37 @@ class CopyTradeReplicationTests(unittest.TestCase):
 
         self.assertEqual(source_status, "OPEN")
 
+
+    def test_emergency_stop_blocks_copy_execution_without_affecting_source(self):
+        source = self.create_source_trade()
+        activate_emergency_stop()
+
+        result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn("emergency stop", result["copies"][0]["failure_reason"].lower())
+
+        with database.get_connection() as connection:
+            source_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+            follower_open_count = connection.execute(
+                """
+                SELECT COUNT(*) AS total FROM trades
+                WHERE account_id = 'FOLLOWER' AND status = 'OPEN'
+                """
+            ).fetchone()["total"]
+            copy_status = connection.execute(
+                "SELECT status FROM copy_executions WHERE source_trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+
+        self.assertEqual(source_status, "OPEN")
+        self.assertEqual(follower_open_count, 0)
+        self.assertEqual(copy_status, "FAILED")
 
     def test_maintenance_blocks_copy_execution_without_affecting_source(self):
         source = self.create_source_trade()
