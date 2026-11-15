@@ -24,7 +24,7 @@ h1 em{font-style:normal;color:#78d49e}
 .refresh:hover:not(:disabled){background:#1b5037}
 .refresh:disabled{opacity:.55;cursor:wait}
 .status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
-.panel{background:linear-gradient(145deg,rgba(17, forty, 29, .8),rgba(12,29,22,.92));background-color:#0d2118;border:1px solid rgba(145,181,156,.16);border-radius:13px}
+.panel{background:linear-gradient(145deg,rgba(17, 40, 29, .8),rgba(12,29,22,.92));background-color:#0d2118;border:1px solid rgba(145,181,156,.16);border-radius:13px}
 .status-card{padding:21px;min-height:188px}
 .card-top{display:flex;justify-content:space-between;align-items:center}
 .signal{color:#476c56}
