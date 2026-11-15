@@ -64,6 +64,28 @@ const me = await request("/auth/me", { token });
 assert(me.response.status === 200 && me.payload.email === email, "Authenticated identity check failed.");
 console.log("PASS: Bearer token authenticates the current user.");
 
+const strategyLibrary = await request("/strategies", { token });
+assert(strategyLibrary.response.status === 200, "Strategy knowledge library could not be loaded.");
+assert(strategyLibrary.payload.count >= 10, "Built-in reference strategies were not seeded.");
+assert(strategyLibrary.payload.strategies.every(item => item.evidence_status === "UNVALIDATED"), "Reference techniques must not be treated as validated strategies.");
+console.log("PASS: Authenticated user can read the unvalidated strategy reference library.");
+
+const strategyContribution = await request("/strategies", {
+  method: "POST",
+  token,
+  body: {
+    name: "Integration test pullback",
+    category: "TESTING",
+    description: "A test-only strategy note for the integration smoke test.",
+    entry_logic: "Wait for a defined trend and a confirmed pullback before considering an entry.",
+    exit_logic: "Exit at the predefined target or when the trade thesis is invalidated.",
+    risk_notes: "This is unvalidated test data and must remain within the one percent risk ceiling."
+  }
+});
+assert(strategyContribution.response.status === 200, "Strategy contribution failed: " + JSON.stringify(strategyContribution.payload));
+assert(strategyContribution.payload.evidence_status === "UNVALIDATED", "New strategy must default to unvalidated.");
+console.log("PASS: Strategy knowledge can be contributed and remains unvalidated.");
+
 const accountId = "INT-" + unique;
 const created = await request("/accounts", {
   method: "POST",
