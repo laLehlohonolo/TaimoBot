@@ -74,6 +74,37 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         with self.assertRaises(AuthenticationError):
             get_session_user(token)
 
+    def test_legacy_accounts_gain_nullable_owner_without_data_loss(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy-auth.db"
+        with __import__("sqlite3").connect(legacy_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE paper_accounts (
+                    account_id TEXT PRIMARY KEY,
+                    starting_balance REAL NOT NULL,
+                    balance REAL NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO paper_accounts (
+                    account_id, starting_balance, balance
+                ) VALUES ('LEGACY-ACCOUNT', 10000, 9500);
+                """
+            )
+
+        database.DB_PATH = legacy_path
+        init_db()
+
+        with database.get_connection() as connection:
+            account = connection.execute(
+                "SELECT account_id, starting_balance, balance, owner_user_id "
+                "FROM paper_accounts WHERE account_id = 'LEGACY-ACCOUNT'"
+            ).fetchone()
+
+        self.assertIsNotNone(account)
+        self.assertEqual(account["starting_balance"], 10000)
+        self.assertEqual(account["balance"], 9500)
+        self.assertIsNone(account["owner_user_id"])
+
     def test_expired_session_is_rejected(self):
         user = register_user("expired@example.com", "StrongPassphrase123!")
         session = create_session(user["user_id"])
