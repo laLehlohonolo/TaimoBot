@@ -165,5 +165,37 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(source_status, "OPEN")
 
 
+    def test_maintenance_blocks_copy_execution_without_affecting_source(self):
+        source = self.create_source_trade()
+
+        with patch("app.safety.is_maintenance_window", return_value=True):
+            result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn("maintenance window", result["copies"][0]["failure_reason"])
+
+        with database.get_connection() as connection:
+            source_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+            follower_open_count = connection.execute(
+                """
+                SELECT COUNT(*) AS total FROM trades
+                WHERE account_id = 'FOLLOWER' AND status = 'OPEN'
+                """
+            ).fetchone()["total"]
+            copy_status = connection.execute(
+                "SELECT status FROM copy_executions WHERE source_trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+
+        self.assertEqual(source_status, "OPEN")
+        self.assertEqual(follower_open_count, 0)
+        self.assertEqual(copy_status, "FAILED")
+
+
 if __name__ == "__main__":
     unittest.main()
