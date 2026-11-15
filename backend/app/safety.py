@@ -1,16 +1,23 @@
+"""Database-backed global safety controls."""
 
-import threading
+from .database import get_connection
 
-_lock = threading.Lock()
-_emergency_stop = False
+
+def _set_emergency_stop(active):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE system_safety_state
+            SET emergency_stop_active = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE singleton_id = 1
+            """,
+            (1 if active else 0,)
+        )
 
 
 def activate_emergency_stop():
-    global _emergency_stop
-
-    with _lock:
-        _emergency_stop = True
-
+    _set_emergency_stop(True)
     return {
         "emergency_stop": True,
         "new_orders_allowed": False,
@@ -19,11 +26,7 @@ def activate_emergency_stop():
 
 
 def deactivate_emergency_stop():
-    global _emergency_stop
-
-    with _lock:
-        _emergency_stop = False
-
+    _set_emergency_stop(False)
     return {
         "emergency_stop": False,
         "new_orders_allowed": True,
@@ -32,8 +35,15 @@ def deactivate_emergency_stop():
 
 
 def is_emergency_stop_active():
-    with _lock:
-        return _emergency_stop
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT emergency_stop_active
+            FROM system_safety_state
+            WHERE singleton_id = 1
+            """
+        ).fetchone()
+    return bool(row["emergency_stop_active"]) if row is not None else True
 
 
 def require_trading_enabled():
