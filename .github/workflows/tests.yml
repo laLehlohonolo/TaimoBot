@@ -49,7 +49,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: Set up Python for API integration
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend dependencies
+        run: pip install -r ../backend/requirements.txt
       - name: Install frontend dependencies
         run: npm install --no-audit --no-fund
       - name: Build React frontend
         run: npm run build
+      - name: Start isolated paper API
+        run: |
+          cd ../backend
+          TAIMOBOT_DB_PATH=/tmp/taimobot-integration.db uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/taimobot-integration-api.log 2>&1 &
+      - name: Start Vite development proxy
+        run: npm run dev -- --host 127.0.0.1 --port 4173 > /tmp/taimobot-vite.log 2>&1 &
+      - name: Test real frontend-to-backend HTTP flow
+        run: |
+          node scripts/integration-smoke.mjs || {
+            echo "----- FastAPI log -----"
+            cat /tmp/taimobot-integration-api.log
+            echo "----- Vite log -----"
+            cat /tmp/taimobot-vite.log
+            exit 1
+          }
