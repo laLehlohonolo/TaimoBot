@@ -16,8 +16,8 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "test_taimobot.db"
-        deactivate_emergency_stop()
         database.init_db()
+        deactivate_emergency_stop()
 
         with database.get_connection() as connection:
             connection.execute(
