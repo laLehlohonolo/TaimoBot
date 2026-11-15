@@ -1,12 +1,13 @@
 import sqlite3
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from app import database
 from app.database import init_db
+from app.maintenance import SAST
 from app.maintenance_scheduler import run_maintenance_for_date
 from app.safety import deactivate_emergency_stop
 
@@ -24,6 +25,50 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
+    def test_stale_running_claim_is_recovered(self):
+        day = date(2026, 11, 14)
+        stale_started = (datetime.now(SAST) - timedelta(minutes=30)).isoformat()
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS maintenance_runs (
+                    run_date TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK (status IN ('RUNNING', 'COMPLETE', 'FAILED')),
+                    started_at TEXT NOT NULL, completed_at TEXT, backup_file TEXT, error_summary TEXT
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date, status, started_at) VALUES (?, 'RUNNING', ?)",
+                (day.isoformat(), stale_started),
+            )
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+        def fake_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_file.write_bytes(b"verified-test-backup")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup", side_effect=fake_backup
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+        ):
+            result = run_maintenance_for_date(day)
+        self.assertEqual(result["status"], "MAINTENANCE_COMPLETE")
+
+    def test_failed_run_is_not_retried_automatically(self):
+        day = date(2026, 11, 13)
+        with patch(
+            "app.maintenance_scheduler.create_verified_backup",
+            side_effect=RuntimeError("simulated backup failure"),
+        ) as backup:
+            first = run_maintenance_for_date(day)
+            second = run_maintenance_for_date(day)
+        self.assertEqual(first["status"], "MAINTENANCE_FAILED")
+        self.assertEqual(second["status"], "SKIPPED")
+        self.assertIn("explicit retry", second["reason"])
+        self.assertEqual(backup.call_count, 1)
     def test_daily_maintenance_runs_once_and_records_completion(self):
         day = date(2026, 11, 15)
         backup_dir = self.root / "backups"
