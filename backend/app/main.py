@@ -44,6 +44,7 @@ from .auth_routes import (
     require_relationship_access,
     require_admin,
 )
+from .strategy_knowledge import list_strategies, create_strategy, get_strategy
 from .safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
