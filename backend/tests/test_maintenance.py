@@ -11,10 +11,23 @@ from app.maintenance import (
     is_maintenance_window,
     verify_restore_candidate,
 )
+from app import database
+from app.database import init_db
 from app.safety import deactivate_emergency_stop, require_trading_enabled
 
 
 class DailyMaintenanceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_db_path = database.DB_PATH
+        database.DB_PATH = Path(self.temp_dir.name) / "maintenance-tests.sqlite3"
+        init_db()
+        deactivate_emergency_stop()
+
+    def tearDown(self):
+        database.DB_PATH = self.original_db_path
+        self.temp_dir.cleanup()
+
     def test_maintenance_window_uses_south_african_time(self):
         zone = ZoneInfo("Africa/Johannesburg")
         self.assertTrue(is_maintenance_window(datetime(2026, 11, 15, 23, 0, tzinfo=zone)))
