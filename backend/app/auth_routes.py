@@ -67,3 +67,66 @@ def auth_logout(
 ):
     revoke_session(credentials.credentials)
     return {"authenticated": False, "message": "Session revoked."}
+
+def require_account_access(account_id, user):
+    from .database import get_connection
+
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT owner_user_id FROM paper_accounts WHERE account_id = ?",
+            (account_id,)
+        ).fetchone()
+
+    if row is None or row["owner_user_id"] != user["user_id"]:
+        raise HTTPException(status_code=404, detail="Paper account not found.")
+    return True
+
+
+def require_group_access(group_id, user):
+    from .database import get_connection
+
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT account_id FROM position_groups WHERE group_id = ?",
+            (group_id,)
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Position group not found.")
+    require_account_access(row["account_id"], user)
+    return True
+
+
+def require_trade_access(trade_id, user):
+    from .database import get_connection
+
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT account_id FROM trades WHERE trade_id = ?",
+            (trade_id,)
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Trade not found.")
+    require_account_access(row["account_id"], user)
+    return True
+
+
+def require_relationship_access(relationship_id, user):
+    from .database import get_connection
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT source_account_id, follower_account_id
+            FROM copy_relationships
+            WHERE relationship_id = ?
+            """,
+            (relationship_id,)
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Copy relationship not found.")
+    require_account_access(row["source_account_id"], user)
+    require_account_access(row["follower_account_id"], user)
+    return True
