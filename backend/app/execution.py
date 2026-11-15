@@ -261,7 +261,9 @@ def open_paper_trade(
     risk_percent=None,
     take_profit=None,
     symbol=DEFAULT_SYMBOL,
-    position_group_id=None
+    position_group_id=None,
+    copy_source_trade_id=None,
+    copy_relationship_id=None
 ):
     """
     Open a paper trade using the account's assigned risk profile.
@@ -311,10 +313,42 @@ def open_paper_trade(
         if not position_group_id:
             raise ValueError("Position group ID cannot be empty.")
 
+    if (copy_source_trade_id is None) != (copy_relationship_id is None):
+        raise ValueError("Copy source trade and relationship must be supplied together.")
+
+    if copy_source_trade_id is not None:
+        copy_source_trade_id = str(copy_source_trade_id).strip()
+        copy_relationship_id = str(copy_relationship_id).strip()
+        if not copy_source_trade_id or not copy_relationship_id:
+            raise ValueError("Copy source trade and relationship are required.")
+
     with transaction() as connection:
         # Check safety after acquiring the write lock so the maintenance or
         # emergency-stop state is revalidated at the order's commit boundary.
         require_trading_enabled()
+
+        if copy_source_trade_id is not None:
+            source_copy = connection.execute(
+                """
+                SELECT t.status, t.account_id, cr.follower_account_id
+                FROM trades AS t
+                JOIN copy_relationships AS cr
+                  ON cr.relationship_id = ?
+                WHERE t.trade_id = ?
+                  AND cr.status = 'ACTIVE'
+                  AND cr.source_account_id = t.account_id
+                """,
+                (copy_relationship_id, copy_source_trade_id)
+            ).fetchone()
+            if (
+                source_copy is None
+                or source_copy["status"] != "OPEN"
+                or source_copy["follower_account_id"] != account_id
+            ):
+                raise ValueError(
+                    "Copy rejected: source trade must remain open and the "
+                    "copy relationship must remain active through execution."
+                )
 
         duplicate = connection.execute(
             """
@@ -418,11 +452,12 @@ def open_paper_trade(
                 status,
                 risk_amount,
                 opened_at,
-                position_group_id
+                position_group_id,
+                copied_from_trade_id
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                'OPEN', ?, CURRENT_TIMESTAMP, ?
+                'OPEN', ?, CURRENT_TIMESTAMP, ?, ?
             )
             """,
             (
@@ -436,7 +471,8 @@ def open_paper_trade(
                 stop,
                 target,
                 risk["risk_amount"],
-                position_group_id
+                position_group_id,
+                copy_source_trade_id
             )
         )
 
