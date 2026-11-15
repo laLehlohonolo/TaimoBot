@@ -1,7 +1,7 @@
 import uuid
 
 from .database import get_connection
-from .execution import open_paper_trade, transaction, get_open_risk
+from .execution import (\n    open_paper_trade, transaction, get_open_risk,\n    _calculate_trade_pnl\n)
 from .risk import get_risk_profile, MAX_RISK_PERCENT
 
 
@@ -216,3 +216,190 @@ def _copy_for_relationship(relationship, source):
             "failure_reason": reason,
             "duplicate_prevented": False
         }
+
+
+
+def close_trade_with_copies(trade_id, exit_price):
+    """
+    Close an original source trade and every open direct copy atomically.
+
+    A copied trade closed on its own affects only its follower account.
+    Existing copies are closed even if their relationship is paused/stopped.
+    """
+    trade_id = str(trade_id).strip()
+    if not trade_id:
+        raise ValueError("Trade ID is required.")
+
+    try:
+        exit_value = float(exit_price)
+    except (TypeError, ValueError):
+        raise ValueError("Exit price must be a positive number.")
+
+    if not (exit_value > 0 and exit_value < float("inf")):
+        raise ValueError("Exit price must be a positive number.")
+
+    with transaction() as connection:
+        requested_trade = connection.execute(
+            "SELECT * FROM trades WHERE trade_id = ?",
+            (trade_id,)
+        ).fetchone()
+
+        if requested_trade is None:
+            raise ValueError("Trade not found.")
+
+        if requested_trade["status"] != "OPEN":
+            raise ValueError("Only open trades can be closed.")
+
+        is_copied_trade = requested_trade["copied_from_trade_id"] is not None
+
+        if is_copied_trade:
+            trades_to_close = [requested_trade]
+        else:
+            copies = connection.execute(
+                """
+                SELECT * FROM trades
+                WHERE copied_from_trade_id = ?
+                  AND status = 'OPEN'
+                ORDER BY account_id, trade_id
+                """,
+                (trade_id,)
+            ).fetchall()
+            trades_to_close = [requested_trade, *copies]
+
+        account_pnl = {}
+        trade_results = []
+
+        for trade in trades_to_close:
+            pnl = _calculate_trade_pnl(trade, exit_value)
+            account_id = trade["account_id"]
+            account_pnl[account_id] = account_pnl.get(account_id, 0.0) + pnl
+            trade_results.append({
+                "trade_id": trade["trade_id"],
+                "account_id": account_id,
+                "is_copy": trade["copied_from_trade_id"] is not None,
+                "realized_pnl": pnl,
+                "position_group_id": trade["position_group_id"]
+            })
+
+        new_balances = {}
+        for account_id, pnl in account_pnl.items():
+            account = connection.execute(
+                """
+                SELECT balance FROM paper_accounts
+                WHERE account_id = ?
+                """,
+                (account_id,)
+            ).fetchone()
+
+            if account is None:
+                raise ValueError("Paper account not found.")
+
+            new_balance = float(account["balance"]) + pnl
+            if new_balance < 0:
+                raise ValueError(
+                    "Close rejected: result would make an account balance negative. "
+                    "No source or copied positions were closed."
+                )
+            new_balances[account_id] = new_balance
+
+        for result in trade_results:
+            update = connection.execute(
+                """
+                UPDATE trades
+                SET status = 'CLOSED',
+                    realized_pnl = ?,
+                    closed_at = CURRENT_TIMESTAMP
+                WHERE trade_id = ?
+                  AND status = 'OPEN'
+                """,
+                (result["realized_pnl"], result["trade_id"])
+            )
+            if update.rowcount != 1:
+                raise ValueError(
+                    "A source or copied trade could not be closed. "
+                    "The entire close was rolled back."
+                )
+
+        for account_id, new_balance in new_balances.items():
+            connection.execute(
+                "UPDATE paper_accounts SET balance = ? WHERE account_id = ?",
+                (new_balance, account_id)
+            )
+
+        if is_copied_trade:
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET status = 'CLOSED', updated_at = CURRENT_TIMESTAMP
+                WHERE copied_trade_id = ?
+                  AND status = 'COPIED'
+                """,
+                (trade_id,)
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET status = 'CLOSED', updated_at = CURRENT_TIMESTAMP
+                WHERE source_trade_id = ?
+                  AND status = 'COPIED'
+                """,
+                (trade_id,)
+            )
+
+        group_ids = {
+            item["position_group_id"]
+            for item in trade_results
+            if item["position_group_id"]
+        }
+        for group_id in group_ids:
+            remaining = connection.execute(
+                """
+                SELECT COUNT(*) AS remaining
+                FROM trades
+                WHERE position_group_id = ? AND status = 'OPEN'
+                """,
+                (group_id,)
+            ).fetchone()["remaining"]
+            if remaining == 0:
+                connection.execute(
+                    """
+                    UPDATE position_groups
+                    SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP
+                    WHERE group_id = ?
+                    """,
+                    (group_id,)
+                )
+
+        remaining_risk = {
+            account_id: round(get_open_risk(connection, account_id), 2)
+            for account_id in account_pnl
+        }
+
+    source_result = trade_results[0]
+    copy_results = [
+        {
+            "trade_id": item["trade_id"],
+            "account_id": item["account_id"],
+            "status": "CLOSED",
+            "realized_pnl": round(item["realized_pnl"], 2),
+            "new_balance": round(new_balances[item["account_id"]], 2),
+            "remaining_open_risk": remaining_risk[item["account_id"]]
+        }
+        for item in trade_results[1:]
+    ]
+
+    return {
+        "trade_id": trade_id,
+        "account_id": requested_trade["account_id"],
+        "symbol": requested_trade["symbol"],
+        "status": "CLOSED",
+        "exit_price": exit_value,
+        "realized_pnl": round(source_result["realized_pnl"], 2),
+        "new_balance": round(new_balances[requested_trade["account_id"]], 2),
+        "remaining_open_risk": remaining_risk[requested_trade["account_id"]],
+        "closed_copies": len(copy_results),
+        "copy_closures": copy_results,
+        "close_scope": "FOLLOWER_ONLY" if is_copied_trade else "SOURCE_AND_OPEN_COPIES",
+        "mode": "paper_trading"
+    }
