@@ -1,6 +1,7 @@
-"""Database-backed global safety controls."""
+""""Database-backed global safety controls."""
 
 from .database import get_connection
+from .maintenance import is_maintenance_window
 
 
 def _set_emergency_stop(active):
@@ -53,4 +54,10 @@ def require_trading_enabled():
     if is_emergency_stop_active():
         raise RuntimeError(
             "Trading blocked: emergency stop is active."
+        )
+
+    if is_maintenance_window():
+        raise RuntimeError(
+            "Trading blocked: daily maintenance window is active "
+            "(23:00-00:00 Africa/Johannesburg)."
         )
