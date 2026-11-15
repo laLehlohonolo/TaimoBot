@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app import database
 from app.database import init_db
+from app.auth import register_user, create_session
 from app.execution import create_paper_account
 from app.main import app
 
@@ -17,9 +18,13 @@ class CopyRelationshipApiTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "copy_relationships.db"
         init_db()
-        create_paper_account("SOURCE-001", 10000)
-        create_paper_account("FOLLOWER-001", 5000)
+        user = register_user("copy-api-tests@taimobot.local", "TestPassphrase-2026-Secure!")
+        self.user_id = user["user_id"]
+        session = create_session(self.user_id)
+        create_paper_account("SOURCE-001", 10000, owner_user_id=self.user_id)
+        create_paper_account("FOLLOWER-001", 5000, owner_user_id=self.user_id)
         self.client = TestClient(app)
+        self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
 
     def tearDown(self):
         self.client.close()
