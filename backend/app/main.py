@@ -40,6 +40,7 @@ from .auth_routes import (
     require_group_access,
     require_trade_access,
     require_relationship_access,
+    require_admin,
 )
 from .safety import (
     activate_emergency_stop,
@@ -153,11 +154,13 @@ def safety_status():
 
 @app.post("/safety/emergency-stop")
 def emergency_stop(user=Depends(current_user)):
+    require_admin(user)
     return activate_emergency_stop()
 
 
 @app.post("/safety/resume")
 def resume_trading(user=Depends(current_user)):
+    require_admin(user)
     return deactivate_emergency_stop()
 
 
