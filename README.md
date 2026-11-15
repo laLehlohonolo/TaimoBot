@@ -17,3 +17,19 @@ The allowlist is empty by default, so ordinary registered users cannot activate
 or clear the system-wide stop. Keep this setting in the backend deployment's
 secret/environment configuration, not in frontend code. This is an environment-
 configured administrator allowlist, not a full role-management system.
+
+
+## Browser origin security
+
+Cross-origin browser requests are disabled unless the backend is configured with
+`TAIMOBOT_CORS_ORIGINS`, a comma-separated list of exact trusted origins, for
+example:
+
+```text
+TAIMOBOT_CORS_ORIGINS=https://dashboard.example.com
+```
+
+Only explicit HTTP(S) origins are accepted; wildcard origins, URL paths, query
+strings and fragments are rejected at startup. Bearer-token access does not use
+cookies, so cross-origin credentials are disabled. Leave the variable unset for
+same-origin deployments or local Vite proxy development.
