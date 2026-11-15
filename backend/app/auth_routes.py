@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -133,3 +135,19 @@ def require_relationship_access(relationship_id, user):
     require_account_access(row["source_account_id"], user)
     require_account_access(row["follower_account_id"], user)
     return True
+
+
+def require_admin(user):
+    """Allow global safety controls only to explicitly configured administrators."""
+    configured = os.getenv("TAIMOBOT_ADMIN_EMAILS", "")
+    admin_emails = {
+        email.strip().lower()
+        for email in configured.split(",")
+        if email.strip()
+    }
+    if user.get("email", "").strip().lower() not in admin_emails:
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator privileges required."
+        )
+    return user
