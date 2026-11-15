@@ -10,12 +10,10 @@ from fastapi.testclient import TestClient
 from app import database
 from app.database import init_db
 from app.auth import register_user, create_session
-from app.execution import (
-    create_paper_account, open_paper_trade, close_trade_with_copies
-)
+from app.execution import create_paper_account, open_paper_trade
 import app.copy_trading as copy_trading
 from app.main import app
-from app.copy_trading import replicate_open_trade
+from app.copy_trading import replicate_open_trade, close_trade_with_copies
 from app.safety import activate_emergency_stop, deactivate_emergency_stop
 
 
