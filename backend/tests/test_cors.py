@@ -1,6 +1,9 @@
 import unittest
 
-from app.cors import parse_cors_origins
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.cors import configure_cors, parse_cors_origins
 
 
 class CorsOriginTests(unittest.TestCase):
@@ -41,6 +44,42 @@ class CorsOriginTests(unittest.TestCase):
             with self.subTest(origin=origin):
                 with self.assertRaises(ValueError):
                     parse_cors_origins(origin)
+
+
+    def test_cors_middleware_allows_only_the_configured_origin(self):
+        test_app = FastAPI()
+        configure_cors(test_app, "https://dashboard.example.com")
+
+        @test_app.get("/probe")
+        def probe():
+            return {"ok": True}
+
+        with TestClient(test_app) as client:
+            allowed = client.options(
+                "/probe",
+                headers={
+                    "Origin": "https://dashboard.example.com",
+                    "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Headers": "authorization",
+                },
+            )
+            rejected = client.options(
+                "/probe",
+                headers={
+                    "Origin": "https://untrusted.example.net",
+                    "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Headers": "authorization",
+                },
+            )
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(
+            allowed.headers.get("access-control-allow-origin"),
+            "https://dashboard.example.com"
+        )
+        self.assertNotIn("access-control-allow-credentials", allowed.headers)
+        self.assertEqual(rejected.status_code, 400)
+        self.assertNotIn("access-control-allow-origin", rejected.headers)
 
 
 if __name__ == "__main__":
