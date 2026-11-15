@@ -1,4 +1,5 @@
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from app.database import init_db
 from app.main import app
 from app.execution import create_paper_account
 from app.safety import deactivate_emergency_stop
+from app.copy_trading import close_position_group_with_copies
 
 
 class PositionGroupTests(unittest.TestCase):
@@ -281,6 +283,130 @@ class PositionGroupTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+
+    def create_follower_relationship(self):
+        create_paper_account("GROUP-FOLLOWER-001", 10000)
+        response = self.client.post(
+            "/accounts/GROUP-FOLLOWER-001/copy-relationships",
+            json={"source_account_id": "GROUP-001"}
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["relationship_id"]
+
+    def test_group_close_closes_source_and_follower_copies(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+
+        first = self.open_group_trade(group_id, "GROUP-COPY-CLOSE-001")
+        second = self.open_group_trade(group_id, "GROUP-COPY-CLOSE-002")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["copy_summary"]["successful_copies"], 1)
+        self.assertEqual(second.json()["copy_summary"]["successful_copies"], 1)
+
+        response = self.client.post(
+            f"/groups/{group_id}/close",
+            json={"exit_price": 4010}
+        )
+        self.assertEqual(response.status_code, 200)
+
+        result = response.json()
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertEqual(result["closed_positions"], 2)
+        self.assertEqual(result["closed_copies"], 2)
+        self.assertEqual(result["realized_pnl"], 100)
+        self.assertEqual(result["new_balance"], 10100)
+
+        with database.get_connection() as connection:
+            source_balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-001'"
+            ).fetchone()["balance"]
+            follower_balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-FOLLOWER-001'"
+            ).fetchone()["balance"]
+            open_trades = connection.execute(
+                "SELECT COUNT(*) AS total FROM trades WHERE status = 'OPEN' "
+                "AND account_id IN ('GROUP-001', 'GROUP-FOLLOWER-001')"
+            ).fetchone()["total"]
+            closed_copies = connection.execute(
+                "SELECT COUNT(*) AS total FROM copy_executions WHERE status = 'CLOSED'"
+            ).fetchone()["total"]
+
+        self.assertEqual(source_balance, 10100)
+        self.assertEqual(follower_balance, 10100)
+        self.assertEqual(open_trades, 0)
+        self.assertEqual(closed_copies, 2)
+
+    def test_group_close_rolls_back_when_follower_close_fails(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+
+        opened = self.open_group_trade(group_id, "GROUP-COPY-ROLLBACK-001")
+        self.assertEqual(opened.status_code, 200)
+
+        with database.get_connection() as connection:
+            copied_trade = connection.execute(
+                """
+                SELECT trade_id FROM trades
+                WHERE copied_from_trade_id = (
+                    SELECT trade_id FROM trades
+                    WHERE client_order_id = 'GROUP-COPY-ROLLBACK-001'
+                )
+                """
+            ).fetchone()
+            self.assertIsNotNone(copied_trade)
+            copied_trade_id = copied_trade["trade_id"]
+
+            connection.execute(
+                f"""
+                CREATE TRIGGER fail_follower_group_close
+                BEFORE UPDATE OF status ON trades
+                WHEN OLD.trade_id = '{copied_trade_id}'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated follower close failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_position_group_with_copies(group_id, 4010)
+
+        with database.get_connection() as connection:
+            source_trade = connection.execute(
+                """
+                SELECT status FROM trades
+                WHERE client_order_id = 'GROUP-COPY-ROLLBACK-001'
+                """
+            ).fetchone()
+            follower_trade = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (copied_trade_id,)
+            ).fetchone()
+            source_balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-001'"
+            ).fetchone()["balance"]
+            follower_balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-FOLLOWER-001'"
+            ).fetchone()["balance"]
+            group_status = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,)
+            ).fetchone()["status"]
+            execution_status = connection.execute(
+                """
+                SELECT status FROM copy_executions
+                WHERE copied_trade_id = ?
+                """,
+                (copied_trade_id,)
+            ).fetchone()["status"]
+
+        self.assertEqual(source_trade["status"], "OPEN")
+        self.assertEqual(follower_trade["status"], "OPEN")
+        self.assertEqual(source_balance, 10000)
+        self.assertEqual(follower_balance, 10000)
+        self.assertEqual(group_status, "OPEN")
+        self.assertEqual(execution_status, "COPIED")
 
 
 if __name__ == "__main__":
