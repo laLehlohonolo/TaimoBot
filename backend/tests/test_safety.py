@@ -53,6 +53,25 @@ class PersistentEmergencyStopTests(unittest.TestCase):
         self.assertTrue(status["new_orders_allowed"])
         self.assertIsNone(status["block_reason"])
 
+    def test_resume_keeps_new_orders_blocked_during_maintenance(self):
+        with patch("app.safety.is_maintenance_window", return_value=True):
+            result = deactivate_emergency_stop()
+
+        self.assertFalse(result["emergency_stop"])
+        self.assertTrue(result["maintenance_window_active"])
+        self.assertFalse(result["new_orders_allowed"])
+        self.assertEqual(result["block_reason"], "DAILY_MAINTENANCE")
+        self.assertIn("remain blocked", result["message"])
+
+    def test_resume_allows_new_orders_outside_maintenance(self):
+        with patch("app.safety.is_maintenance_window", return_value=False):
+            result = deactivate_emergency_stop()
+
+        self.assertFalse(result["emergency_stop"])
+        self.assertFalse(result["maintenance_window_active"])
+        self.assertTrue(result["new_orders_allowed"])
+        self.assertIsNone(result["block_reason"])
+
     def test_emergency_stop_survives_database_reinitialization(self):
         result = activate_emergency_stop()
         self.assertTrue(result["emergency_stop"])
