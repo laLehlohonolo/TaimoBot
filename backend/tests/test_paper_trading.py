@@ -2,6 +2,7 @@
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from pathlib import Path
@@ -32,6 +33,11 @@ from app.safety import (
 class PaperTradingTests(unittest.TestCase):
 
     def setUp(self):
+        self.admin_env = patch.dict(
+            "os.environ",
+            {"TAIMOBOT_ADMIN_EMAILS": "paper-tests@taimobot.local"}
+        )
+        self.admin_env.start()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "test.db"
@@ -48,6 +54,7 @@ class PaperTradingTests(unittest.TestCase):
 
     def tearDown(self):
         self.client.close()
+        self.admin_env.stop()
         deactivate_emergency_stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
