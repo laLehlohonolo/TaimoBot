@@ -126,6 +126,15 @@ class CopyRelationshipRequest(BaseModel):
     source_account_id: str = Field(min_length=1, max_length=100)
 
 
+class StrategyKnowledgeRequest(BaseModel):
+    name: str = Field(min_length=3, max_length=100)
+    category: str = Field(min_length=3, max_length=40, pattern=r"^[A-Z][A-Z0-9_]*$")
+    description: str = Field(min_length=10, max_length=1000)
+    entry_logic: str = Field(min_length=10, max_length=2000)
+    exit_logic: str = Field(min_length=10, max_length=2000)
+    risk_notes: str = Field(min_length=10, max_length=2000)
+
+
 @app.get("/")
 def home():
     return {
@@ -491,3 +500,29 @@ from .copy_trading import (
     close_position_group_with_copies
 )
 
+
+
+@app.get("/strategies")
+def strategy_library(user=Depends(current_user)):
+    """List built-in reference techniques and this user's contributions."""
+    return list_strategies(user["user_id"])
+
+
+@app.post("/strategies")
+def add_strategy_knowledge(
+    request: StrategyKnowledgeRequest,
+    user=Depends(current_user)
+):
+    """Store a strategy idea as unvalidated knowledge, never as an active signal."""
+    return create_strategy(
+        user["user_id"],
+        request.model_dump()
+    )
+
+
+@app.get("/strategies/{strategy_id}")
+def strategy_details(strategy_id: str, user=Depends(current_user)):
+    strategy = get_strategy(strategy_id, user["user_id"])
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="Strategy not found.")
+    return strategy
