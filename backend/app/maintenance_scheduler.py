@@ -176,6 +176,40 @@ def run_maintenance_for_date(
         }
 
 
+
+def get_maintenance_status() -> dict:
+    """Return the latest persisted maintenance result without exposing file paths."""
+    with database.get_connection() as connection:
+        table = connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'maintenance_runs'
+            """
+        ).fetchone()
+        if table is None:
+            return {"last_run_date": None, "last_run_status": "NOT_RUN"}
+
+        row = connection.execute(
+            """
+            SELECT run_date, status, started_at, completed_at, error_summary
+            FROM maintenance_runs
+            ORDER BY run_date DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    if row is None:
+        return {"last_run_date": None, "last_run_status": "NOT_RUN"}
+
+    return {
+        "last_run_date": row["run_date"],
+        "last_run_status": row["status"],
+        "started_at": row["started_at"],
+        "completed_at": row["completed_at"],
+        "error_summary": row["error_summary"],
+    }
+
+
 async def maintenance_scheduler(poll_seconds: int = 30) -> None:
     """Poll the SAST window; database claims prevent duplicate worker runs."""
     while True:
