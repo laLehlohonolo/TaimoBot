@@ -9,14 +9,6 @@ from .execution import (
 from .risk import get_risk_profile, MAX_RISK_PERCENT
 
 
-from .database import get_connection
-from .execution import (
-    open_paper_trade, transaction, get_open_risk,
-    _calculate_trade_pnl
-)
-from .risk import get_risk_profile, MAX_RISK_PERCENT
-
-
 def replicate_open_trade(source_trade_id):
     """
     Attempt one independently risk-checked paper copy for every ACTIVE
@@ -259,7 +251,9 @@ def _copy_for_relationship(relationship, source):
                 entry_price=source["entry_price"],
                 stop_loss=source["stop_loss"],
                 take_profit=source["take_profit"],
-                symbol=source["symbol"]
+                symbol=source["symbol"],
+                copy_source_trade_id=source_trade_id,
+                copy_relationship_id=relationship_id
             )
             copied_trade_id = copied["trade_id"]
 
