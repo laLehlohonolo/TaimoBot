@@ -33,3 +33,12 @@ Only explicit HTTP(S) origins are accepted; wildcard origins, URL paths, query
 strings and fragments are rejected at startup. Bearer-token access does not use
 cookies, so cross-origin credentials are disabled. Leave the variable unset for
 same-origin deployments or local Vite proxy development.
+
+
+## Emergency-stop persistence
+
+The global emergency-stop flag is stored in the backend SQLite database, not only
+in process memory. It therefore remains active across API process restarts and is
+shared by backend workers using the same database. If the singleton safety-state
+record is unexpectedly missing, the API treats the state as stopped until an
+authorized administrator repairs or resumes it.
