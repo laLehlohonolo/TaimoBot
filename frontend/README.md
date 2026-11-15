@@ -26,3 +26,12 @@ Set `VITE_API_BASE_URL` to the API base path or URL. The default is `/api`.
 **Deployment warning:** the backend currently has no administrator role or user-management workflow. Do not expose emergency-stop controls to untrusted users, and do not expose the backend publicly until HTTPS, production CORS/origin restrictions, secret management, backups, monitoring and deployment hardening have been configured. Never place API keys, signing secrets, passwords or broker credentials in `VITE_*` variables; these are visible in browser assets.
 
 All trading and risk decisions remain server-side. The system remains paper-trading only; no live broker execution is enabled.
+
+
+## Global emergency-stop permissions
+
+The global emergency-stop and resume endpoints are administrator-only. The backend
+must be configured with `TAIMOBOT_ADMIN_EMAILS` (a comma-separated allowlist of
+administrator email addresses). If the variable is empty or unset, these controls
+fail closed and return HTTP 403 to regular users. Never put this setting in frontend
+environment variables or browser code.
