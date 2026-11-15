@@ -293,7 +293,7 @@ def close_group(
     request: CloseGroupRequest
 ):
     try:
-        return close_position_group(
+        return close_position_group_with_copies(
             group_id=group_id,
             exit_price=request.exit_price
         )
