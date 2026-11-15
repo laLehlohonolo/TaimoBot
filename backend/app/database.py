@@ -61,6 +61,22 @@ def migrate_trade_columns(connection):
             )
 
 
+def migrate_account_ownership(connection):
+    """Add nullable ownership without assigning legacy accounts to strangers."""
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(
+            "PRAGMA table_info(paper_accounts)"
+        ).fetchall()
+    }
+
+    if "owner_user_id" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE paper_accounts ADD COLUMN owner_user_id TEXT "
+            "REFERENCES users(user_id)"
+        )
+
+
 def migrate_account_risk_profiles(connection):
     """Add and assign persistent risk profiles to existing accounts."""
 
@@ -238,6 +254,7 @@ def init_db():
         )
 
         migrate_trade_columns(connection)
+        migrate_account_ownership(connection)
         migrate_account_risk_profiles(connection)
 
         connection.execute(
