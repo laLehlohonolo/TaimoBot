@@ -2,6 +2,7 @@
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -18,6 +19,11 @@ from app.copy_trading import close_position_group_with_copies
 class PositionGroupTests(unittest.TestCase):
 
     def setUp(self):
+        self.admin_env = patch.dict(
+            "os.environ",
+            {"TAIMOBOT_ADMIN_EMAILS": "position-groups-tests@taimobot.local"}
+        )
+        self.admin_env.start()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "groups.db"
@@ -34,6 +40,7 @@ class PositionGroupTests(unittest.TestCase):
 
     def tearDown(self):
         self.client.close()
+        self.admin_env.stop()
         deactivate_emergency_stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
