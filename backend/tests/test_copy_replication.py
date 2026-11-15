@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app import database
 from app.database import init_db
+from app.auth import register_user, create_session
 from app.execution import create_paper_account, open_paper_trade
 from app.main import app
 from app.copy_trading import replicate_open_trade
@@ -20,9 +21,13 @@ class CopyTradeReplicationTests(unittest.TestCase):
         database.DB_PATH = Path(self.temp_dir.name) / "copy.db"
         deactivate_emergency_stop()
         init_db()
-        create_paper_account("SOURCE", 10000)
-        create_paper_account("FOLLOWER", 5000)
+        user = register_user("copy-replication-tests@taimobot.local", "TestPassphrase-2026-Secure!")
+        self.user_id = user["user_id"]
+        session = create_session(self.user_id)
+        create_paper_account("SOURCE", 10000, owner_user_id=self.user_id)
+        create_paper_account("FOLLOWER", 5000, owner_user_id=self.user_id)
         self.client = TestClient(app)
+        self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
 
         self.client.post(
             "/accounts/FOLLOWER/copy-relationships",
