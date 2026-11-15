@@ -2,6 +2,7 @@
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from app import database
@@ -18,6 +19,12 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         database.DB_PATH = Path(self.temp_dir.name) / "test_taimobot.db"
         database.init_db()
         deactivate_emergency_stop()
+        # These tests verify copy-trading behavior, not the wall-clock
+        # maintenance gate. The dedicated maintenance tests cover that gate.
+        self.maintenance_window_patch = patch(
+            "app.safety.is_maintenance_window", return_value=False
+        )
+        self.maintenance_window_patch.start()
 
         with database.get_connection() as connection:
             connection.execute(
@@ -31,6 +38,7 @@ class CopyTradingDatabaseTests(unittest.TestCase):
             )
 
     def tearDown(self):
+        self.maintenance_window_patch.stop()
         deactivate_emergency_stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
