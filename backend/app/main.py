@@ -24,7 +24,7 @@ from .execution import (
     get_copy_relationships,
     update_copy_relationship_status
 )
-from .copy_trading import replicate_open_trade
+from .copy_trading import replicate_open_trade, close_trade_with_copies
 from .history import (
     get_account_history,
     get_trade_history
@@ -342,7 +342,7 @@ def close_trade(
     request: CloseTradeRequest
 ):
     try:
-        return close_paper_trade(
+        return close_trade_with_copies(
             trade_id,
             request.exit_price
         )
