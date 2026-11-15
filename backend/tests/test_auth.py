@@ -17,6 +17,7 @@ from app.auth import (
 )
 from app.database import init_db
 from app.main import app
+from app.safety import deactivate_emergency_stop
 
 
 class AuthenticationPrimitiveTests(unittest.TestCase):
@@ -252,6 +253,55 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
 
         with self.assertRaises(AuthenticationError):
             get_session_user(session["access_token"])
+
+
+    def test_regular_authenticated_user_cannot_control_global_emergency_stop(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "member@example.com", "password": "MemberPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "member@example.com", "password": "MemberPassphrase-2026!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+
+        with __import__("unittest").mock.patch.dict(
+            "os.environ",
+            {"TAIMOBOT_ADMIN_EMAILS": "admin@example.com"},
+            clear=True
+        ):
+            activate = self.client.post("/safety/emergency-stop", headers=headers)
+            resume = self.client.post("/safety/resume", headers=headers)
+
+        self.assertEqual(activate.status_code, 403)
+        self.assertEqual(resume.status_code, 403)
+
+    def test_configured_admin_can_activate_and_resume_emergency_stop(self):
+        deactivate_emergency_stop()
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "admin@example.com", "password": "AdminPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "admin@example.com", "password": "AdminPassphrase-2026!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+
+        with __import__("unittest").mock.patch.dict(
+            "os.environ",
+            {"TAIMOBOT_ADMIN_EMAILS": " admin@example.com,other@example.com "},
+            clear=True
+        ):
+            activate = self.client.post("/safety/emergency-stop", headers=headers)
+            self.assertEqual(activate.status_code, 200)
+            self.assertTrue(activate.json()["emergency_stop"])
+            resume = self.client.post("/safety/resume", headers=headers)
+            self.assertEqual(resume.status_code, 200)
+            self.assertFalse(resume.json()["emergency_stop"])
 
 
 if __name__ == "__main__":
