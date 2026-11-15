@@ -191,6 +191,11 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
             json={"email": "stranger@example.com", "password": "StrangerPassphrase-2026!"}
         )
         stranger_headers = {"Authorization": "Bearer " + stranger_login.json()["access_token"]}
+        stranger_accounts = self.client.get("/accounts", headers=stranger_headers)
+        owner_accounts = self.client.get("/accounts", headers=owner_headers)
+        self.assertEqual(stranger_accounts.status_code, 200)
+        self.assertEqual(stranger_accounts.json()["count"], 0)
+        self.assertEqual(owner_accounts.json()["count"], 1)
 
         account = self.client.get("/accounts/OWNER-ACCOUNT", headers=stranger_headers)
         trade = self.client.post(
