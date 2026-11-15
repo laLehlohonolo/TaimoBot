@@ -257,6 +257,17 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_trades_status
                 ON trades(status);
+
+            CREATE TABLE IF NOT EXISTS system_safety_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                emergency_stop_active INTEGER NOT NULL DEFAULT 0
+                    CHECK (emergency_stop_active IN (0, 1)),
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            INSERT OR IGNORE INTO system_safety_state (
+                singleton_id, emergency_stop_active
+            ) VALUES (1, 0);
             """
         )
 
