@@ -76,6 +76,111 @@ function MetricCard({ label, value, note }) {
   return <article className="panel metric-card"><span className="card-label">{label}</span><div className="metric">{value}</div><p>{note}</p></article>;
 }
 
+
+function StrategyLibrary({ token }) {
+  const [strategies, setStrategies] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [form, setForm] = useState({
+    name: "", category: "SCALPING", description: "",
+    entry_logic: "", exit_logic: "", risk_notes: ""
+  });
+
+  const loadStrategies = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await apiRequest("/strategies", {}, token);
+      setStrategies(result.strategies || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load strategy knowledge.");
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => { loadStrategies(); }, [loadStrategies]);
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await apiRequest("/strategies", {
+        method: "POST",
+        body: JSON.stringify(form)
+      }, token);
+      setForm({
+        name: "", category: "SCALPING", description: "",
+        entry_logic: "", exit_logic: "", risk_notes: ""
+      });
+      setNotice("Research note saved. It remains unvalidated and cannot trigger trades.");
+      await loadStrategies();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save strategy note.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="panel strategy-library">
+      <div className="strategy-heading">
+        <div>
+          <p className="eyebrow">LEARNING / KNOWLEDGE BASE</p>
+          <h2>Strategy knowledge</h2>
+          <p className="muted">A growing library of techniques and research notes. Every entry starts unvalidated.</p>
+        </div>
+        <span className="strategy-count">{strategies.length} techniques</span>
+      </div>
+      {error && <div className="notice error" role="alert">{error}</div>}
+      {notice && <div className="notice success" role="status">{notice}</div>}
+      {loading ? <p className="muted">Loading strategy knowledge…</p> : (
+        <div className="strategy-list">
+          {strategies.map(item => (
+            <details className="strategy-item" key={item.strategy_id}>
+              <summary>
+                <span className="strategy-name">{item.name}<small>{item.category.replaceAll("_", " ")}</small></span>
+                <span className="strategy-meta">
+                  <span className="strategy-status">{item.evidence_status.replaceAll("_", " ")}</span>
+                  <span className="strategy-source">{item.owner_user_id ? "Your research" : "Reference technique"}</span>
+                </span>
+              </summary>
+              <div className="strategy-detail">
+                <p>{item.description}</p>
+                <div><strong>Entry approach</strong><p>{item.entry_logic}</p></div>
+                <div><strong>Exit approach</strong><p>{item.exit_logic}</p></div>
+                <div><strong>Risk considerations</strong><p>{item.risk_notes}</p></div>
+                <small>Evidence: {item.evidence_status.replaceAll("_", " ")} · Source: {item.provenance.replaceAll("_", " ")}</small>
+              </div>
+            </details>
+          ))}
+        </div>
+      )}
+      <form className="strategy-form" onSubmit={submit}>
+        <div>
+          <p className="eyebrow">CONTRIBUTE KNOWLEDGE</p>
+          <h3>Add a strategy or technique</h3>
+          <p className="muted">Record the method and its rules. All new notes remain unvalidated until independently tested.</p>
+        </div>
+        <label>Strategy name<input required minLength={3} maxLength={100} value={form.name} onChange={event => setForm(current => ({ ...current, name: event.target.value }))} placeholder="e.g. London session pullback" /></label>
+        <label>Category<select value={form.category} onChange={event => setForm(current => ({ ...current, category: event.target.value }))}>
+          <option value="SCALPING">Scalping</option><option value="TREND">Trend</option><option value="MOMENTUM">Momentum</option><option value="SESSION">Session</option><option value="LEVELS">Support / resistance</option><option value="RANGE">Mean reversion / range</option><option value="MULTI_TIMEFRAME">Multi-timeframe</option><option value="OTHER">Other</option>
+        </select></label>
+        <label>Description<textarea required minLength={10} maxLength={1000} value={form.description} onChange={event => setForm(current => ({ ...current, description: event.target.value }))} rows={2} /></label>
+        <label>Entry rules<textarea required minLength={10} maxLength={2000} value={form.entry_logic} onChange={event => setForm(current => ({ ...current, entry_logic: event.target.value }))} rows={3} /></label>
+        <label>Exit rules<textarea required minLength={10} maxLength={2000} value={form.exit_logic} onChange={event => setForm(current => ({ ...current, exit_logic: event.target.value }))} rows={3} /></label>
+        <label>Risk considerations<textarea required minLength={10} maxLength={2000} value={form.risk_notes} onChange={event => setForm(current => ({ ...current, risk_notes: event.target.value }))} rows={2} /></label>
+        <button className="primary-button" type="submit" disabled={saving}>{saving ? "Saving…" : "Save research note"}</button>
+      </form>
+      <p className="strategy-disclaimer">Reference techniques and research notes are educational records, not trading recommendations or proven profitable systems. Strategy synthesis and automated execution are not enabled.</p>
+    </section>
+  );
+}
+
 export default function App() {
   const [health, setHealth] = useState(null);
   const [safety, setSafety] = useState(null);
@@ -281,6 +386,7 @@ export default function App() {
               ) : <div className="panel empty-state"><h2>{accounts.length ? "Select an account" : "Your paper workspace is ready"}</h2><p className="muted">{accounts.length ? "Choose an account to inspect its balance, risk and trade history." : "Create your first paper account to begin tracking simulated activity."}</p></div>}
             </div>
           </div>
+          <StrategyLibrary token={session.access_token} />
         </section>
       )}
 
