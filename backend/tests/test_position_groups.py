@@ -28,8 +28,8 @@ class PositionGroupTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "groups.db"
 
-        deactivate_emergency_stop()
         init_db()
+        deactivate_emergency_stop()
         user = register_user("position-groups-tests@taimobot.local", "TestPassphrase-2026-Secure!")
         self.user_id = user["user_id"]
         session = create_session(self.user_id)
