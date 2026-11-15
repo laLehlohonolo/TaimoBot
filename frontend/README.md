@@ -21,9 +21,9 @@ Set `VITE_API_BASE_URL` to the API base path or URL. The default is `/api`.
 - Repeated failed logins are temporarily throttled.
 - The frontend keeps the bearer token in React memory only. Refreshing the page clears the session and requires signing in again. The token is not written to localStorage or sessionStorage.
 - The dashboard is read-only for trade execution. It can create paper accounts and inspect account balances, risk and trade history, but it cannot place or close orders.
-- Health and emergency-stop status are public read-only endpoints. Emergency-stop activation and resume require authentication.
+- Health and emergency-stop status are public read-only endpoints. Emergency-stop activation and resume require an authenticated email on the backend administrator allowlist.
 
-**Deployment warning:** the backend currently has no administrator role or user-management workflow. Do not expose emergency-stop controls to untrusted users, and do not expose the backend publicly until HTTPS, production CORS/origin restrictions, secret management, backups, monitoring and deployment hardening have been configured. Never place API keys, signing secrets, passwords or broker credentials in `VITE_*` variables; these are visible in browser assets.
+**Deployment warning:** administrator access is controlled by the backend `TAIMOBOT_ADMIN_EMAILS` allowlist; this is not a full role-management system. Do not expose the backend publicly until HTTPS, production CORS/origin restrictions, secret management, backups, monitoring and deployment hardening have been configured. Never place API keys, signing secrets, passwords or broker credentials in `VITE_*` variables; these are visible in browser assets.
 
 All trading and risk decisions remain server-side. The system remains paper-trading only; no live broker execution is enabled.
 
@@ -44,3 +44,12 @@ backend as a comma-separated list of exact trusted HTTP(S) origins, for example
 `https://dashboard.example.com`. Wildcards and URL paths are rejected. The
 allowlist is empty by default, cross-origin credentials are disabled, and the
 local Vite proxy continues to work without this setting.
+
+
+## Strategy knowledge
+
+The authenticated Strategy Knowledge screen/API foundation exposes built-in reference
+techniques and the signed-in user's own notes. New contributions remain explicitly
+unvalidated and cannot be used as live trading signals. Strategy backtesting,
+combination, autonomous strategy generation and decision explanations are later
+milestones; they are not implied by the existence of the library.
