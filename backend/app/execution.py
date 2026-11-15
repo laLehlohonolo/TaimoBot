@@ -48,7 +48,7 @@ def validate_symbol(symbol):
     return value
 
 
-def create_paper_account(account_id, starting_balance):
+def create_paper_account(account_id, starting_balance, owner_user_id=None):
     account_id = str(account_id).strip()
 
     balance = validate_positive_number(
@@ -78,14 +78,16 @@ def create_paper_account(account_id, starting_balance):
             INSERT INTO paper_accounts
             (
                 account_id,
+                owner_user_id,
                 starting_balance,
                 balance,
                 risk_profile
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 account_id,
+                owner_user_id,
                 balance,
                 balance,
                 profile["profile"]
