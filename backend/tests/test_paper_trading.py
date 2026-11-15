@@ -340,6 +340,104 @@ class PaperTradingTests(unittest.TestCase):
         with self.assertRaises(RiskError):
             self.open_trade("ORDER-BTC", 0.1, "BTCUSD")
 
+    def test_trade_api_returns_consistent_paper_order_contract(self):
+        response = self.client.post(
+            "/trades",
+            json={
+                "account_id": "TEST-001",
+                "client_order_id": "API-CONTRACT-001",
+                "symbol": "XAUUSD",
+                "side": "BUY",
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertTrue(result["trade_id"])
+        self.assertEqual(result["client_order_id"], "API-CONTRACT-001")
+        self.assertEqual(result["status"], "OPEN")
+        self.assertEqual(result["mode"], "paper_trading")
+        self.assertEqual(result["risk_amount"], 50)
+        self.assertEqual(result["copy_summary"]["eligible_followers"], 0)
+        self.assertEqual(result["copy_summary"]["successful_copies"], 0)
+        self.assertEqual(result["copy_summary"]["failed_copies"], 0)
+
+    def test_trade_api_duplicate_order_returns_client_error_without_second_trade(self):
+        payload = {
+            "account_id": "TEST-001",
+            "client_order_id": "API-DUPLICATE-001",
+            "symbol": "XAUUSD",
+            "side": "BUY",
+            "entry_price": 4000,
+            "stop_loss": 3990,
+            "risk_percent": 0.5
+        }
+
+        first = self.client.post("/trades", json=payload)
+        second = self.client.post("/trades", json=payload)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 400)
+        self.assertIn("Duplicate order ID", second.json()["detail"])
+
+        with database.get_connection() as connection:
+            count = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE client_order_id = 'API-DUPLICATE-001'
+                """
+            ).fetchone()["total"]
+
+        self.assertEqual(count, 1)
+
+    def test_emergency_stop_api_blocks_new_orders_but_allows_existing_close(self):
+        existing = self.client.post(
+            "/trades",
+            json={
+                "account_id": "TEST-001",
+                "client_order_id": "API-BEFORE-STOP",
+                "symbol": "XAUUSD",
+                "side": "BUY",
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5
+            }
+        )
+        self.assertEqual(existing.status_code, 200)
+
+        stop_response = self.client.post("/safety/emergency-stop")
+        self.assertEqual(stop_response.status_code, 200)
+        self.assertTrue(self.client.get("/safety/status").json()["emergency_stop"])
+
+        rejected = self.client.post(
+            "/trades",
+            json={
+                "account_id": "TEST-001",
+                "client_order_id": "API-DURING-STOP",
+                "symbol": "XAUUSD",
+                "side": "BUY",
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5
+            }
+        )
+        self.assertEqual(rejected.status_code, 400)
+
+        close_response = self.client.post(
+            f"/trades/{existing.json()['trade_id']}/close",
+            json={"exit_price": 4010}
+        )
+        self.assertEqual(close_response.status_code, 200)
+        self.assertEqual(close_response.json()["status"], "CLOSED")
+
+        resumed = self.client.post("/safety/resume")
+        self.assertEqual(resumed.status_code, 200)
+        self.assertFalse(self.client.get("/safety/status").json()["emergency_stop"])
+
     def test_api_accepts_a_valid_instrument_symbol(self):
         response = self.client.post(
             "/trades",
