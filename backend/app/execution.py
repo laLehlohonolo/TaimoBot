@@ -278,8 +278,6 @@ def open_paper_trade(
     if not account_id or not client_order_id:
         raise ValueError("Account ID and order ID are required.")
 
-    require_trading_enabled()
-
     if side not in ("BUY", "SELL"):
         raise ValueError("Side must be BUY or SELL.")
 
@@ -314,6 +312,10 @@ def open_paper_trade(
             raise ValueError("Position group ID cannot be empty.")
 
     with transaction() as connection:
+        # Check safety after acquiring the write lock so the maintenance or
+        # emergency-stop state is revalidated at the order's commit boundary.
+        require_trading_enabled()
+
         duplicate = connection.execute(
             """
             SELECT trade_id
