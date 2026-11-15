@@ -7,7 +7,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from .database import init_db, get_connection
-from .maintenance_scheduler import maintenance_scheduler
+from .maintenance_scheduler import maintenance_scheduler, get_maintenance_status
+from .maintenance import is_maintenance_window
 from .cors import configure_cors
 from .risk import (
     calculate_position_size,
@@ -169,11 +170,26 @@ def health_check():
 
 @app.get("/safety/status")
 def safety_status():
-    active = is_emergency_stop_active()
+    emergency_stop = is_emergency_stop_active()
+    maintenance_active = is_maintenance_window()
+    maintenance = get_maintenance_status()
+    new_orders_allowed = not emergency_stop and not maintenance_active
+
+    if emergency_stop:
+        block_reason = "EMERGENCY_STOP"
+    elif maintenance_active:
+        block_reason = "DAILY_MAINTENANCE"
+    else:
+        block_reason = None
 
     return {
-        "emergency_stop": active,
-        "new_orders_allowed": not active
+        "emergency_stop": emergency_stop,
+        "maintenance_window_active": maintenance_active,
+        "maintenance": maintenance,
+        "new_orders_allowed": new_orders_allowed,
+        "block_reason": block_reason,
+        "trading_mode": "paper",
+        "timezone": "Africa/Johannesburg"
     }
 
 
