@@ -1,10 +1,13 @@
+import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .database import init_db, get_connection
+from .cors import parse_cors_origins
 from .risk import (
     calculate_position_size,
     RiskError,
@@ -63,6 +66,17 @@ app = FastAPI(
 )
 
 app.include_router(auth_router)
+
+# Cross-origin browser access is disabled unless exact trusted origins are configured.
+cors_origins = parse_cors_origins(os.getenv("TAIMOBOT_CORS_ORIGINS", ""))
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Accept", "Authorization", "Content-Type"],
+    )
 
 
 class RiskPreviewRequest(BaseModel):
