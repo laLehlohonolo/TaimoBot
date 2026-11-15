@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from app import database
 from app.auth import (
     AuthenticationError,
@@ -13,6 +15,7 @@ from app.auth import (
     revoke_session,
 )
 from app.database import init_db
+from app.main import app
 
 
 class AuthenticationPrimitiveTests(unittest.TestCase):
@@ -21,8 +24,10 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "auth-test.db"
         init_db()
+        self.client = TestClient(app)
 
     def tearDown(self):
+        self.client.close()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
@@ -104,6 +109,52 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.assertEqual(account["starting_balance"], 10000)
         self.assertEqual(account["balance"], 9500)
         self.assertIsNone(account["owner_user_id"])
+
+    def test_registration_login_me_and_logout_api_flow(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "api@example.com", "password": "StrongPassphrase123!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        self.assertEqual(registered.json()["email"], "api@example.com")
+
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "API@example.com", "password": "StrongPassphrase123!"}
+        )
+        self.assertEqual(login.status_code, 200)
+        token = login.json()["access_token"]
+        self.assertEqual(login.json()["token_type"], "bearer")
+
+        me = self.client.get(
+            "/auth/me", headers={"Authorization": "Bearer " + token}
+        )
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.json()["email"], "api@example.com")
+
+        logout = self.client.post(
+            "/auth/logout", headers={"Authorization": "Bearer " + token}
+        )
+        self.assertEqual(logout.status_code, 200)
+        expired = self.client.get(
+            "/auth/me", headers={"Authorization": "Bearer " + token}
+        )
+        self.assertEqual(expired.status_code, 401)
+
+    def test_auth_me_rejects_missing_or_invalid_bearer_token(self):
+        missing = self.client.get("/auth/me")
+        invalid = self.client.get(
+            "/auth/me", headers={"Authorization": "Bearer not-a-valid-token"}
+        )
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(invalid.status_code, 401)
+
+    def test_registration_api_rejects_duplicate_email(self):
+        payload = {"email": "duplicate@example.com", "password": "StrongPassphrase123!"}
+        first = self.client.post("/auth/register", json=payload)
+        second = self.client.post("/auth/register", json=payload)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 400)
 
     def test_expired_session_is_rejected(self):
         user = register_user("expired@example.com", "StrongPassphrase123!")
