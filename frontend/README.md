@@ -35,3 +35,12 @@ must be configured with `TAIMOBOT_ADMIN_EMAILS` (a comma-separated allowlist of
 administrator email addresses). If the variable is empty or unset, these controls
 fail closed and return HTTP 403 to regular users. Never put this setting in frontend
 environment variables or browser code.
+
+
+## Backend browser-origin configuration
+
+For a separately hosted frontend, configure `TAIMOBOT_CORS_ORIGINS` on the
+backend as a comma-separated list of exact trusted HTTP(S) origins, for example
+`https://dashboard.example.com`. Wildcards and URL paths are rejected. The
+allowlist is empty by default, cross-origin credentials are disabled, and the
+local Vite proxy continues to work without this setting.
