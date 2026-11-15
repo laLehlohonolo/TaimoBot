@@ -31,10 +31,18 @@ def activate_emergency_stop():
 
 def deactivate_emergency_stop():
     _set_emergency_stop(False)
+    maintenance_active = is_maintenance_window()
     return {
         "emergency_stop": False,
-        "new_orders_allowed": True,
-        "message": "Emergency stop deactivated."
+        "maintenance_window_active": maintenance_active,
+        "new_orders_allowed": not maintenance_active,
+        "block_reason": "DAILY_MAINTENANCE" if maintenance_active else None,
+        "message": (
+            "Emergency stop deactivated. New entries remain blocked "
+            "during the daily maintenance window."
+            if maintenance_active
+            else "Emergency stop deactivated."
+        )
     }
 
 
