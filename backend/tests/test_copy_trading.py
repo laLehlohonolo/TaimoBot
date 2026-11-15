@@ -5,6 +5,9 @@ import unittest
 from pathlib import Path
 
 from app import database
+from app.copy_trading import close_trade_with_copies, replicate_open_trade
+from app.execution import open_paper_trade, update_copy_relationship_status
+from app.safety import deactivate_emergency_stop
 
 
 class CopyTradingDatabaseTests(unittest.TestCase):
@@ -13,6 +16,7 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "test_taimobot.db"
+        deactivate_emergency_stop()
         database.init_db()
 
         with database.get_connection() as connection:
@@ -27,6 +31,7 @@ class CopyTradingDatabaseTests(unittest.TestCase):
             )
 
     def tearDown(self):
+        deactivate_emergency_stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
@@ -283,6 +288,146 @@ class CopyTradingDatabaseTests(unittest.TestCase):
                     )
                     """
                 )
+
+
+    def create_relationship(self, relationship_id="REL-001"):
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO copy_relationships (
+                    relationship_id,
+                    source_account_id,
+                    follower_account_id
+                )
+                VALUES (?, 'SOURCE-001', 'FOLLOWER-001')
+                """,
+                (relationship_id,)
+            )
+        return relationship_id
+
+    def open_trade(self, account_id, order_id):
+        return open_paper_trade(
+            account_id=account_id,
+            client_order_id=order_id,
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD"
+        )
+
+    def test_repeated_copy_attempt_does_not_create_duplicate_trade(self):
+        self.create_relationship()
+        source = self.open_trade("SOURCE-001", "SOURCE-ORDER-001")
+
+        first = replicate_open_trade(source["trade_id"])
+        second = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(first["successful_copies"], 1)
+        self.assertEqual(second["successful_copies"], 0)
+        self.assertEqual(second["copies"][0]["status"], "DUPLICATE")
+        self.assertTrue(second["copies"][0]["duplicate_prevented"])
+
+        with database.get_connection() as connection:
+            copies = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE account_id = 'FOLLOWER-001'
+                  AND copied_from_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()["total"]
+            executions = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()["total"]
+
+        self.assertEqual(copies, 1)
+        self.assertEqual(executions, 1)
+
+    def test_follower_risk_is_checked_independently(self):
+        self.create_relationship()
+        self.open_trade("FOLLOWER-001", "FOLLOWER-ORDER-001")
+        self.open_trade("FOLLOWER-001", "FOLLOWER-ORDER-002")
+        source = self.open_trade("SOURCE-001", "SOURCE-ORDER-RISK")
+
+        result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn("combined open risk", result["copies"][0]["failure_reason"])
+
+        with database.get_connection() as connection:
+            follower_copies = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE account_id = 'FOLLOWER-001'
+                  AND copied_from_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()["total"]
+
+        self.assertEqual(follower_copies, 0)
+
+    def test_pause_resume_and_stop_control_new_copies(self):
+        relationship_id = self.create_relationship()
+        source = self.open_trade("SOURCE-001", "SOURCE-ORDER-STATUS")
+
+        paused = update_copy_relationship_status(relationship_id, "PAUSED")
+        self.assertEqual(paused["status"], "PAUSED")
+
+        paused_result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(paused_result["eligible_followers"], 0)
+        self.assertEqual(paused_result["successful_copies"], 0)
+
+        resumed = update_copy_relationship_status(relationship_id, "ACTIVE")
+        self.assertEqual(resumed["status"], "ACTIVE")
+
+        resumed_result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(resumed_result["successful_copies"], 1)
+
+        stopped = update_copy_relationship_status(relationship_id, "STOPPED")
+        self.assertEqual(stopped["status"], "STOPPED")
+
+        with self.assertRaises(ValueError):
+            update_copy_relationship_status(relationship_id, "ACTIVE")
+
+    def test_closing_source_updates_copy_execution_status(self):
+        self.create_relationship()
+        source = self.open_trade("SOURCE-001", "SOURCE-ORDER-CLOSE")
+        copied = replicate_open_trade(source["trade_id"])
+        self.assertEqual(copied["successful_copies"], 1)
+
+        result = close_trade_with_copies(source["trade_id"], 4010)
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertEqual(result["closed_copies"], 1)
+
+        with database.get_connection() as connection:
+            execution = connection.execute(
+                """
+                SELECT status
+                FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()
+            copied_trade = connection.execute(
+                """
+                SELECT status
+                FROM trades
+                WHERE trade_id = ?
+                """,
+                (copied["copies"][0]["copied_trade_id"],)
+            ).fetchone()
+
+        self.assertEqual(execution["status"], "CLOSED")
+        self.assertEqual(copied_trade["status"], "CLOSED")
 
 
 if __name__ == "__main__":
