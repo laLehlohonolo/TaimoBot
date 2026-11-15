@@ -413,4 +413,9 @@ def stop_copy_relationship_route(relationship_id: str):
             else 400
         )
         raise HTTPException(status_code=status_code, detail=str(error))
+from .copy_trading import (
+    replicate_open_trade,
+    close_trade_with_copies,
+    close_position_group_with_copies
+)
 
