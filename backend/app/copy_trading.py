@@ -406,3 +406,178 @@ def close_trade_with_copies(trade_id, exit_price):
         "close_scope": "FOLLOWER_ONLY" if is_copied_trade else "SOURCE_AND_OPEN_COPIES",
         "mode": "paper_trading"
     }
+
+def close_position_group_with_copies(group_id, exit_price):
+    """Atomically close a source position group and all direct open copies."""
+    group_id = str(group_id).strip()
+
+    try:
+        exit_value = float(exit_price)
+    except (TypeError, ValueError):
+        raise ValueError("Exit price must be a positive number.")
+
+    if not group_id or not (0 < exit_value < float("inf")):
+        raise ValueError("Group ID and positive exit price are required.")
+
+    with transaction() as connection:
+        group = connection.execute(
+            "SELECT * FROM position_groups WHERE group_id = ?",
+            (group_id,)
+        ).fetchone()
+
+        if group is None:
+            raise ValueError("Position group not found.")
+
+        if group["status"] != "OPEN":
+            raise ValueError("Position group is not open.")
+
+        source_trades = connection.execute(
+            """
+            SELECT * FROM trades
+            WHERE position_group_id = ?
+              AND status = 'OPEN'
+            ORDER BY trade_id
+            """,
+            (group_id,)
+        ).fetchall()
+
+        if not source_trades:
+            raise ValueError("Position group has no open positions.")
+
+        source_ids = [trade["trade_id"] for trade in source_trades]
+        placeholders = ",".join("?" for _ in source_ids)
+
+        copies = connection.execute(
+            f"""
+            SELECT * FROM trades
+            WHERE copied_from_trade_id IN ({placeholders})
+              AND status = 'OPEN'
+            ORDER BY account_id, trade_id
+            """,
+            source_ids
+        ).fetchall()
+
+        trades_to_close = [*source_trades, *copies]
+        account_pnl = {}
+        results = []
+
+        for trade in trades_to_close:
+            pnl = _calculate_trade_pnl(trade, exit_value)
+            account_id = trade["account_id"]
+
+            account_pnl[account_id] = (
+                account_pnl.get(account_id, 0.0) + pnl
+            )
+
+            results.append({
+                "trade_id": trade["trade_id"],
+                "account_id": account_id,
+                "source_trade_id": trade["copied_from_trade_id"],
+                "is_copy": trade["copied_from_trade_id"] is not None,
+                "realized_pnl": pnl
+            })
+
+        new_balances = {}
+
+        for account_id, pnl in account_pnl.items():
+            account = connection.execute(
+                """
+                SELECT balance FROM paper_accounts
+                WHERE account_id = ?
+                """,
+                (account_id,)
+            ).fetchone()
+
+            if account is None:
+                raise ValueError("Paper account not found.")
+
+            new_balance = float(account["balance"]) + pnl
+
+            if new_balance < 0:
+                raise ValueError(
+                    "Group close rejected: an account balance "
+                    "would become negative. All positions remain open."
+                )
+
+            new_balances[account_id] = new_balance
+
+        for item in results:
+            update = connection.execute(
+                """
+                UPDATE trades
+                SET status = 'CLOSED',
+                    realized_pnl = ?,
+                    closed_at = CURRENT_TIMESTAMP
+                WHERE trade_id = ? AND status = 'OPEN'
+                """,
+                (item["realized_pnl"], item["trade_id"])
+            )
+
+            if update.rowcount != 1:
+                raise ValueError(
+                    "A group or copied position could not be closed. "
+                    "The entire operation was rolled back."
+                )
+
+        for account_id, balance in new_balances.items():
+            connection.execute(
+                """
+                UPDATE paper_accounts
+                SET balance = ?
+                WHERE account_id = ?
+                """,
+                (balance, account_id)
+            )
+
+        for source_id in source_ids:
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET status = 'CLOSED',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE source_trade_id = ?
+                  AND status = 'COPIED'
+                """,
+                (source_id,)
+            )
+
+        connection.execute(
+            """
+            UPDATE position_groups
+            SET status = 'CLOSED',
+                closed_at = CURRENT_TIMESTAMP
+            WHERE group_id = ?
+            """,
+            (group_id,)
+        )
+
+        remaining_risk = {
+            account_id: round(get_open_risk(connection, account_id), 2)
+            for account_id in account_pnl
+        }
+
+    return {
+        "group_id": group_id,
+        "account_id": group["account_id"],
+        "symbol": group["symbol"],
+        "status": "CLOSED",
+        "closed_positions": len(source_trades),
+        "closed_copies": len(copies),
+        "realized_pnl": round(
+            sum(item["realized_pnl"] for item in results
+                if not item["is_copy"]), 2
+        ),
+        "new_balance": round(
+            new_balances[group["account_id"]], 2
+        ),
+        "account_results": [
+            {
+                "account_id": account_id,
+                "new_balance": round(balance, 2),
+                "remaining_open_risk": remaining_risk[account_id]
+            }
+            for account_id, balance in new_balances.items()
+        ],
+        "mode": "paper_trading"
+    }
+
