@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import database
 from app.database import init_db
+from app.auth import register_user, create_session
 from app.main import app
 from app.execution import create_paper_account
 from app.safety import deactivate_emergency_stop
@@ -23,9 +24,13 @@ class PositionGroupTests(unittest.TestCase):
 
         deactivate_emergency_stop()
         init_db()
-        create_paper_account("GROUP-001", 10000)
+        user = register_user("position-groups-tests@taimobot.local", "TestPassphrase-2026-Secure!")
+        self.user_id = user["user_id"]
+        session = create_session(self.user_id)
+        create_paper_account("GROUP-001", 10000, owner_user_id=self.user_id)
 
         self.client = TestClient(app)
+        self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
 
     def tearDown(self):
         self.client.close()
@@ -187,7 +192,7 @@ class PositionGroupTests(unittest.TestCase):
 
     def test_group_cannot_be_used_by_another_account(self):
         group_id = self.create_group()
-        create_paper_account("GROUP-002", 10000)
+        create_paper_account("GROUP-002", 10000, owner_user_id=self.user_id)
 
         response = self.client.post(
             "/trades",
@@ -286,7 +291,7 @@ class PositionGroupTests(unittest.TestCase):
 
 
     def create_follower_relationship(self):
-        create_paper_account("GROUP-FOLLOWER-001", 10000)
+        create_paper_account("GROUP-FOLLOWER-001", 10000, owner_user_id=self.user_id)
         response = self.client.post(
             "/accounts/GROUP-FOLLOWER-001/copy-relationships",
             json={"source_account_id": "GROUP-001"}
