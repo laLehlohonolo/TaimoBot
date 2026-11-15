@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app import database
 from app.auth import (
     AuthenticationError,
+    AuthenticationRateLimitError,
     authenticate_user,
     create_session,
     get_session_user,
@@ -205,6 +206,31 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         )
         self.assertEqual(account.status_code, 404)
         self.assertEqual(trade.status_code, 404)
+
+    def test_eight_failed_logins_trigger_temporary_lockout(self):
+        email = "locked@example.com"
+        password = "StrongPassphrase123!"
+        register_user(email, password)
+        for _ in range(8):
+            with self.assertRaises(AuthenticationError):
+                authenticate_user(email, "IncorrectPassphrase123!")
+        with self.assertRaises(AuthenticationRateLimitError):
+            authenticate_user(email, password)
+
+    def test_login_api_returns_429_for_locked_email(self):
+        email = "api-locked@example.com"
+        user = register_user(email, "StrongPassphrase123!")
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO auth_login_attempts (email, attempts, window_started_at, locked_until) "
+                "VALUES (?, 8, '2026-11-15T20:00:00+00:00', '2099-01-01T00:00:00+00:00')",
+                (email,)
+            )
+        response = self.client.post(
+            "/auth/login",
+            json={"email": email, "password": "StrongPassphrase123!"}
+        )
+        self.assertEqual(response.status_code, 429)
 
     def test_expired_session_is_rejected(self):
         user = register_user("expired@example.com", "StrongPassphrase123!")
