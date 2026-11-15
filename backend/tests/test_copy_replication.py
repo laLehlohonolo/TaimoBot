@@ -230,6 +230,96 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(copy_status, "FAILED")
 
 
+    def _create_pending_copy_execution(self, source_trade_id, updated_at_sql="CURRENT_TIMESTAMP"):
+        with database.get_connection() as connection:
+            relationship_id = connection.execute(
+                "SELECT relationship_id FROM copy_relationships"
+            ).fetchone()["relationship_id"]
+            connection.execute(
+                f"""
+                INSERT INTO copy_executions (
+                    copy_execution_id, relationship_id, source_trade_id,
+                    status, updated_at
+                )
+                VALUES (?, ?, ?, 'PENDING', {updated_at_sql})
+                """,
+                ("PENDING-" + source_trade_id, relationship_id, source_trade_id)
+            )
+        return relationship_id
+
+    def test_pending_copy_recovers_existing_committed_follower_trade(self):
+        source = self.create_source_trade("SOURCE-RECOVERY-EXISTING")
+        relationship_id = self._create_pending_copy_execution(source["trade_id"])
+        order_id = f"COPY-{relationship_id}-{source['trade_id']}"
+
+        existing = open_paper_trade(
+            account_id="FOLLOWER",
+            client_order_id=order_id,
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD"
+        )
+
+        result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(result["successful_copies"], 1)
+        self.assertTrue(result["copies"][0]["recovered"])
+        self.assertEqual(result["copies"][0]["copied_trade_id"], existing["trade_id"])
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT COUNT(*) AS total FROM trades
+                WHERE account_id = 'FOLLOWER' AND client_order_id = ?
+                """,
+                (order_id,)
+            ).fetchone()
+            execution = connection.execute(
+                """
+                SELECT status, copied_trade_id FROM copy_executions
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source["trade_id"])
+            ).fetchone()
+
+        self.assertEqual(rows["total"], 1)
+        self.assertEqual(execution["status"], "COPIED")
+        self.assertEqual(execution["copied_trade_id"], existing["trade_id"])
+
+    def test_recent_pending_copy_is_not_stolen_from_active_worker(self):
+        source = self.create_source_trade("SOURCE-RECOVERY-ACTIVE")
+        self._create_pending_copy_execution(source["trade_id"])
+
+        result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["copies"][0]["status"], "PENDING")
+        self.assertTrue(result["copies"][0]["recovery_deferred"])
+
+        with database.get_connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS total FROM trades WHERE account_id = 'FOLLOWER'"
+            ).fetchone()["total"]
+
+        self.assertEqual(count, 0)
+
+    def test_stale_pending_copy_without_trade_is_retried(self):
+        source = self.create_source_trade("SOURCE-RECOVERY-STALE")
+        self._create_pending_copy_execution(
+            source["trade_id"],
+            "datetime('now', '-10 minutes')"
+        )
+
+        result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(result["successful_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "COPIED")
+
+        with database.get_connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS total FROM trades WHERE account_id = 'FOLLOWER'"
+            ).fetchone()["total"]
+
+        self.assertEqual(count, 1)
+
     def test_concurrent_copy_entries_cannot_exceed_followers_combined_risk(self):
         # The follower has a 0.5% allocation per copy. One existing
         # position consumes half of its 1% combined-risk allowance.
