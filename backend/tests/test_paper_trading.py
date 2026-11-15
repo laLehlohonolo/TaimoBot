@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app import database
 from app.database import init_db
+from app.auth import register_user, create_session
 from app.main import app
 from app.execution import (
     create_paper_account,
@@ -37,9 +38,13 @@ class PaperTradingTests(unittest.TestCase):
 
         deactivate_emergency_stop()
         init_db()
-        create_paper_account("TEST-001", 10000)
+        user = register_user("paper-tests@taimobot.local", "TestPassphrase-2026-Secure!")
+        self.user_id = user["user_id"]
+        session = create_session(self.user_id)
+        create_paper_account("TEST-001", 10000, owner_user_id=self.user_id)
 
         self.client = TestClient(app)
+        self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
 
     def tearDown(self):
         self.client.close()
