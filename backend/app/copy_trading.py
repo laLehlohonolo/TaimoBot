@@ -212,17 +212,6 @@ def _copy_for_relationship(relationship, source):
                 """,
                 (execution_id, relationship_id, source_trade_id)
             )
-        connection.execute(
-            """
-            INSERT INTO copy_executions (
-                copy_execution_id, relationship_id,
-                source_trade_id, status
-            )
-            VALUES (?, ?, ?, 'PENDING')
-            """,
-            (execution_id, relationship_id, source_trade_id)
-        )
-
     try:
         # Reject before opening if the follower's own combined risk budget
         # cannot accommodate its assigned per-trade allocation.
