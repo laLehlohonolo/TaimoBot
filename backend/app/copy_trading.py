@@ -579,6 +579,7 @@ def close_position_group_with_copies(group_id, exit_price):
         "new_balance": round(
             new_balances[group["account_id"]], 2
         ),
+        "remaining_open_risk": remaining_risk[group["account_id"]],
         "account_results": [
             {
                 "account_id": account_id,
