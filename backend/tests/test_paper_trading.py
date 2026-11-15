@@ -633,5 +633,61 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(totals["open_positions"], 0)
 
 
+    def test_open_trade_and_account_persist_after_database_reinitialization(self):
+        trade = self.open_trade("ORDER-PERSIST-OPEN")
+
+        # Simulate application startup against the same persistent database.
+        init_db()
+
+        account_response = self.client.get("/accounts/TEST-001")
+        trades_response = self.client.get("/accounts/TEST-001/trades")
+        risk_response = self.client.get("/accounts/TEST-001/risk")
+
+        self.assertEqual(account_response.status_code, 200)
+        self.assertEqual(trades_response.status_code, 200)
+        self.assertEqual(risk_response.status_code, 200)
+
+        account = account_response.json()
+        trades = trades_response.json()["trades"]
+
+        self.assertEqual(account["current_balance"], 10000)
+        self.assertEqual(account["open_trades"], 1)
+        self.assertEqual(account["realized_pnl"], 0)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["trade_id"], trade["trade_id"])
+        self.assertEqual(trades[0]["status"], "OPEN")
+        self.assertEqual(risk_response.json()["current_open_risk"], 50)
+
+    def test_closed_trade_and_realized_balance_persist_after_reinitialization(self):
+        trade = self.open_trade("ORDER-PERSIST-CLOSED")
+        close_result = close_paper_trade(
+            trade_id=trade["trade_id"],
+            exit_price=4010
+        )
+
+        self.assertEqual(close_result["new_balance"], 10050)
+
+        # Re-running initialization must not reset or duplicate financial data.
+        init_db()
+        init_db()
+
+        account_response = self.client.get("/accounts/TEST-001")
+        trades_response = self.client.get("/accounts/TEST-001/trades")
+
+        self.assertEqual(account_response.status_code, 200)
+        self.assertEqual(trades_response.status_code, 200)
+
+        account = account_response.json()
+        trades = trades_response.json()["trades"]
+
+        self.assertEqual(account["starting_balance"], 10000)
+        self.assertEqual(account["current_balance"], 10050)
+        self.assertEqual(account["closed_trades"], 1)
+        self.assertEqual(account["realized_pnl"], 50)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["status"], "CLOSED")
+        self.assertEqual(trades[0]["realized_pnl"], 50)
+
+
 if __name__ == "__main__":
     unittest.main()
