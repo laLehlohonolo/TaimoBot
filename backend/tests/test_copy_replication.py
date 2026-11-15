@@ -10,7 +10,10 @@ from fastapi.testclient import TestClient
 from app import database
 from app.database import init_db
 from app.auth import register_user, create_session
-from app.execution import create_paper_account, open_paper_trade
+from app.execution import (
+    create_paper_account, open_paper_trade, close_trade_with_copies
+)
+import app.copy_trading as copy_trading
 from app.main import app
 from app.copy_trading import replicate_open_trade
 from app.safety import activate_emergency_stop, deactivate_emergency_stop
@@ -301,6 +304,46 @@ class CopyTradeReplicationTests(unittest.TestCase):
             ).fetchone()["total"]
 
         self.assertEqual(count, 0)
+
+    def test_source_closed_before_atomic_copy_insert_prevents_follower_entry(self):
+        source = self.create_source_trade("SOURCE-CLOSE-RACE")
+        original_open = copy_trading.open_paper_trade
+
+        def close_source_then_attempt_copy(**kwargs):
+            close_trade_with_copies(source["trade_id"], 3990)
+            return original_open(**kwargs)
+
+        with patch(
+            "app.copy_trading.open_paper_trade",
+            side_effect=close_source_then_attempt_copy
+        ):
+            result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn("source trade must remain open", result["copies"][0]["failure_reason"].lower())
+
+        with database.get_connection() as connection:
+            source_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+            follower_count = connection.execute(
+                """
+                SELECT COUNT(*) AS total FROM trades
+                WHERE account_id = 'FOLLOWER'
+                """
+            ).fetchone()["total"]
+            execution_status = connection.execute(
+                "SELECT status FROM copy_executions WHERE source_trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+
+        self.assertEqual(source_status, "CLOSED")
+        self.assertEqual(follower_count, 0)
+        self.assertEqual(execution_status, "FAILED")
+
 
     def test_stale_pending_copy_without_trade_is_retried(self):
         source = self.create_source_trade("SOURCE-RECOVERY-STALE")
