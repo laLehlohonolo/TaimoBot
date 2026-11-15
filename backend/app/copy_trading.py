@@ -98,19 +98,120 @@ def _copy_for_relationship(relationship, source):
 
         if current is not None:
             stored_status = current["status"]
-            return {
-                "relationship_id": relationship_id,
-                "follower_account_id": follower_id,
-                "status": (
-                    "DUPLICATE" if stored_status == "COPIED"
-                    else stored_status
-                ),
-                "copied_trade_id": current["copied_trade_id"],
-                "failure_reason": current["failure_reason"],
-                "duplicate_prevented": True
-            }
 
-        execution_id = str(uuid.uuid4())
+            if stored_status == "PENDING":
+                # Recover a crash that happened after the follower trade
+                # committed but before its copy-execution row was finalized.
+                existing_trade = connection.execute(
+                    """
+                    SELECT trade_id, account_id, copied_from_trade_id, status
+                    FROM trades
+                    WHERE client_order_id = ?
+                    """,
+                    (order_id,)
+                ).fetchone()
+
+                if existing_trade is not None:
+                    if (
+                        existing_trade["account_id"] != follower_id
+                        or existing_trade["copied_from_trade_id"] not in
+                            (None, source_trade_id)
+                    ):
+                        raise ValueError(
+                            "Copy recovery stopped: idempotency order belongs "
+                            "to a different account or source trade."
+                        )
+
+                    connection.execute(
+                        """
+                        UPDATE trades
+                        SET copied_from_trade_id = ?
+                        WHERE trade_id = ?
+                          AND account_id = ?
+                          AND copied_from_trade_id IS NULL
+                        """,
+                        (source_trade_id, existing_trade["trade_id"], follower_id)
+                    )
+                    recovered_status = (
+                        "CLOSED" if existing_trade["status"] == "CLOSED"
+                        else "COPIED"
+                    )
+                    connection.execute(
+                        """
+                        UPDATE copy_executions
+                        SET copied_trade_id = ?,
+                            status = ?,
+                            failure_reason = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE relationship_id = ?
+                          AND source_trade_id = ?
+                          AND status = 'PENDING'
+                        """,
+                        (
+                            existing_trade["trade_id"],
+                            recovered_status,
+                            relationship_id,
+                            source_trade_id
+                        )
+                    )
+                    return {
+                        "relationship_id": relationship_id,
+                        "follower_account_id": follower_id,
+                        "status": recovered_status,
+                        "copied_trade_id": existing_trade["trade_id"],
+                        "duplicate_prevented": True,
+                        "recovered": True
+                    }
+
+                # A PENDING row may belong to a live worker. Only reclaim it
+                # after five minutes without an update.
+                reclaimed = connection.execute(
+                    """
+                    UPDATE copy_executions
+                    SET updated_at = CURRENT_TIMESTAMP
+                    WHERE relationship_id = ?
+                      AND source_trade_id = ?
+                      AND status = 'PENDING'
+                      AND datetime(updated_at) <= datetime('now', '-5 minutes')
+                    """,
+                    (relationship_id, source_trade_id)
+                )
+                if reclaimed.rowcount != 1:
+                    return {
+                        "relationship_id": relationship_id,
+                        "follower_account_id": follower_id,
+                        "status": "PENDING",
+                        "copied_trade_id": None,
+                        "failure_reason": current["failure_reason"],
+                        "duplicate_prevented": True,
+                        "recovery_deferred": True
+                    }
+
+            else:
+                return {
+                    "relationship_id": relationship_id,
+                    "follower_account_id": follower_id,
+                    "status": (
+                        "DUPLICATE" if stored_status == "COPIED"
+                        else stored_status
+                    ),
+                    "copied_trade_id": current["copied_trade_id"],
+                    "failure_reason": current["failure_reason"],
+                    "duplicate_prevented": True
+                }
+
+        else:
+            execution_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO copy_executions (
+                    copy_execution_id, relationship_id,
+                    source_trade_id, status
+                )
+                VALUES (?, ?, ?, 'PENDING')
+                """,
+                (execution_id, relationship_id, source_trade_id)
+            )
         connection.execute(
             """
             INSERT INTO copy_executions (
