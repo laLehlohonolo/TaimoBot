@@ -1,4 +1,10 @@
-import uuid
+
+from .copy_trading import (
+    replicate_open_trade,
+    close_trade_with_copies,
+    close_position_group_with_copies
+)
+
 
 from .database import get_connection
 from .execution import (
