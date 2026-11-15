@@ -10,10 +10,18 @@ from .database import get_connection
 PBKDF2_ITERATIONS = 600_000
 SESSION_HOURS = 12
 PASSWORD_MIN_LENGTH = 12
+LOGIN_FAILURE_LIMIT = 8
+LOGIN_WINDOW_MINUTES = 15
+LOGIN_LOCK_MINUTES = 15
+DUMMY_PASSWORD_HASH = "pbkdf2_sha256$600000$" + ("00" * 16) + "$" + ("00" * 32)
 
 
 class AuthenticationError(ValueError):
     """Raised when credentials or an authentication session are invalid."""
+
+
+class AuthenticationRateLimitError(AuthenticationError):
+    """Raised when repeated login failures temporarily lock an email."""
 
 
 def _utc_now():
@@ -78,11 +86,81 @@ def register_user(email, password):
     return {"user_id": user_id, "email": normalized_email}
 
 
+def _check_login_allowed(email):
+    now = _utc_now()
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT attempts, window_started_at, locked_until "
+            "FROM auth_login_attempts WHERE email = ?",
+            (email,)
+        ).fetchone()
+
+        if row is None or not row["locked_until"]:
+            return
+
+        locked_until = datetime.fromisoformat(row["locked_until"])
+        if locked_until > now:
+            raise AuthenticationRateLimitError(
+                "Too many failed login attempts. Try again later."
+            )
+
+        connection.execute(
+            "DELETE FROM auth_login_attempts WHERE email = ?", (email,)
+        )
+
+
+def _record_login_failure(email):
+    now = _utc_now()
+    window_start = now - timedelta(minutes=LOGIN_WINDOW_MINUTES)
+
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT attempts, window_started_at FROM auth_login_attempts "
+            "WHERE email = ?",
+            (email,)
+        ).fetchone()
+
+        if row is None or datetime.fromisoformat(row["window_started_at"]) < window_start:
+            attempts = 1
+            started_at = now.isoformat()
+        else:
+            attempts = int(row["attempts"]) + 1
+            started_at = row["window_started_at"]
+
+        locked_until = (
+            (now + timedelta(minutes=LOGIN_LOCK_MINUTES)).isoformat()
+            if attempts >= LOGIN_FAILURE_LIMIT else None
+        )
+
+        connection.execute(
+            """
+            INSERT INTO auth_login_attempts (
+                email, attempts, window_started_at, locked_until
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                attempts = excluded.attempts,
+                window_started_at = excluded.window_started_at,
+                locked_until = excluded.locked_until
+            """,
+            (email, attempts, started_at, locked_until)
+        )
+
+
+def _clear_login_failures(email):
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM auth_login_attempts WHERE email = ?", (email,)
+        )
+
+
 def authenticate_user(email, password):
     try:
         normalized_email = _normalize_email(email)
     except AuthenticationError:
         normalized_email = ""
+
+    _check_login_allowed(normalized_email)
 
     with get_connection() as connection:
         user = connection.execute(
@@ -90,9 +168,14 @@ def authenticate_user(email, password):
             (normalized_email,)
         ).fetchone()
 
-    if user is None or not _verify_password(password, user["password_hash"]):
+    encoded_hash = user["password_hash"] if user else DUMMY_PASSWORD_HASH
+    valid_password = _verify_password(password, encoded_hash)
+
+    if user is None or not valid_password:
+        _record_login_failure(normalized_email)
         raise AuthenticationError("Invalid email or password.")
 
+    _clear_login_failures(normalized_email)
     return {"user_id": user["user_id"], "email": user["email"]}
 
 
