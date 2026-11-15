@@ -33,6 +33,10 @@ from app.safety import (
 class PaperTradingTests(unittest.TestCase):
 
     def setUp(self):
+        # Keep ordinary trading tests independent of the wall clock.
+        # The maintenance-window block itself is tested with an explicit clock override.
+        self.maintenance_clock = patch("app.safety.is_maintenance_window", return_value=False)
+        self.maintenance_clock.start()
         self.admin_env = patch.dict(
             "os.environ",
             {"TAIMOBOT_ADMIN_EMAILS": "paper-tests@taimobot.local"}
@@ -53,6 +57,7 @@ class PaperTradingTests(unittest.TestCase):
         self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
 
     def tearDown(self):
+        self.maintenance_clock.stop()
         self.client.close()
         self.admin_env.stop()
         deactivate_emergency_stop()
