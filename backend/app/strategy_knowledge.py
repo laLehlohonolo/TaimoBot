@@ -58,3 +58,19 @@ def create_strategy(user_id, payload):
             (strategy_id,)
         ).fetchone()
     return dict(row)
+
+
+def get_strategy(strategy_id, user_id):
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT strategy_id, owner_user_id, name, category, description,
+                   entry_logic, exit_logic, risk_notes, provenance,
+                   evidence_status, created_at, updated_at
+            FROM strategy_knowledge
+            WHERE strategy_id = ?
+              AND (owner_user_id IS NULL OR owner_user_id = ?)
+            """,
+            (strategy_id, user_id)
+        ).fetchone()
+    return dict(row) if row is not None else None
