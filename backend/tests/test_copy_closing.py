@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -15,6 +16,10 @@ from app.copy_trading import replicate_open_trade
 class CopyTradeClosingTests(unittest.TestCase):
 
     def setUp(self):
+        # Keep ordinary trading tests independent of the wall clock.
+        # The maintenance-window block itself is tested with an explicit clock override.
+        self.maintenance_clock = patch("app.safety.is_maintenance_window", return_value=False)
+        self.maintenance_clock.start()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "copy_closing.db"
@@ -32,6 +37,7 @@ class CopyTradeClosingTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.maintenance_clock.stop()
         self.client.close()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
