@@ -1,12 +1,13 @@
 """Single-daily-run maintenance orchestration for TaimoBot.
 
-The API may run in multiple worker processes. A SQLite claim row makes the
-daily job idempotent across workers; only one process can claim a local date.
+A database claim makes the job idempotent across API workers. Abandoned
+RUNNING claims can be recovered after a conservative lease timeout. FAILED
+runs are not retried by the polling loop; an operator must request a retry.
 """
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import database
@@ -18,12 +19,38 @@ from .maintenance import (
     verify_restore_candidate,
 )
 
+RUNNING_LEASE_MINUTES = 15
 
-def run_maintenance_for_date(run_date: date | None = None) -> dict:
-    """Run and record one backup + isolated restore verification per SAST day."""
-    day = run_date or datetime.now(SAST).date()
+
+def _running_claim_is_stale(started_at: str, now: datetime) -> bool:
+    """Only reclaim a RUNNING claim whose valid timestamp is beyond its lease."""
+    try:
+        started = datetime.fromisoformat(started_at)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=SAST)
+        else:
+            started = started.astimezone(SAST)
+        current = now.astimezone(SAST)
+        return started <= current - timedelta(minutes=RUNNING_LEASE_MINUTES)
+    except (TypeError, ValueError):
+        # An unparseable claim is not safe to steal automatically.
+        return False
+
+
+def run_maintenance_for_date(
+    run_date: date | None = None,
+    *,
+    retry_failed: bool = False,
+) -> dict:
+    """Run and record one backup + isolated restore verification per SAST day.
+
+    retry_failed is an explicit operator-controlled retry. The scheduler never
+    sets it, preventing repeated backup attempts every polling interval.
+    """
+    now = datetime.now(SAST)
+    day = run_date or now.date()
     day_key = day.isoformat()
-    started = datetime.now(SAST).isoformat()
+    started = now.isoformat()
 
     with database.get_connection() as connection:
         connection.execute(
@@ -41,16 +68,35 @@ def run_maintenance_for_date(run_date: date | None = None) -> dict:
         )
         connection.execute("BEGIN IMMEDIATE")
         existing = connection.execute(
-            "SELECT status FROM maintenance_runs WHERE run_date = ?",
+            "SELECT status, started_at FROM maintenance_runs WHERE run_date = ?",
             (day_key,),
         ).fetchone()
 
-        if existing and existing["status"] in ("RUNNING", "COMPLETE"):
-            return {
-                "status": "SKIPPED",
-                "reason": f"Maintenance for {day_key} is already {existing['status'].lower()}.",
-                "run_date": day_key,
-            }
+        if existing:
+            status = existing["status"]
+            if status == "COMPLETE":
+                return {
+                    "status": "SKIPPED",
+                    "reason": f"Maintenance for {day_key} is already complete.",
+                    "run_date": day_key,
+                }
+            if status == "RUNNING" and not _running_claim_is_stale(
+                existing["started_at"], now
+            ):
+                return {
+                    "status": "SKIPPED",
+                    "reason": f"Maintenance for {day_key} is already running.",
+                    "run_date": day_key,
+                }
+            if status == "FAILED" and not retry_failed:
+                return {
+                    "status": "SKIPPED",
+                    "reason": (
+                        f"Maintenance for {day_key} previously failed; "
+                        "an explicit retry is required."
+                    ),
+                    "run_date": day_key,
+                }
 
         connection.execute(
             """
@@ -89,6 +135,7 @@ def run_maintenance_for_date(run_date: date | None = None) -> dict:
                     backup_file = ?,
                     error_summary = NULL
                 WHERE run_date = ?
+                  AND status = 'RUNNING'
                 """,
                 (
                     datetime.now(SAST).isoformat(),
@@ -114,6 +161,7 @@ def run_maintenance_for_date(run_date: date | None = None) -> dict:
                     completed_at = ?,
                     error_summary = ?
                 WHERE run_date = ?
+                  AND status = 'RUNNING'
                 """,
                 (
                     datetime.now(SAST).isoformat(),
@@ -129,7 +177,7 @@ def run_maintenance_for_date(run_date: date | None = None) -> dict:
 
 
 async def maintenance_scheduler(poll_seconds: int = 30) -> None:
-    """Poll the SAST window; the database claim prevents duplicate worker runs."""
+    """Poll the SAST window; database claims prevent duplicate worker runs."""
     while True:
         now = datetime.now(SAST)
         if is_maintenance_window(now):
