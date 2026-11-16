@@ -162,6 +162,20 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         with database.get_connection() as connection:
             connection.execute(
                 """
+                CREATE TABLE maintenance_run_attempts (
+                    attempt_token TEXT PRIMARY KEY,
+                    run_date TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('RUNNING', 'COMPLETE', 'FAILED', 'SUPERSEDED')),
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    backup_file TEXT,
+                    error_summary TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TRIGGER reject_completion_audit
                 BEFORE UPDATE OF status ON maintenance_run_attempts
                 WHEN NEW.status = 'COMPLETE'
