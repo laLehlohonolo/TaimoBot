@@ -406,6 +406,44 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             update_copy_relationship_status(relationship_id, "ACTIVE")
 
+    def test_closing_source_fails_uncommitted_pending_copy_and_releases_lease(self):
+        relationship_id = self.create_relationship("REL-PENDING-CLOSE")
+        source = self.open_trade("SOURCE-001", "SOURCE-ORDER-PENDING-CLOSE")
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO copy_executions (
+                    copy_execution_id, relationship_id, source_trade_id,
+                    status, lease_token, lease_expires_at
+                )
+                VALUES (
+                    'COPY-PENDING-CLOSE', ?, ?, 'PENDING',
+                    'stale-worker-token', datetime('now', '+5 minutes')
+                )
+                """,
+                (relationship_id, source["trade_id"])
+            )
+
+        result = close_trade_with_copies(source["trade_id"], 4010)
+        self.assertEqual(result["status"], "CLOSED")
+
+        with database.get_connection() as connection:
+            execution = connection.execute(
+                """
+                SELECT status, failure_reason, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE relationship_id = ?
+                  AND source_trade_id = ?
+                """,
+                (relationship_id, source["trade_id"])
+            ).fetchone()
+
+        self.assertEqual(execution["status"], "FAILED")
+        self.assertIn("Source trade closed", execution["failure_reason"])
+        self.assertIsNone(execution["lease_token"])
+        self.assertIsNone(execution["lease_expires_at"])
+
     def test_closing_source_updates_copy_execution_status(self):
         self.create_relationship()
         source = self.open_trade("SOURCE-001", "SOURCE-ORDER-CLOSE")
