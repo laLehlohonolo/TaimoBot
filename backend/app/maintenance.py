@@ -6,6 +6,7 @@ it never overwrites the live database automatically.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -437,6 +438,17 @@ def verify_restore_candidate(backup_path: Path, staging_path: Path) -> dict:
         "integrity_check": "ok",
         "live_database_replaced": False,
     }
+
+
+def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """Return a streaming SHA-256 digest for a managed recovery artifact."""
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:
+        raise ValueError("chunk_size must be a positive integer")
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as artifact:
+        for chunk in iter(lambda: artifact.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def verify_restore_execution_readiness(
