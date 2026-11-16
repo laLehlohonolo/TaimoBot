@@ -125,6 +125,42 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertIsNone(attempts[1]["error_summary"])
         self.assertEqual(current["status"], "COMPLETE")
 
+    def test_retention_cleanup_runs_only_after_backup_and_restore_verify(self):
+        day = date(2026, 11, 19)
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+        call_order = []
+
+        def fake_backup():
+            call_order.append("backup")
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(backup_file) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        def fake_restore(source, staging):
+            call_order.append("restore")
+            return {"status": "RESTORE_CANDIDATE_VERIFIED", "live_database_replaced": False}
+
+        def fake_cleanup(**kwargs):
+            call_order.append("retention")
+            self.assertEqual(kwargs["retention_days"], 365)
+            self.assertFalse(kwargs["dry_run"])
+            return {"status": "BACKUP_RETENTION_COMPLETE", "deleted": []}
+
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup", side_effect=fake_backup
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate", side_effect=fake_restore
+        ), patch(
+            "app.maintenance_scheduler.cleanup_expired_backups", side_effect=fake_cleanup
+        ):
+            result = run_maintenance_for_date(day)
+
+        self.assertEqual(result["status"], "MAINTENANCE_COMPLETE")
+        self.assertEqual(call_order, ["backup", "restore", "retention"])
+        self.assertEqual(result["retention"]["status"], "BACKUP_RETENTION_COMPLETE")
+
     def test_retention_cleanup_is_skipped_when_restore_verification_fails(self):
         day = date(2026, 11, 18)
         backup_dir = self.root / "backups"
