@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from fastapi import HTTPException
 from unittest.mock import patch
 
 from app import database
