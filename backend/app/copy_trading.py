@@ -514,13 +514,31 @@ def _copy_for_relationship(relationship, source):
                 )
             )
             if finalized.rowcount != 1:
+                persisted = connection.execute(
+                    """
+                    SELECT status, copied_trade_id, failure_reason
+                    FROM copy_executions
+                    WHERE relationship_id = ?
+                      AND source_trade_id = ?
+                    """,
+                    (relationship_id, source_trade_id)
+                ).fetchone()
+                persisted_status = (
+                    persisted["status"] if persisted else "PENDING"
+                )
                 return {
                     "relationship_id": relationship_id,
                     "follower_account_id": follower_id,
-                    "status": "PENDING",
-                    "copied_trade_id": copied_trade_id,
+                    "status": persisted_status,
+                    "copied_trade_id": (
+                        persisted["copied_trade_id"]
+                        if persisted else copied_trade_id
+                    ),
+                    "failure_reason": (
+                        persisted["failure_reason"] if persisted else None
+                    ),
                     "duplicate_prevented": True,
-                    "recovery_deferred": True
+                    "recovery_deferred": persisted_status == "PENDING"
                 }
 
         return {
@@ -551,14 +569,32 @@ def _copy_for_relationship(relationship, source):
             )
 
         if failed.rowcount != 1:
+            with get_connection() as connection:
+                persisted = connection.execute(
+                    """
+                    SELECT status, copied_trade_id, failure_reason
+                    FROM copy_executions
+                    WHERE relationship_id = ?
+                      AND source_trade_id = ?
+                    """,
+                    (relationship_id, source_trade_id)
+                ).fetchone()
+            persisted_status = (
+                persisted["status"] if persisted else "PENDING"
+            )
             return {
                 "relationship_id": relationship_id,
                 "follower_account_id": follower_id,
-                "status": "PENDING",
-                "copied_trade_id": None,
-                "failure_reason": "Copy lease ownership changed; recovery is deferred.",
+                "status": persisted_status,
+                "copied_trade_id": (
+                    persisted["copied_trade_id"] if persisted else None
+                ),
+                "failure_reason": (
+                    persisted["failure_reason"] if persisted
+                    else "Copy lease ownership changed; recovery is deferred."
+                ),
                 "duplicate_prevented": True,
-                "recovery_deferred": True
+                "recovery_deferred": persisted_status == "PENDING"
             }
 
         return {
