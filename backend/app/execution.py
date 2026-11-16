@@ -263,7 +263,8 @@ def open_paper_trade(
     symbol=DEFAULT_SYMBOL,
     position_group_id=None,
     copy_source_trade_id=None,
-    copy_relationship_id=None
+    copy_relationship_id=None,
+    copy_execution_token=None
 ):
     """
     Open a paper trade using the account's assigned risk profile.
@@ -319,8 +320,11 @@ def open_paper_trade(
     if copy_source_trade_id is not None:
         copy_source_trade_id = str(copy_source_trade_id).strip()
         copy_relationship_id = str(copy_relationship_id).strip()
-        if not copy_source_trade_id or not copy_relationship_id:
-            raise ValueError("Copy source trade and relationship are required.")
+        copy_execution_token = str(copy_execution_token or "").strip()
+        if not copy_source_trade_id or not copy_relationship_id or not copy_execution_token:
+            raise ValueError("Copy source, relationship, and execution lease token are required.")
+    elif copy_execution_token is not None:
+        raise ValueError("Copy execution lease token requires a copy source and relationship.")
 
     with transaction() as connection:
         # Check safety after acquiring the write lock so the maintenance or
@@ -334,11 +338,17 @@ def open_paper_trade(
                 FROM trades AS t
                 JOIN copy_relationships AS cr
                   ON cr.relationship_id = ?
+                JOIN copy_executions AS ce
+                  ON ce.relationship_id = cr.relationship_id
+                 AND ce.source_trade_id = t.trade_id
                 WHERE t.trade_id = ?
                   AND cr.status = 'ACTIVE'
                   AND cr.source_account_id = t.account_id
+                  AND ce.status = 'PENDING'
+                  AND ce.lease_token = ?
+                  AND datetime(ce.lease_expires_at) > CURRENT_TIMESTAMP
                 """,
-                (copy_relationship_id, copy_source_trade_id)
+                (copy_relationship_id, copy_source_trade_id, copy_execution_token)
             ).fetchone()
             if (
                 source_copy is None
