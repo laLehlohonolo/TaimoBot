@@ -25,7 +25,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
-    def test_stale_running_claim_is_recovered(self):
+    def test_stale_running_claim_requires_explicit_recovery(self):
         day = date(2026, 11, 14)
         stale_started = (datetime.now(SAST) - timedelta(minutes=30)).isoformat()
         with database.get_connection() as connection:
@@ -54,7 +54,10 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             "app.maintenance_scheduler.verify_restore_candidate",
             return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
         ):
-            result = run_maintenance_for_date(day)
+            automatic = run_maintenance_for_date(day)
+            result = run_maintenance_for_date(day, retry_stale_running=True)
+        self.assertEqual(automatic["status"], "SKIPPED")
+        self.assertIn("explicit stale-run recovery", automatic["reason"])
         self.assertEqual(result["status"], "MAINTENANCE_COMPLETE")
 
     def test_failed_run_is_not_retried_automatically(self):
