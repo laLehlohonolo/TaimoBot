@@ -70,6 +70,101 @@ def create_verified_backup(
     }
 
 
+def cleanup_expired_backups(
+    backup_dir: Path | None = None,
+    *,
+    now: datetime | None = None,
+    retention_days: int = 365,
+    dry_run: bool = True,
+    live_database_path: Path | None = None,
+) -> dict:
+    """Safely plan or remove expired managed backups after validating recovery points.
+
+    Only regular, non-symlink TaimoBot backup files in the backup directory are
+    considered. At least one verified backup inside the retention window must
+    exist before any expired file can be removed. The newest verified backup
+    and the live database are always protected. Dry-run is the default.
+    """
+    if isinstance(retention_days, bool) or not isinstance(retention_days, int) or retention_days < 365:
+        raise ValueError("retention_days must be an integer of at least 365 days")
+
+    directory = Path(backup_dir or BACKUP_DIR)
+    if not directory.exists():
+        return {
+            "status": "NO_BACKUP_DIRECTORY",
+            "dry_run": dry_run,
+            "retention_days": retention_days,
+            "candidates": [],
+            "deleted": [],
+        }
+    if not directory.is_dir():
+        raise NotADirectoryError(f"Backup path is not a directory: {directory}")
+
+    local_now = (now or datetime.now(SAST)).astimezone(SAST)
+    cutoff = local_now.timestamp() - retention_days * 24 * 60 * 60
+    live_path = Path(live_database_path or database.DB_PATH).resolve()
+    verified: list[tuple[Path, float]] = []
+    invalid: list[str] = []
+
+    for candidate in directory.glob("taimobot-*.sqlite3"):
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        if candidate.resolve() == live_path:
+            continue
+        try:
+            with sqlite3.connect(f"file:{candidate.resolve()}?mode=ro", uri=True, timeout=10) as check:
+                integrity = check.execute("PRAGMA integrity_check").fetchone()
+            if not integrity or integrity[0] != "ok":
+                invalid.append(candidate.name)
+                continue
+            verified.append((candidate, candidate.stat().st_mtime))
+        except (sqlite3.Error, OSError, ValueError):
+            invalid.append(candidate.name)
+
+    verified.sort(key=lambda item: (item[1], item[0].name), reverse=True)
+    newest_verified = verified[0][0] if verified else None
+    has_recent_recovery_point = any(timestamp >= cutoff for _, timestamp in verified)
+
+    candidates = [
+        path for path, timestamp in verified
+        if timestamp < cutoff and path != newest_verified
+    ]
+    if not has_recent_recovery_point:
+        candidates = []
+
+    deleted: list[str] = []
+    if not dry_run:
+        for candidate in candidates:
+            # Re-check immediately before deletion; fail closed if the file
+            # changed, became a symlink, or is no longer a valid SQLite DB.
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            try:
+                with sqlite3.connect(f"file:{candidate.resolve()}?mode=ro", uri=True, timeout=10) as check:
+                    integrity = check.execute("PRAGMA integrity_check").fetchone()
+                if not integrity or integrity[0] != "ok":
+                    invalid.append(candidate.name)
+                    continue
+                candidate.unlink()
+                deleted.append(candidate.name)
+            except (sqlite3.Error, OSError, ValueError):
+                invalid.append(candidate.name)
+
+    return {
+        "status": "BACKUP_RETENTION_DRY_RUN" if dry_run else "BACKUP_RETENTION_COMPLETE",
+        "dry_run": dry_run,
+        "retention_days": retention_days,
+        "cutoff": datetime.fromtimestamp(cutoff, SAST).isoformat(),
+        "verified_backup_count": len(verified),
+        "recent_recovery_point_verified": has_recent_recovery_point,
+        "newest_verified_backup": newest_verified.name if newest_verified else None,
+        "candidates": [path.name for path in candidates],
+        "deleted": deleted,
+        "invalid_or_unreadable": sorted(set(invalid)),
+        "live_database_replaced": False,
+    }
+
+
 def verify_restore_candidate(backup_path: Path, staging_path: Path) -> dict:
     """Restore into an isolated staging DB and verify; never replace the live DB."""
     source = Path(backup_path)
