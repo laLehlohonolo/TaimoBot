@@ -380,7 +380,8 @@ def open_paper_trade(
             SELECT
                 balance,
                 starting_balance,
-                risk_profile
+                risk_profile,
+                owner_user_id
             FROM paper_accounts
             WHERE account_id = ?
             """,
@@ -486,6 +487,16 @@ def open_paper_trade(
                 copy_source_trade_id
             )
         )
+
+        if account["owner_user_id"]:
+            connection.execute(
+                """
+                UPDATE participant_milestones
+                SET first_trade_at = COALESCE(first_trade_at, CURRENT_TIMESTAMP)
+                WHERE user_id = ?
+                """,
+                (account["owner_user_id"],)
+            )
 
     return {
         "trade_id": trade_id,
