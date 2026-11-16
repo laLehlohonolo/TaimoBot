@@ -197,10 +197,20 @@ def retry_maintenance(request: MaintenanceRetryRequest, user=Depends(current_use
     # check, retry_failed=True could create a brand-new run for an arbitrary
     # date instead of recovering a failed attempt.
     with get_connection() as connection:
-        run = connection.execute(
-            "SELECT status FROM maintenance_runs WHERE run_date = ?",
-            (request.run_date.isoformat(),),
+        table = connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'maintenance_runs'
+            """
         ).fetchone()
+        run = (
+            connection.execute(
+                "SELECT status FROM maintenance_runs WHERE run_date = ?",
+                (request.run_date.isoformat(),),
+            ).fetchone()
+            if table is not None
+            else None
+        )
 
     if run is None:
         raise HTTPException(
