@@ -1084,7 +1084,7 @@ class DailyMaintenanceTests(unittest.TestCase):
                 with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
                     live.backup(copy)
             wal = Path(str(database.DB_PATH) + "-wal")
-            wal.write_bytes(b"pending")
+            wal.write_bytes(b"")
             try:
                 result = verify_restore_execution_readiness(
                     source, staged, rollback,
