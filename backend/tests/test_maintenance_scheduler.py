@@ -181,6 +181,17 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["status"], "RUNNING")
         self.assertEqual(row["run_token"], "newer-worker-token")
+        with database.get_connection() as connection:
+            attempt = connection.execute(
+                """
+                SELECT status, error_summary
+                FROM maintenance_run_attempts
+                WHERE run_date = ?
+                """,
+                (day.isoformat(),),
+            ).fetchone()
+        self.assertEqual(attempt["status"], "SUPERSEDED")
+        self.assertIn("newer maintenance claim", attempt["error_summary"])
 
 
 if __name__ == "__main__":
