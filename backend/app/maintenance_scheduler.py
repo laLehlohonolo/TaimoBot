@@ -1,14 +1,14 @@
 """Single-daily-run maintenance orchestration for TaimoBot.
 
-A database claim makes the job idempotent across API workers. Abandoned
-RUNNING claims can be recovered after a conservative lease timeout. FAILED
-runs are not retried by the polling loop; an operator must request a retry.
+A database claim makes the job idempotent across API workers. Each claim has
+a fencing token so a stale worker cannot complete or fail a newer worker's run.
 """
 from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from . import database
 from .maintenance import (
@@ -33,7 +33,6 @@ def _running_claim_is_stale(started_at: str, now: datetime) -> bool:
         current = now.astimezone(SAST)
         return started <= current - timedelta(minutes=RUNNING_LEASE_MINUTES)
     except (TypeError, ValueError):
-        # An unparseable claim is not safe to steal automatically.
         return False
 
 
@@ -42,15 +41,16 @@ def run_maintenance_for_date(
     *,
     retry_failed: bool = False,
 ) -> dict:
-    """Run and record one backup + isolated restore verification per SAST day.
+    """Run one backup + isolated restore verification per SAST day.
 
-    retry_failed is an explicit operator-controlled retry. The scheduler never
-    sets it, preventing repeated backup attempts every polling interval.
+    retry_failed is explicit operator-controlled behavior; the scheduler never
+    sets it. A per-attempt token fences off workers whose lease was reclaimed.
     """
     now = datetime.now(SAST)
     day = run_date or now.date()
     day_key = day.isoformat()
     started = now.isoformat()
+    claim_token = uuid4().hex
 
     with database.get_connection() as connection:
         connection.execute(
@@ -62,10 +62,18 @@ def run_maintenance_for_date(
                 started_at TEXT NOT NULL,
                 completed_at TEXT,
                 backup_file TEXT,
-                error_summary TEXT
+                error_summary TEXT,
+                run_token TEXT
             )
             """
         )
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(maintenance_runs)")
+        }
+        if "run_token" not in columns:
+            connection.execute("ALTER TABLE maintenance_runs ADD COLUMN run_token TEXT")
+
         connection.execute("BEGIN IMMEDIATE")
         existing = connection.execute(
             "SELECT status, started_at FROM maintenance_runs WHERE run_date = ?",
@@ -102,17 +110,18 @@ def run_maintenance_for_date(
             """
             INSERT INTO maintenance_runs (
                 run_date, status, started_at, completed_at,
-                backup_file, error_summary
+                backup_file, error_summary, run_token
             )
-            VALUES (?, 'RUNNING', ?, NULL, NULL, NULL)
+            VALUES (?, 'RUNNING', ?, NULL, NULL, NULL, ?)
             ON CONFLICT(run_date) DO UPDATE SET
                 status = 'RUNNING',
                 started_at = excluded.started_at,
                 completed_at = NULL,
                 backup_file = NULL,
-                error_summary = NULL
+                error_summary = NULL,
+                run_token = excluded.run_token
             """,
-            (day_key, started),
+            (day_key, started, claim_token),
         )
         connection.commit()
 
@@ -123,11 +132,10 @@ def run_maintenance_for_date(
             Path(backup_result["backup_file"]),
             staging_path,
         )
-        # The candidate was checked successfully; do not retain a second copy.
         staging_path.unlink(missing_ok=True)
 
         with database.get_connection() as connection:
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE maintenance_runs
                 SET status = 'COMPLETE',
@@ -136,13 +144,21 @@ def run_maintenance_for_date(
                     error_summary = NULL
                 WHERE run_date = ?
                   AND status = 'RUNNING'
+                  AND run_token = ?
                 """,
                 (
                     datetime.now(SAST).isoformat(),
                     backup_result["backup_file"],
                     day_key,
+                    claim_token,
                 ),
             )
+        if updated.rowcount != 1:
+            return {
+                "status": "MAINTENANCE_SUPERSEDED",
+                "run_date": day_key,
+                "reason": "A newer maintenance claim replaced this worker.",
+            }
 
         return {
             "status": "MAINTENANCE_COMPLETE",
@@ -154,7 +170,7 @@ def run_maintenance_for_date(
     except Exception as error:
         staging_path.unlink(missing_ok=True)
         with database.get_connection() as connection:
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE maintenance_runs
                 SET status = 'FAILED',
@@ -162,19 +178,26 @@ def run_maintenance_for_date(
                     error_summary = ?
                 WHERE run_date = ?
                   AND status = 'RUNNING'
+                  AND run_token = ?
                 """,
                 (
                     datetime.now(SAST).isoformat(),
                     str(error)[:500],
                     day_key,
+                    claim_token,
                 ),
             )
+        if updated.rowcount != 1:
+            return {
+                "status": "MAINTENANCE_SUPERSEDED",
+                "run_date": day_key,
+                "reason": "A newer maintenance claim replaced this worker.",
+            }
         return {
             "status": "MAINTENANCE_FAILED",
             "run_date": day_key,
             "error": str(error)[:500],
         }
-
 
 
 def get_maintenance_status() -> dict:
