@@ -78,6 +78,10 @@ def register_user(email, password):
                 "INSERT INTO users (user_id, email, password_hash) VALUES (?, ?, ?)",
                 (user_id, normalized_email, password_hash)
             )
+            connection.execute(
+                "INSERT INTO participant_milestones (user_id) VALUES (?)",
+                (user_id,)
+            )
     except sqlite3.IntegrityError as error:
         raise AuthenticationError(
             "An account with this email already exists."
