@@ -1,6 +1,8 @@
 import asyncio
 import os
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
+from uuid import uuid4
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -13,7 +15,10 @@ from .maintenance_scheduler import (
     get_maintenance_status,
     run_maintenance_for_date,
 )
-from .maintenance import is_maintenance_window, inspect_recovery_candidates
+from .maintenance import (
+    BACKUP_DIR, create_verified_backup, is_maintenance_window,
+    inspect_recovery_candidates, verify_restore_candidate,
+)
 from .cors import configure_cors
 from .risk import (
     calculate_position_size,
@@ -158,6 +163,11 @@ class MaintenanceRetryRequest(BaseModel):
     retry_mode: Literal["FAILED", "STALE_RUNNING"]
 
 
+class MaintenanceRestorePrepareRequest(BaseModel):
+    backup_file_name: str = Field(min_length=1, max_length=255, pattern=r"^taimobot-[A-Za-z0-9._-]+[.]sqlite3$")
+    confirm_preparation: bool
+
+
 class StrategyKnowledgeRequest(BaseModel):
     name: str = Field(min_length=3, max_length=100)
     category: str = Field(min_length=3, max_length=40, pattern=r"^[A-Z][A-Z0-9_]*$")
@@ -264,6 +274,45 @@ def maintenance_recovery_candidates(user=Depends(current_user)):
     """Admin-only, read-only inventory of verified recovery candidates."""
     require_admin(user)
     return inspect_recovery_candidates()
+
+
+@app.post("/maintenance/restore/prepare")
+def prepare_maintenance_restore(request: MaintenanceRestorePrepareRequest, user=Depends(current_user)):
+    """Prepare an admin restore in isolation; never replace the live database."""
+    require_admin(user)
+    if not request.confirm_preparation:
+        raise HTTPException(status_code=400, detail="Explicit confirmation is required.")
+    inventory = inspect_recovery_candidates()
+    if inventory.get("status") != "RECOVERY_INVENTORY_COMPLETE":
+        raise HTTPException(status_code=503, detail="Recovery inventory is unavailable.")
+    candidate = next((item for item in inventory.get("candidates", []) if item.get("file_name") == request.backup_file_name), None)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Recovery backup was not found.")
+    if not candidate.get("restore_ready"):
+        raise HTTPException(status_code=409, detail="Selected backup failed recovery-readiness checks.")
+    backup_directory = Path(BACKUP_DIR).resolve()
+    selected_backup = backup_directory / request.backup_file_name
+    if selected_backup.is_symlink() or not selected_backup.is_file() or selected_backup.resolve().parent != backup_directory:
+        raise HTTPException(status_code=409, detail="Selected backup is not a safe managed file.")
+    plan_id = uuid4().hex
+    staging_path = backup_directory / "recovery-staging" / ("approved-candidate-" + plan_id + ".sqlite3")
+    try:
+        pre_restore_backup = create_verified_backup()
+        if pre_restore_backup.get("status") != "BACKUP_VERIFIED":
+            raise RuntimeError("Fresh pre-restore backup was not verified.")
+        staged = verify_restore_candidate(selected_backup, staging_path)
+        if staged.get("status") != "RESTORE_CANDIDATE_VERIFIED":
+            raise RuntimeError("Selected restore candidate did not verify.")
+        with get_connection() as connection:
+            connection.execute("CREATE TABLE IF NOT EXISTS maintenance_restore_plans (plan_id TEXT PRIMARY KEY, backup_file TEXT NOT NULL, staging_file TEXT NOT NULL, pre_restore_backup_file TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('PREPARED','APPROVED','APPLIED','FAILED','EXPIRED')), created_at TEXT NOT NULL, created_by TEXT NOT NULL)")
+            connection.execute("INSERT INTO maintenance_restore_plans (plan_id, backup_file, staging_file, pre_restore_backup_file, status, created_at, created_by) VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)", (plan_id, str(selected_backup.resolve()), str(staging_path.resolve()), str(Path(pre_restore_backup['backup_file']).resolve()), datetime.now().astimezone().isoformat(), str(user.get('email', ''))))
+    except Exception as error:
+        try:
+            staging_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail="Restore preparation failed safely: " + str(error)[:200]) from error
+    return {"status":"RESTORE_PREPARED", "plan_id":plan_id, "selected_backup":request.backup_file_name, "selected_backup_verified":True, "pre_restore_backup_verified":True, "staged_candidate_verified":True, "approval_required":True, "live_database_replaced":False, "trading_mode":"paper"}
 
 
 @app.get("/safety/status")
