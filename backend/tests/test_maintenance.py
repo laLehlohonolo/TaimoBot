@@ -158,6 +158,44 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertTrue(recent_backup.exists())
             self.assertFalse(expired_backup.exists())
 
+    def test_backup_replaced_with_recent_file_during_delete_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            expired = root / "taimobot-20241101-230000-expired.sqlite3"
+            recent = root / "taimobot-20261116-110000-recent.sqlite3"
+            replacement = root / "replacement.sqlite3"
+            for path in (expired, recent, replacement):
+                with sqlite3.connect(path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            os.utime(expired, (old_time, old_time))
+            os.utime(recent, (now.timestamp() - 60, now.timestamp() - 60))
+            real_connect = sqlite3.connect
+            candidate_checks = 0
+
+            def replace_before_final_validation(database_name, *args, **kwargs):
+                nonlocal candidate_checks
+                if str(expired.resolve()) in str(database_name):
+                    candidate_checks += 1
+                    if candidate_checks == 2:
+                        os.replace(replacement, expired)
+                        os.utime(expired, (now.timestamp(), now.timestamp()))
+                return real_connect(database_name, *args, **kwargs)
+
+            with patch(
+                "app.maintenance.sqlite3.connect",
+                side_effect=replace_before_final_validation,
+            ):
+                result = cleanup_expired_backups(
+                    backup_dir=root, now=now, dry_run=False,
+                    live_database_path=self.original_db_path,
+                )
+
+            self.assertEqual(result["deleted"], [])
+            self.assertTrue(expired.exists())
+            self.assertGreaterEqual(expired.stat().st_mtime, now.timestamp() - 1)
+
     def test_backup_retention_fails_safe_without_recent_verified_recovery_point(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
