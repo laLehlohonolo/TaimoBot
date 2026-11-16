@@ -356,8 +356,8 @@ def open_paper_trade(
                 or source_copy["follower_account_id"] != account_id
             ):
                 raise ValueError(
-                    "Copy rejected: source trade must remain open and the "
-                    "copy relationship must remain active through execution."
+                    "Copy rejected: source trade, active relationship, "
+                    "and current execution lease token must remain valid through execution."
                 )
 
         duplicate = connection.execute(
