@@ -19,6 +19,7 @@ from .maintenance_scheduler import (
 from .maintenance import (
     BACKUP_DIR, SAST, create_verified_backup, is_maintenance_window,
     inspect_recovery_candidates, verify_restore_candidate, sha256_file,
+    verify_approved_restore_plan,
 )
 from .cors import configure_cors
 from .risk import (
@@ -172,6 +173,10 @@ class MaintenanceRestorePrepareRequest(BaseModel):
 class MaintenanceRestoreApproveRequest(BaseModel):
     plan_id: str = Field(min_length=32, max_length=32, pattern=r"^[a-f0-9]{32}$")
     confirm_approval: bool
+
+
+class MaintenanceRestorePreflightRequest(BaseModel):
+    plan_id: str = Field(min_length=32, max_length=32, pattern=r"^[a-f0-9]{32}$")
 
 
 class StrategyKnowledgeRequest(BaseModel):
@@ -442,6 +447,40 @@ def approve_maintenance_restore(request: MaintenanceRestoreApproveRequest, user=
         "live_database_replaced": False,
         "trading_mode": "paper",
     }
+
+
+@app.post("/maintenance/restore/preflight")
+def preflight_maintenance_restore(request: MaintenanceRestorePreflightRequest, user=Depends(current_user)):
+    """Admin-only read-only preflight for an approved restore plan."""
+    require_admin(user)
+    with get_connection() as connection:
+        plan = connection.execute(
+            """
+            SELECT plan_id, backup_file, staging_file, pre_restore_backup_file,
+                   status, created_at
+            FROM maintenance_restore_plans WHERE plan_id = ?
+            """,
+            (request.plan_id,),
+        ).fetchone()
+        artifact_hashes = connection.execute(
+            """
+            SELECT source_sha256, staged_sha256, rollback_sha256
+            FROM maintenance_restore_artifacts WHERE plan_id = ?
+            """,
+            (request.plan_id,),
+        ).fetchone() if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='maintenance_restore_artifacts'"
+        ).fetchone() else None
+
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Restore plan not found.")
+    if artifact_hashes is None:
+        raise HTTPException(status_code=409, detail="Restore plan has no immutable artifact fingerprints.")
+
+    try:
+        return verify_approved_restore_plan(plan, artifact_hashes)
+    except (OSError, sqlite3.Error, ValueError, KeyError) as error:
+        raise HTTPException(status_code=409, detail="Restore preflight blocked: " + str(error)[:180]) from error
 
 
 @app.get("/safety/status")
