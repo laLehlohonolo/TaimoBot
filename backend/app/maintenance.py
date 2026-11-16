@@ -437,3 +437,77 @@ def verify_restore_candidate(backup_path: Path, staging_path: Path) -> dict:
         "integrity_check": "ok",
         "live_database_replaced": False,
     }
+
+
+def verify_restore_execution_readiness(
+    source_backup: Path,
+    staged_candidate: Path,
+    rollback_backup: Path,
+    *,
+    backup_dir: Path | None = None,
+    live_database_path: Path | None = None,
+) -> dict:
+    """Read-only final preflight for a restore and its rollback recovery point.
+
+    This deliberately does not replace the live database or authorize execution.
+    Every artifact must remain inside its designated managed directory and pass
+    the full recovery inventory checks.
+    """
+    managed_backup_dir = Path(backup_dir or BACKUP_DIR).resolve()
+    staging_dir = (managed_backup_dir / "recovery-staging").resolve()
+    live_path = Path(live_database_path or database.DB_PATH).resolve()
+    artifacts = (
+        (Path(source_backup), managed_backup_dir, "source"),
+        (Path(rollback_backup), managed_backup_dir, "rollback"),
+        (Path(staged_candidate), staging_dir, "staged"),
+    )
+    for artifact, expected_parent, label in artifacts:
+        if artifact.is_symlink() or not artifact.is_file():
+            raise ValueError(f"The {label} recovery artifact is missing or unsafe.")
+        if artifact.resolve().parent != expected_parent:
+            raise ValueError(f"The {label} recovery artifact is outside its managed directory.")
+        if artifact.resolve() == live_path:
+            raise ValueError(f"The {label} recovery artifact cannot be the live database.")
+
+    if live_path.is_symlink() or not live_path.is_file():
+        raise ValueError("The live database is missing or unsafe.")
+
+    source_inventory = inspect_recovery_candidates(managed_backup_dir)
+    staged_inventory = inspect_recovery_candidates(staging_dir)
+    if source_inventory.get("status") != "RECOVERY_INVENTORY_COMPLETE":
+        raise ValueError("Managed backup inventory is unavailable.")
+    if staged_inventory.get("status") != "RECOVERY_INVENTORY_COMPLETE":
+        raise ValueError("Staged recovery inventory is unavailable.")
+
+    source_records = {
+        item.get("file_name"): item
+        for item in source_inventory.get("candidates", [])
+    }
+    staged_records = {
+        item.get("file_name"): item
+        for item in staged_inventory.get("candidates", [])
+    }
+    if not source_records.get(Path(source_backup).name, {}).get("restore_ready"):
+        raise ValueError("The selected source backup is not restore-ready.")
+    if not source_records.get(Path(rollback_backup).name, {}).get("restore_ready"):
+        raise ValueError("The rollback backup is not restore-ready.")
+    if not staged_records.get(Path(staged_candidate).name, {}).get("restore_ready"):
+        raise ValueError("The staged restore candidate is not restore-ready.")
+
+    try:
+        with sqlite3.connect(f"file:{live_path}?mode=ro", uri=True, timeout=10) as live:
+            live_integrity = live.execute("PRAGMA integrity_check").fetchone()
+    except (sqlite3.Error, OSError, ValueError) as error:
+        raise ValueError("The current live database cannot be verified.") from error
+    if not live_integrity or live_integrity[0] != "ok":
+        raise ValueError("The current live database failed its integrity check.")
+
+    return {
+        "status": "RESTORE_EXECUTION_PREFLIGHT_PASSED",
+        "source_backup_verified": True,
+        "staged_candidate_verified": True,
+        "rollback_backup_verified": True,
+        "live_database_verified": True,
+        "execution_authorized": False,
+        "live_database_replaced": False,
+    }
