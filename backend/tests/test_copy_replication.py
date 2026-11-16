@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import patch
 from pathlib import Path
 
@@ -439,6 +439,68 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertIsNone(executions["lease_token"])
         self.assertIsNone(executions["lease_expires_at"])
         self.assertEqual(follower_trades, 1)
+
+    def test_two_workers_racing_to_reclaim_expired_lease_have_one_owner(self):
+        source = self.create_source_trade("SOURCE-EXPIRED-LEASE-RACE")
+        relationship_id = self._create_pending_copy_execution(
+            source["trade_id"],
+            "datetime('now', '-10 minutes')",
+            "datetime('now', '-10 minutes')"
+        )
+        original_open = copy_trading.open_paper_trade
+        first_worker_at_open = Event()
+        release_first_worker = Event()
+
+        def pause_first_worker_after_claim(**kwargs):
+            first_worker_at_open.set()
+            if not release_first_worker.wait(timeout=10):
+                raise TimeoutError("Test did not release the first copy worker.")
+            return original_open(**kwargs)
+
+        with patch(
+            "app.copy_trading.open_paper_trade",
+            side_effect=pause_first_worker_after_claim
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(replicate_open_trade, source["trade_id"])
+                self.assertTrue(first_worker_at_open.wait(timeout=5))
+
+                # The first worker owns the newly claimed lease but has not
+                # inserted its follower trade. The second worker must defer.
+                second = executor.submit(replicate_open_trade, source["trade_id"])
+                second_result = second.result(timeout=5)
+                release_first_worker.set()
+                first_result = first.result(timeout=10)
+
+        self.assertEqual(first_result["successful_copies"], 1)
+        self.assertEqual(second_result["successful_copies"], 0)
+        self.assertEqual(second_result["copies"][0]["status"], "PENDING")
+        self.assertTrue(second_result["copies"][0]["recovery_deferred"])
+
+        with database.get_connection() as connection:
+            trades = connection.execute(
+                """
+                SELECT trade_id, copied_from_trade_id
+                FROM trades
+                WHERE account_id = 'FOLLOWER'
+                  AND copied_from_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchall()
+            execution = connection.execute(
+                """
+                SELECT status, copied_trade_id, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source["trade_id"])
+            ).fetchone()
+
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(execution["status"], "COPIED")
+        self.assertEqual(execution["copied_trade_id"], trades[0]["trade_id"])
+        self.assertIsNone(execution["lease_token"])
+        self.assertIsNone(execution["lease_expires_at"])
 
     def test_paused_or_stopped_relationship_finalizes_pending_without_opening_copy(self):
         for index, status in enumerate(("PAUSED", "STOPPED"), start=1):
