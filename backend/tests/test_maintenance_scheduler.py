@@ -96,6 +96,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         ), patch(
             "app.maintenance_scheduler.verify_restore_candidate",
             return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+        ), patch(
+            "app.maintenance_scheduler.cleanup_expired_backups",
+            return_value={"status": "BACKUP_RETENTION_COMPLETE", "deleted": []},
         ):
             failed = run_maintenance_for_date(day)
             automatic = run_maintenance_for_date(day)
@@ -403,6 +406,9 @@ class MaintenanceSchedulerTests(unittest.TestCase):
                     "integrity_check": "ok",
                     "live_database_replaced": False,
                 },
+            ), patch(
+                "app.maintenance_scheduler.cleanup_expired_backups",
+                return_value={"status": "BACKUP_RETENTION_COMPLETE", "deleted": []},
             ):
                 with self.assertRaises(Exception) as denied:
                     retry_maintenance(
