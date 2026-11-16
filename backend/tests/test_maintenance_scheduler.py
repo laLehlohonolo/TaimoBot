@@ -9,6 +9,7 @@ from app import database
 from app.database import init_db
 from app.maintenance import SAST
 from app.maintenance_scheduler import run_maintenance_for_date
+from app.main import MaintenanceRetryRequest, retry_maintenance
 from app.safety import deactivate_emergency_stop
 
 
@@ -213,6 +214,54 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertIsNone(run["backup_file"])
         self.assertEqual(attempt["status"], "FAILED")
         self.assertIn("simulated audit write failure", attempt["error_summary"])
+
+
+    def test_admin_retry_endpoint_requires_admin_and_reports_verified_recovery(self):
+        day = date(2026, 11, 18)
+        with patch.dict("os.environ", {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}), patch(
+            "app.maintenance_scheduler.create_verified_backup"
+        ) as backup:
+            backup_dir = self.root / "backups"
+            backup_file = backup_dir / "verified.sqlite3"
+
+            def create_backup():
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_file.write_bytes(b"verified-test-backup")
+                return {
+                    "status": "BACKUP_VERIFIED",
+                    "backup_file": str(backup_file),
+                    "integrity_check": "ok",
+                    "created_at": "2026-11-18T23:10:00+02:00",
+                    "timezone": "Africa/Johannesburg",
+                }
+
+            backup.side_effect = create_backup
+            with patch(
+                "app.maintenance_scheduler.verify_restore_candidate",
+                return_value={
+                    "status": "RESTORE_CANDIDATE_VERIFIED",
+                    "integrity_check": "ok",
+                    "live_database_replaced": False,
+                },
+            ):
+                with self.assertRaises(Exception) as denied:
+                    retry_maintenance(
+                        MaintenanceRetryRequest(run_date=day, retry_mode="FAILED"),
+                        {"email": "not-admin@example.com"},
+                    )
+                self.assertEqual(getattr(denied.exception, "status_code", None), 403)
+
+                result = retry_maintenance(
+                    MaintenanceRetryRequest(run_date=day, retry_mode="FAILED"),
+                    {"email": "ops@example.com"},
+                )
+
+        self.assertEqual(result["status"], "MAINTENANCE_COMPLETE")
+        self.assertTrue(result["operator_triggered"])
+        self.assertEqual(result["backup"]["integrity_check"], "ok")
+        self.assertFalse(result["restore_verification"]["live_database_replaced"])
+        self.assertNotIn("backup_file", result["backup"])
+        self.assertEqual(backup.call_count, 1)
 
     def test_reclaimed_claim_fences_off_stale_worker_completion(self):
         day = date(2026, 11, 16)
