@@ -177,6 +177,12 @@ def run_maintenance_for_date(
             retention_days=365,
             dry_run=False,
         )
+        if retention_result.get("status") != "BACKUP_RETENTION_COMPLETE":
+            retention_status = str(retention_result.get("status", "UNKNOWN"))
+            raise RuntimeError(
+                "Backup retention cleanup did not complete safely "
+                f"(status: {retention_status})."
+            )
 
         completed_at = datetime.now(SAST).isoformat()
         with database.get_connection() as connection:
