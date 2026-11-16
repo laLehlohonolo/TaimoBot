@@ -935,5 +935,91 @@ class PaperTradingTests(unittest.TestCase):
         self.assertLessEqual(totals["total_open_risk"], 300)
 
 
+    def test_profit_preview_api_is_read_only_and_accounts_for_costs(self):
+        trade = self.open_trade("ORDER-PROFIT-PREVIEW")
+
+        response = self.client.post(
+            f"/trades/{trade['trade_id']}/profit-preview",
+            json={
+                "current_price": 4001,
+                "spread_cost": 0.2,
+                "commission_cost": 0.1,
+                "swap_cost": 0.1,
+                "other_costs": 0.1,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()
+        self.assertEqual(preview["trade_id"], trade["trade_id"])
+        self.assertEqual(preview["symbol"], "XAUUSD")
+        self.assertAlmostEqual(preview["gross_pnl"], trade["quantity"])
+        self.assertAlmostEqual(preview["total_costs"], 0.5)
+        self.assertAlmostEqual(
+            preview["net_pnl"], trade["quantity"] - 0.5
+        )
+        self.assertTrue(preview["read_only"])
+        self.assertFalse(preview["execution_triggered"])
+
+        with database.get_connection() as connection:
+            stored_trade = connection.execute(
+                """
+                SELECT status, realized_pnl
+                FROM trades
+                WHERE trade_id = ?
+                """,
+                (trade["trade_id"],),
+            ).fetchone()
+            account = connection.execute(
+                """
+                SELECT balance
+                FROM paper_accounts
+                WHERE account_id = 'TEST-001'
+                """
+            ).fetchone()
+
+        self.assertEqual(stored_trade["status"], "OPEN")
+        self.assertEqual(stored_trade["realized_pnl"], 0)
+        self.assertEqual(account["balance"], 10000)
+
+    def test_profit_preview_rejects_closed_trade(self):
+        trade = self.open_trade("ORDER-PROFIT-PREVIEW-CLOSED")
+        close_paper_trade(trade["trade_id"], 4010)
+
+        response = self.client.post(
+            f"/trades/{trade['trade_id']}/profit-preview",
+            json={"current_price": 4011},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("only for open trades", response.json()["detail"])
+
+    def test_profit_preview_validates_positive_current_price(self):
+        trade = self.open_trade("ORDER-PROFIT-PREVIEW-INVALID")
+
+        response = self.client.post(
+            f"/trades/{trade['trade_id']}/profit-preview",
+            json={"current_price": 0},
+        )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_profit_preview_does_not_mark_small_gross_profit_as_net_profit(self):
+        trade = self.open_trade("ORDER-PROFIT-PREVIEW-COSTS")
+
+        response = self.client.post(
+            f"/trades/{trade['trade_id']}/profit-preview",
+            json={
+                "current_price": 4000.01,
+                "spread_cost": 1,
+                "commission_cost": 1,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()
+        self.assertLess(preview["net_pnl"], 0)
+        self.assertFalse(preview["should_take_profit"])
+
 if __name__ == "__main__":
     unittest.main()
