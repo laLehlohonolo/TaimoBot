@@ -218,6 +218,24 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
     def test_admin_retry_endpoint_requires_admin_and_reports_verified_recovery(self):
         day = date(2026, 11, 18)
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS maintenance_runs (
+                    run_date TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    backup_file TEXT,
+                    error_summary TEXT
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date, status, started_at) VALUES (?, 'FAILED', ?)",
+                (day.isoformat(), datetime.now(SAST).isoformat()),
+            )
+
         with patch.dict("os.environ", {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}), patch(
             "app.maintenance_scheduler.create_verified_backup"
         ) as backup:
@@ -262,6 +280,42 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertFalse(result["restore_verification"]["live_database_replaced"])
         self.assertNotIn("backup_file", result["backup"])
         self.assertEqual(backup.call_count, 1)
+
+    def test_admin_retry_endpoint_rejects_missing_run_and_mismatched_state(self):
+        day = date(2026, 11, 19)
+        admin = {"email": "ops@example.com"}
+        with patch.dict("os.environ", {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
+            with self.assertRaises(HTTPException) as missing:
+                retry_maintenance(
+                    MaintenanceRetryRequest(run_date=day, retry_mode="FAILED"),
+                    admin,
+                )
+            self.assertEqual(missing.exception.status_code, 404)
+
+            with database.get_connection() as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS maintenance_runs (
+                        run_date TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        backup_file TEXT,
+                        error_summary TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO maintenance_runs (run_date, status, started_at) VALUES (?, 'FAILED', ?)",
+                    (day.isoformat(), datetime.now(SAST).isoformat()),
+                )
+
+            with self.assertRaises(HTTPException) as mismatch:
+                retry_maintenance(
+                    MaintenanceRetryRequest(run_date=day, retry_mode="STALE_RUNNING"),
+                    admin,
+                )
+            self.assertEqual(mismatch.exception.status_code, 409)
 
     def test_reclaimed_claim_fences_off_stale_worker_completion(self):
         day = date(2026, 11, 16)
