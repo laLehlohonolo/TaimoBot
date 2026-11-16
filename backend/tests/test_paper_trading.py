@@ -99,6 +99,56 @@ class PaperTradingTests(unittest.TestCase):
             ).fetchone()["first_trade_at"]
         self.assertEqual(first, second)
 
+    def test_migration_recovers_legacy_participant_first_trade_history(self):
+        self.open_trade("LEGACY-MILESTONE-FIRST")
+        self.open_trade("LEGACY-MILESTONE-SECOND")
+
+        with database.get_connection() as connection:
+            expected_first_trade = connection.execute(
+                """
+                SELECT MIN(COALESCE(opened_at, created_at))
+                FROM trades
+                WHERE account_id = 'TEST-001'
+                  AND status IN ('OPEN', 'CLOSED')
+                """
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE users SET created_at = '2016-11-16 09:00:00' WHERE user_id = ?",
+                (self.user_id,)
+            )
+            connection.execute(
+                "DELETE FROM participant_milestones WHERE user_id = ?",
+                (self.user_id,)
+            )
+
+            database.migrate_participant_milestones(connection)
+            migrated = connection.execute(
+                """
+                SELECT joined_at, first_trade_at
+                FROM participant_milestones
+                WHERE user_id = ?
+                """,
+                (self.user_id,)
+            ).fetchone()
+
+        self.assertEqual(migrated["joined_at"], "2016-11-16 09:00:00")
+        self.assertEqual(migrated["first_trade_at"], expected_first_trade)
+
+        # Re-running the migration must preserve the original milestones.
+        with database.get_connection() as connection:
+            database.migrate_participant_milestones(connection)
+            repeated = connection.execute(
+                """
+                SELECT joined_at, first_trade_at
+                FROM participant_milestones
+                WHERE user_id = ?
+                """,
+                (self.user_id,)
+            ).fetchone()
+
+        self.assertEqual(repeated["joined_at"], migrated["joined_at"])
+        self.assertEqual(repeated["first_trade_at"], migrated["first_trade_at"])
+
     def test_one_percent_risk_calculation(self):
         result = calculate_position_size(
             account_balance=10000,
