@@ -151,6 +151,47 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(row[1], first["backup"]["backup_file"])
 
 
+    def test_retention_runs_only_after_backup_and_restore_verification_succeed(self):
+        day = date(2026, 11, 21)
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+
+        def fake_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_file.write_bytes(b"verified-test-backup")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup", side_effect=fake_backup
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            side_effect=RuntimeError("restore verification failed"),
+        ), patch(
+            "app.maintenance_scheduler.cleanup_expired_backups"
+        ) as cleanup:
+            failed = run_maintenance_for_date(day)
+            cleanup.assert_not_called()
+
+        self.assertEqual(failed["status"], "MAINTENANCE_FAILED")
+
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup", side_effect=fake_backup
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+        ), patch(
+            "app.maintenance_scheduler.cleanup_expired_backups",
+            return_value={"status": "BACKUP_RETENTION_COMPLETE", "deleted": []},
+        ) as cleanup:
+            completed = run_maintenance_for_date(day, retry_failed=True)
+
+        self.assertEqual(completed["status"], "MAINTENANCE_COMPLETE")
+        cleanup.assert_called_once()
+        self.assertEqual(
+            completed["backup_retention"]["status"],
+            "BACKUP_RETENTION_COMPLETE",
+        )
+
     def test_completion_and_audit_roll_back_together_when_audit_write_fails(self):
         day = date(2026, 11, 17)
         backup_dir = self.root / "backups"
