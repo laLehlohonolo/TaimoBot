@@ -417,6 +417,11 @@ def group_profit_preview(
 
     if group is None:
         raise HTTPException(status_code=404, detail="Position group not found.")
+    if group["status"] != "OPEN":
+        raise HTTPException(
+            status_code=409,
+            detail="Profit preview is available only for open position groups."
+        )
     if not trades:
         raise HTTPException(
             status_code=409,
