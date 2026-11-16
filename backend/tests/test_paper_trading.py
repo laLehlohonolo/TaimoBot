@@ -1113,6 +1113,35 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("open positions", response.json()["detail"])
 
+
+    def test_group_profit_preview_rejects_closed_group_even_if_open_leg_remains(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        group_id = group_response.json()["group_id"]
+        self.open_trade("GROUP-PREVIEW-CLOSED-LEG")
+
+        # Simulate an inconsistent persisted state: a closed group with an
+        # orphaned open leg. The preview must trust the group lifecycle state.
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE position_groups SET status = 'CLOSED' WHERE group_id = ?",
+                (group_id,),
+            )
+            connection.execute(
+                "UPDATE trades SET position_group_id = ? WHERE client_order_id = ?",
+                (group_id, "GROUP-PREVIEW-CLOSED-LEG"),
+            )
+
+        response = self.client.post(
+            f"/groups/{group_id}/profit-preview",
+            json={"current_price": 4001},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("open position groups", response.json()["detail"])
+
     def test_group_profit_preview_requires_authentication(self):
         group_response = self.client.post(
             "/accounts/TEST-001/groups",
