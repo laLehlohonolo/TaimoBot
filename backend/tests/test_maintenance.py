@@ -302,6 +302,79 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertTrue(active_attempt.exists())
             self.assertTrue(recent_backup.exists())
 
+    def test_backup_retention_preserves_latest_failed_and_superseded_verified_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            latest_failed = root / "taimobot-20241101-230000-latest-failed.sqlite3"
+            older_failed = root / "taimobot-20241102-230000-older-failed.sqlite3"
+            latest_superseded = root / "taimobot-20241103-230000-latest-superseded.sqlite3"
+            older_superseded = root / "taimobot-20241104-230000-older-superseded.sqlite3"
+            recent_backup = root / "taimobot-20261116-110000-recent.sqlite3"
+            backups = (
+                latest_failed,
+                older_failed,
+                latest_superseded,
+                older_superseded,
+                recent_backup,
+            )
+            for backup_path in backups:
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            for backup_path in backups[:-1]:
+                os.utime(backup_path, (old_time, old_time))
+
+            with database.get_connection() as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE maintenance_run_attempts (
+                        attempt_token TEXT PRIMARY KEY,
+                        run_date TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        backup_file TEXT,
+                        error_summary TEXT
+                    );
+                    """
+                )
+                attempts = (
+                    ("failed-latest", "FAILED", "2026-11-15T23:10:00+02:00", latest_failed),
+                    ("failed-older", "FAILED", "2026-11-14T23:10:00+02:00", older_failed),
+                    ("superseded-latest", "SUPERSEDED", "2026-11-15T23:20:00+02:00", latest_superseded),
+                    ("superseded-older", "SUPERSEDED", "2026-11-14T23:20:00+02:00", older_superseded),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO maintenance_run_attempts (
+                        attempt_token, run_date, status, started_at,
+                        completed_at, backup_file
+                    ) VALUES (?, '2026-11-15', ?, ?, ?, ?)
+                    """,
+                    [
+                        (token, status, started, started, str(path))
+                        for token, status, started, path in attempts
+                    ],
+                )
+
+            result = cleanup_expired_backups(
+                backup_dir=root,
+                now=now,
+                dry_run=False,
+                live_database_path=self.original_db_path,
+            )
+
+            self.assertEqual(
+                set(result["deleted"]),
+                {older_failed.name, older_superseded.name},
+            )
+            self.assertTrue(latest_failed.exists())
+            self.assertTrue(latest_superseded.exists())
+            self.assertFalse(older_failed.exists())
+            self.assertFalse(older_superseded.exists())
+            self.assertTrue(recent_backup.exists())
+
     def test_backup_retention_fails_closed_when_maintenance_metadata_cannot_be_read(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
