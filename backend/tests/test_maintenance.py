@@ -14,6 +14,7 @@ from app.maintenance import (
     inspect_recovery_candidates,
     verify_restore_candidate,
     verify_restore_execution_readiness,
+    sha256_file,
 )
 from app import database
 from app.database import init_db
@@ -654,10 +655,22 @@ class DailyMaintenanceTests(unittest.TestCase):
                 )"""
             )
             connection.execute(
+                """CREATE TABLE maintenance_restore_artifacts (
+                    plan_id TEXT PRIMARY KEY REFERENCES maintenance_restore_plans(plan_id),
+                    source_sha256 TEXT NOT NULL, staged_sha256 TEXT NOT NULL,
+                    rollback_sha256 TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
                 """INSERT INTO maintenance_restore_plans
                 VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)""",
                 (plan_id, str(source), str(staged), str(rollback),
                  datetime.now(ZoneInfo("Africa/Johannesburg")).isoformat(), "ops@example.com"),
+            )
+            connection.execute(
+                """INSERT INTO maintenance_restore_artifacts
+                VALUES (?, ?, ?, ?)""",
+                (plan_id, sha256_file(source), sha256_file(staged), sha256_file(rollback)),
             )
 
         def ready_inventory(directory=None):
@@ -740,6 +753,79 @@ class DailyMaintenanceTests(unittest.TestCase):
             ).fetchone()["status"]
         self.assertEqual(status, "PREPARED")
 
+
+
+    def test_restore_approval_rejects_artifact_replaced_after_preparation(self):
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+        from fastapi import HTTPException
+
+        backup_dir = Path(self.temp_dir.name) / "backups"
+        staging_dir = backup_dir / "recovery-staging"
+        staging_dir.mkdir(parents=True)
+        source = backup_dir / "taimobot-source.sqlite3"
+        rollback = backup_dir / "taimobot-rollback.sqlite3"
+        staged = staging_dir / "taimobot-restore-plan.sqlite3"
+        for artifact in (source, rollback, staged):
+            artifact.write_bytes(b"verified-before-preparation")
+        plan_id = "c" * 32
+        with database.get_connection() as connection:
+            connection.execute(
+                """CREATE TABLE maintenance_restore_plans (
+                    plan_id TEXT PRIMARY KEY, backup_file TEXT NOT NULL,
+                    staging_file TEXT NOT NULL, pre_restore_backup_file TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE maintenance_restore_artifacts (
+                    plan_id TEXT PRIMARY KEY REFERENCES maintenance_restore_plans(plan_id),
+                    source_sha256 TEXT NOT NULL, staged_sha256 TEXT NOT NULL,
+                    rollback_sha256 TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO maintenance_restore_plans
+                VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)""",
+                (plan_id, str(source), str(staged), str(rollback),
+                 datetime.now(ZoneInfo("Africa/Johannesburg")).isoformat(), "ops@example.com"),
+            )
+            connection.execute(
+                "INSERT INTO maintenance_restore_artifacts VALUES (?, ?, ?, ?)",
+                (plan_id, sha256_file(source), sha256_file(staged), sha256_file(rollback)),
+            )
+
+        staged.write_bytes(b"valid-looking-but-replaced-after-preparation")
+
+        def ready_inventory(directory=None):
+            names = [source.name, rollback.name] if Path(directory) == backup_dir else [staged.name]
+            return {
+                "status": "RECOVERY_INVENTORY_COMPLETE",
+                "candidates": [{"file_name": name, "restore_ready": True} for name in names],
+            }
+
+        with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+            "app.main.inspect_recovery_candidates", side_effect=ready_inventory
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                approve_maintenance_restore(
+                    MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                    {"email": "ops@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        self.assertIn("fingerprint", rejected.exception.detail)
+        with database.get_connection() as connection:
+            status = connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id = ?", (plan_id,)
+            ).fetchone()["status"]
+        self.assertEqual(status, "PREPARED")
+
+    def test_sha256_file_streams_large_artifact_in_small_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "recovery.sqlite3"
+            artifact.write_bytes(b"0123456789" * 100)
+            self.assertEqual(sha256_file(artifact, chunk_size=7), sha256_file(artifact))
+            with self.assertRaises(ValueError):
+                sha256_file(artifact, chunk_size=0)
 
     def test_restore_execution_preflight_verifies_source_stage_rollback_and_live_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
