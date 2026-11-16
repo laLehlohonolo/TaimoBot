@@ -108,6 +108,25 @@ def _protected_backup_paths() -> set[Path]:
                 Path(row["backup_file"]).resolve()
                 for row in rows if row["backup_file"]
             )
+            # A verified backup can be produced before a later maintenance
+            # step fails or before its worker is superseded. Keep the newest
+            # referenced recovery file for each non-success terminal outcome
+            # as well as the latest successful run and all active attempts.
+            # Older terminal-outcome files remain eligible after 365 days,
+            # avoiding indefinite retention growth from the audit history.
+            for terminal_status in ("FAILED", "SUPERSEDED"):
+                row = connection.execute(
+                    """
+                    SELECT backup_file
+                    FROM maintenance_run_attempts
+                    WHERE status = ? AND backup_file IS NOT NULL
+                    ORDER BY completed_at DESC, started_at DESC
+                    LIMIT 1
+                    """,
+                    (terminal_status,),
+                ).fetchone()
+                if row and row["backup_file"]:
+                    protected.add(Path(row["backup_file"]).resolve())
     return protected
 
 
