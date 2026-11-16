@@ -9,6 +9,122 @@ from .execution import (
 from .risk import get_risk_profile, MAX_RISK_PERCENT
 
 
+
+def _reconcile_pending_for_closed_source(source, connection):
+    """
+    Finalize interrupted copy records after the source has already closed.
+
+    Source closure and linked-copy closure are atomic. Therefore, a committed
+    follower trade must already be CLOSED before this recovery runs.
+    """
+    pending = connection.execute(
+        """
+        SELECT ce.relationship_id, cr.follower_account_id
+        FROM copy_executions ce
+        JOIN copy_relationships cr
+          ON cr.relationship_id = ce.relationship_id
+        WHERE ce.source_trade_id = ?
+          AND ce.status = 'PENDING'
+        """,
+        (source["trade_id"],)
+    ).fetchall()
+
+    for item in pending:
+        order_id = f"COPY-{item['relationship_id']}-{source['trade_id']}"
+        copied = connection.execute(
+            """
+            SELECT trade_id, account_id, copied_from_trade_id, status
+            FROM trades
+            WHERE client_order_id = ?
+            """,
+            (order_id,)
+        ).fetchone()
+
+        if copied is None:
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET status = 'FAILED',
+                    failure_reason = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE relationship_id = ?
+                  AND source_trade_id = ?
+                  AND status = 'PENDING'
+                """,
+                (
+                    "Source trade closed before the follower copy was committed.",
+                    item["relationship_id"],
+                    source["trade_id"]
+                )
+            )
+            continue
+
+        if (
+            copied["account_id"] != item["follower_account_id"]
+            or copied["copied_from_trade_id"] not in (None, source["trade_id"])
+        ):
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET status = 'FAILED',
+                    failure_reason = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE relationship_id = ?
+                  AND source_trade_id = ?
+                  AND status = 'PENDING'
+                """,
+                (
+                    "Closed-source recovery stopped: follower trade ownership or source link mismatch.",
+                    item["relationship_id"],
+                    source["trade_id"]
+                )
+            )
+            continue
+
+        if copied["status"] != "CLOSED":
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET status = 'FAILED',
+                    failure_reason = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE relationship_id = ?
+                  AND source_trade_id = ?
+                  AND status = 'PENDING'
+                """,
+                (
+                    "Source is closed but the follower position is not; manual reconciliation required.",
+                    item["relationship_id"],
+                    source["trade_id"]
+                )
+            )
+            continue
+
+        connection.execute(
+            """
+            UPDATE trades
+            SET copied_from_trade_id = ?
+            WHERE trade_id = ?
+              AND account_id = ?
+              AND copied_from_trade_id IS NULL
+            """,
+            (source["trade_id"], copied["trade_id"], item["follower_account_id"])
+        )
+        connection.execute(
+            """
+            UPDATE copy_executions
+            SET copied_trade_id = ?,
+                status = 'CLOSED',
+                failure_reason = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE relationship_id = ?
+              AND source_trade_id = ?
+              AND status = 'PENDING'
+            """,
+            (copied["trade_id"], item["relationship_id"], source["trade_id"])
+        )
+
+
 def replicate_open_trade(source_trade_id):
     """
     Attempt one independently risk-checked paper copy for every ACTIVE
@@ -40,6 +156,7 @@ def replicate_open_trade(source_trade_id):
             }
 
         if source["status"] != "OPEN":
+            _reconcile_pending_for_closed_source(dict(source), connection)
             raise ValueError("Only open source trades can be copied.")
 
         relationships = connection.execute(
