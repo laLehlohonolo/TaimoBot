@@ -13,6 +13,7 @@ from app.maintenance import (
     is_maintenance_window,
     inspect_recovery_candidates,
     verify_restore_candidate,
+    verify_restore_execution_readiness,
 )
 from app import database
 from app.database import init_db
@@ -738,6 +739,60 @@ class DailyMaintenanceTests(unittest.TestCase):
                 "SELECT status FROM maintenance_restore_plans WHERE plan_id = ?", (plan_id,)
             ).fetchone()["status"]
         self.assertEqual(status, "PREPARED")
+
+
+    def test_restore_execution_preflight_verifies_source_stage_rollback_and_live_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-restore-plan.sqlite3"
+
+            for target in (source, rollback, staged):
+                with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                    live.backup(copy)
+
+            before_live = database.DB_PATH.read_bytes()
+            result = verify_restore_execution_readiness(
+                source, staged, rollback,
+                backup_dir=backup_dir,
+                live_database_path=database.DB_PATH,
+            )
+
+            self.assertEqual(result["status"], "RESTORE_EXECUTION_PREFLIGHT_PASSED")
+            self.assertTrue(result["source_backup_verified"])
+            self.assertTrue(result["staged_candidate_verified"])
+            self.assertTrue(result["rollback_backup_verified"])
+            self.assertTrue(result["live_database_verified"])
+            self.assertFalse(result["execution_authorized"])
+            self.assertFalse(result["live_database_replaced"])
+            self.assertEqual(database.DB_PATH.read_bytes(), before_live)
+
+    def test_restore_execution_preflight_fails_closed_when_rollback_is_corrupt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-restore-plan.sqlite3"
+
+            for target in (source, staged):
+                with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                    live.backup(copy)
+            rollback.write_bytes(b"corrupt rollback")
+
+            with self.assertRaisesRegex(ValueError, "rollback backup is not restore-ready"):
+                verify_restore_execution_readiness(
+                    source, staged, rollback,
+                    backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+            self.assertTrue(database.DB_PATH.is_file())
 
 
 if __name__ == "__main__":
