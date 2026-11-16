@@ -70,6 +70,8 @@ def _reconcile_pending_for_closed_source(source, connection):
                 UPDATE copy_executions
                 SET status = 'FAILED',
                     failure_reason = ?,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE relationship_id = ?
                   AND source_trade_id = ?
@@ -89,6 +91,8 @@ def _reconcile_pending_for_closed_source(source, connection):
                 UPDATE copy_executions
                 SET status = 'FAILED',
                     failure_reason = ?,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE relationship_id = ?
                   AND source_trade_id = ?
