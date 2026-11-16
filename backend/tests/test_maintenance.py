@@ -69,6 +69,29 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertEqual(value, "preserve-me")
             self.assertEqual(integrity, "ok")
 
+    def test_concurrent_same_second_backups_publish_distinct_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "live.sqlite3"
+            backup_dir = root / "backups"
+            fixed_now = datetime(2026, 11, 15, 23, 15, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            with sqlite3.connect(source) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.execute("INSERT INTO sample VALUES ('preserve-me')")
+
+            first = create_verified_backup(source_path=source, backup_dir=backup_dir, now=fixed_now)
+            second = create_verified_backup(source_path=source, backup_dir=backup_dir, now=fixed_now)
+
+            first_path = Path(first["backup_file"])
+            second_path = Path(second["backup_file"])
+            self.assertNotEqual(first_path, second_path)
+            self.assertTrue(first_path.is_file())
+            self.assertTrue(second_path.is_file())
+            self.assertFalse(list(backup_dir.glob("*.tmp")))
+            for backup_path in (first_path, second_path):
+                with sqlite3.connect(backup_path) as connection:
+                    self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
     def test_restore_verification_uses_staging_and_does_not_replace_live_db(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
