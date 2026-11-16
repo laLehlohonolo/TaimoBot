@@ -70,6 +70,47 @@ def create_verified_backup(
     }
 
 
+def _protected_backup_paths() -> set[Path]:
+    """Return the latest completed recovery point and files held by active attempts.
+
+    A metadata read failure must stop retention rather than risk deleting a
+    backup whose lifecycle cannot be established.
+    """
+    protected: set[Path] = set()
+    with database.get_connection() as connection:
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "maintenance_runs" in tables:
+            row = connection.execute(
+                """
+                SELECT backup_file
+                FROM maintenance_runs
+                WHERE status = 'COMPLETE' AND backup_file IS NOT NULL
+                ORDER BY completed_at DESC, run_date DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row and row["backup_file"]:
+                protected.add(Path(row["backup_file"]).resolve())
+        if "maintenance_run_attempts" in tables:
+            rows = connection.execute(
+                """
+                SELECT backup_file
+                FROM maintenance_run_attempts
+                WHERE status = 'RUNNING' AND backup_file IS NOT NULL
+                """
+            ).fetchall()
+            protected.update(
+                Path(row["backup_file"]).resolve()
+                for row in rows if row["backup_file"]
+            )
+    return protected
+
+
 def cleanup_expired_backups(
     backup_dir: Path | None = None,
     *,
@@ -103,6 +144,19 @@ def cleanup_expired_backups(
     local_now = (now or datetime.now(SAST)).astimezone(SAST)
     cutoff = local_now.timestamp() - retention_days * 24 * 60 * 60
     live_path = Path(live_database_path or database.DB_PATH).resolve()
+    try:
+        protected_paths = _protected_backup_paths()
+    except (sqlite3.Error, OSError, ValueError) as error:
+        return {
+            "status": "BACKUP_RETENTION_BLOCKED",
+            "reason": "Maintenance backup references could not be checked.",
+            "metadata_error": str(error)[:300],
+            "dry_run": dry_run,
+            "retention_days": retention_days,
+            "candidates": [],
+            "deleted": [],
+            "live_database_replaced": False,
+        }
     verified: list[tuple[Path, float]] = []
     invalid: list[str] = []
 
@@ -127,7 +181,9 @@ def cleanup_expired_backups(
 
     candidates = [
         path for path, timestamp in verified
-        if timestamp < cutoff and path != newest_verified
+        if timestamp < cutoff
+        and path != newest_verified
+        and path.resolve() not in protected_paths
     ]
     if not has_recent_recovery_point:
         candidates = []
