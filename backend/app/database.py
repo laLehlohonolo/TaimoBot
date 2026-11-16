@@ -21,7 +21,17 @@ class ClosingConnection(sqlite3.Connection):
 
 
 def get_connection():
-    """Create a database connection with safe defaults."""
+    """Create a database connection unless a process-shared restore lock is active."""
+    lock_path = DB_PATH.with_name(DB_PATH.name + ".restore.lock")
+    try:
+        restore_locked = lock_path.exists() or lock_path.is_symlink()
+    except OSError:
+        restore_locked = True
+    if restore_locked:
+        raise sqlite3.OperationalError(
+            "Database access blocked: a controlled restore has quiesced the application."
+        )
+
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     connection = sqlite3.connect(
