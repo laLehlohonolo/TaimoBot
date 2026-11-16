@@ -372,6 +372,58 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertIn("simulated audit write failure", attempt["error_summary"])
 
 
+    def test_staging_cleanup_failure_does_not_skip_failure_audit(self):
+        day = date(2026, 11, 23)
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+        real_unlink = Path.unlink
+        staging_paths = []
+
+        def fake_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(backup_file) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        def fake_restore(source, staging):
+            staging = Path(staging)
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            staging.write_bytes(b"staging-candidate")
+            staging_paths.append(staging)
+            return {"status": "RESTORE_CANDIDATE_VERIFIED"}
+
+        def fail_staging_unlink(path, *args, **kwargs):
+            if Path(path) in staging_paths:
+                raise PermissionError("staging cleanup denied")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup", side_effect=fake_backup
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate", side_effect=fake_restore
+        ), patch(
+            "app.maintenance_scheduler.cleanup_expired_backups",
+            return_value={"status": "BACKUP_RETENTION_COMPLETE", "deleted": []},
+        ), patch.object(Path, "unlink", new=fail_staging_unlink):
+            result = run_maintenance_for_date(day)
+
+        self.assertEqual(result["status"], "MAINTENANCE_FAILED")
+        self.assertIn("staging cleanup denied", result["error"])
+        with database.get_connection() as connection:
+            run = connection.execute(
+                "SELECT status, error_summary FROM maintenance_runs WHERE run_date = ?",
+                (day.isoformat(),),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT status, error_summary FROM maintenance_run_attempts WHERE run_date = ?",
+                (day.isoformat(),),
+            ).fetchone()
+        self.assertEqual(run["status"], "FAILED")
+        self.assertEqual(attempt["status"], "FAILED")
+        self.assertIn("staging cleanup denied", run["error_summary"])
+        self.assertIn("staging cleanup also failed", attempt["error_summary"])
+        self.assertTrue(staging_paths[0].exists())
+
     def test_admin_retry_endpoint_requires_admin_and_reports_verified_recovery(self):
         day = date(2026, 11, 18)
         with patch(
