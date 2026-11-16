@@ -623,3 +623,79 @@ def verify_restore_execution_readiness(
         "execution_authorized": False,
         "live_database_replaced": False,
     }
+
+
+def verify_approved_restore_plan(
+    plan,
+    artifact_hashes,
+    *,
+    backup_dir: Path | None = None,
+    live_database_path: Path | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Read-only verification that an approved restore plan is still executable."""
+    if plan is None or artifact_hashes is None:
+        raise ValueError("Approved restore plan or artifact fingerprints are missing.")
+    if plan["status"] != "APPROVED":
+        raise ValueError("Restore plan must be APPROVED before execution preflight.")
+    created_at = datetime.fromisoformat(plan["created_at"])
+    if created_at.tzinfo is None:
+        raise ValueError("Restore plan timestamp has no timezone.")
+    current_time = now or datetime.now(SAST)
+    if current_time.tzinfo is None:
+        raise ValueError("Preflight clock must include a timezone.")
+    age_seconds = (current_time.astimezone(SAST) - created_at.astimezone(SAST)).total_seconds()
+    if age_seconds < 0 or age_seconds > 30 * 60:
+        raise ValueError("Approved restore plan has expired; prepare a new plan.")
+    if is_restore_lock_active():
+        raise ValueError("A restore lock is already active; operator investigation is required.")
+
+    managed_backup_dir = Path(backup_dir or BACKUP_DIR).resolve()
+    staging_dir = (managed_backup_dir / "recovery-staging").resolve()
+    selected_backup = Path(plan["backup_file"])
+    staged_candidate = Path(plan["staging_file"])
+    rollback_backup = Path(plan["pre_restore_backup_file"])
+    for artifact, expected_parent, label in (
+        (selected_backup, managed_backup_dir, "source"),
+        (staged_candidate, staging_dir, "staged"),
+        (rollback_backup, managed_backup_dir, "rollback"),
+    ):
+        if artifact.is_symlink() or not artifact.is_file() or artifact.resolve().parent != expected_parent:
+            raise ValueError(f"The {label} restore artifact is missing or outside its managed directory.")
+
+    current_hashes = (
+        sha256_file(selected_backup),
+        sha256_file(staged_candidate),
+        sha256_file(rollback_backup),
+    )
+    expected_hashes = (
+        artifact_hashes["source_sha256"],
+        artifact_hashes["staged_sha256"],
+        artifact_hashes["rollback_sha256"],
+    )
+    if current_hashes != expected_hashes:
+        raise ValueError("Restore artifact fingerprint mismatch; prepare and approve a new plan.")
+
+    readiness = verify_restore_execution_readiness(
+        selected_backup,
+        staged_candidate,
+        rollback_backup,
+        backup_dir=managed_backup_dir,
+        live_database_path=live_database_path,
+    )
+    if readiness.get("status") != "RESTORE_EXECUTION_PREFLIGHT_PASSED":
+        raise ValueError("Restore execution readiness checks did not pass.")
+    return {
+        "status": "APPROVED_RESTORE_PREFLIGHT_PASSED",
+        "plan_id": plan["plan_id"],
+        "plan_approved": True,
+        "plan_unexpired": True,
+        "artifact_fingerprints_match": True,
+        "source_backup_verified": True,
+        "staged_candidate_verified": True,
+        "rollback_backup_verified": True,
+        "live_database_verified": True,
+        "execution_authorized": False,
+        "live_database_replaced": False,
+        "trading_mode": "paper",
+    }
