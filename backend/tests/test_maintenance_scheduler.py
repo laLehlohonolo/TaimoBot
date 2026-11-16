@@ -77,14 +77,20 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         backup_dir = self.root / "backups"
         backup_file = backup_dir / "verified.sqlite3"
 
-        def successful_backup():
+        backup_attempts = 0
+
+        def backup_with_one_transient_failure():
+            nonlocal backup_attempts
+            backup_attempts += 1
+            if backup_attempts == 1:
+                raise RuntimeError("temporary disk issue")
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_file.write_bytes(b"verified-test-backup")
             return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
 
         with patch(
             "app.maintenance_scheduler.create_verified_backup",
-            side_effect=[RuntimeError("temporary disk issue"), successful_backup],
+            side_effect=backup_with_one_transient_failure,
         ), patch(
             "app.maintenance_scheduler.verify_restore_candidate",
             return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
