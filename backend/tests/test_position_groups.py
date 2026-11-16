@@ -434,19 +434,32 @@ class PositionGroupTests(unittest.TestCase):
         source_trade_id = opened.json()["trade_id"]
 
         with database.get_connection() as connection:
+            existing_execution = connection.execute(
+                """
+                SELECT copied_trade_id FROM copy_executions
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source_trade_id)
+            ).fetchone()
+            self.assertIsNotNone(existing_execution)
+            copied_trade_id = existing_execution["copied_trade_id"]
             connection.execute(
                 """
-                INSERT INTO copy_executions (
-                    copy_execution_id, relationship_id, source_trade_id,
-                    status, lease_token, lease_expires_at
-                )
-                VALUES (
-                    'GROUP-PENDING-UNCOMMITTED', ?, ?, 'PENDING',
-                    'stale-group-worker', datetime('now', '+5 minutes')
-                )
+                UPDATE copy_executions
+                SET status = 'PENDING',
+                    copied_trade_id = NULL,
+                    failure_reason = NULL,
+                    lease_token = 'stale-group-worker',
+                    lease_expires_at = datetime('now', '+5 minutes')
+                WHERE relationship_id = ? AND source_trade_id = ?
                 """,
                 (relationship_id, source_trade_id)
             )
+            if copied_trade_id:
+                connection.execute(
+                    "DELETE FROM trades WHERE trade_id = ?",
+                    (copied_trade_id,)
+                )
 
         response = self.client.post(
             f"/groups/{group_id}/close",
