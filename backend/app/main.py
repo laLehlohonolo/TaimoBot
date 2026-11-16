@@ -13,7 +13,7 @@ from .maintenance_scheduler import (
     get_maintenance_status,
     run_maintenance_for_date,
 )
-from .maintenance import is_maintenance_window
+from .maintenance import is_maintenance_window, inspect_recovery_candidates
 from .cors import configure_cors
 from .risk import (
     calculate_position_size,
@@ -257,6 +257,13 @@ def retry_maintenance(request: MaintenanceRetryRequest, user=Depends(current_use
             "live_database_replaced": False,
         }
     return response
+
+
+@app.get("/maintenance/recovery-candidates")
+def maintenance_recovery_candidates(user=Depends(current_user)):
+    """Admin-only, read-only inventory of verified recovery candidates."""
+    require_admin(user)
+    return inspect_recovery_candidates()
 
 
 @app.get("/safety/status")
