@@ -343,6 +343,53 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(execution_status, "FAILED")
 
 
+    def test_paused_relationship_before_atomic_copy_insert_prevents_follower_entry(self):
+        source = self.create_source_trade("SOURCE-PAUSE-RACE")
+        with database.get_connection() as connection:
+            relationship_id = connection.execute(
+                "SELECT relationship_id FROM copy_relationships"
+            ).fetchone()["relationship_id"]
+
+        original_open = copy_trading.open_paper_trade
+
+        def pause_relationship_then_attempt_copy(**kwargs):
+            copy_trading.update_copy_relationship_status(
+                relationship_id, "PAUSED"
+            )
+            return original_open(**kwargs)
+
+        with patch(
+            "app.copy_trading.open_paper_trade",
+            side_effect=pause_relationship_then_attempt_copy
+        ):
+            result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn("relationship must remain active", result["copies"][0]["failure_reason"].lower())
+
+        with database.get_connection() as connection:
+            source_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+            follower_count = connection.execute(
+                """
+                SELECT COUNT(*) AS total FROM trades
+                WHERE account_id = 'FOLLOWER'
+                """
+            ).fetchone()["total"]
+            execution_status = connection.execute(
+                "SELECT status FROM copy_executions WHERE source_trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+
+        self.assertEqual(source_status, "OPEN")
+        self.assertEqual(follower_count, 0)
+        self.assertEqual(execution_status, "FAILED")
+
+
     def test_stale_pending_copy_without_trade_is_retried(self):
         source = self.create_source_trade("SOURCE-RECOVERY-STALE")
         self._create_pending_copy_execution(
