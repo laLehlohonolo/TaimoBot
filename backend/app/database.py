@@ -77,6 +77,43 @@ def migrate_account_ownership(connection):
         )
 
 
+def migrate_participant_milestones(connection):
+    """Backfill joining dates and recover first successful trade dates for legacy users."""
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO participant_milestones (user_id, joined_at)
+        SELECT user_id, created_at
+        FROM users
+        """
+    )
+
+    # Existing participants may already have paper trades from before milestone
+    # tracking existed. Preserve that history instead of leaving first_trade_at
+    # blank. OPEN and CLOSED are the only successfully opened trade states.
+    connection.execute(
+        """
+        UPDATE participant_milestones
+        SET first_trade_at = (
+            SELECT MIN(COALESCE(trades.opened_at, trades.created_at))
+            FROM paper_accounts
+            JOIN trades
+              ON trades.account_id = paper_accounts.account_id
+            WHERE paper_accounts.owner_user_id = participant_milestones.user_id
+              AND trades.status IN ('OPEN', 'CLOSED')
+        )
+        WHERE first_trade_at IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM paper_accounts
+              JOIN trades
+                ON trades.account_id = paper_accounts.account_id
+              WHERE paper_accounts.owner_user_id = participant_milestones.user_id
+                AND trades.status IN ('OPEN', 'CLOSED')
+          )
+        """
+    )
+
+
 def migrate_account_risk_profiles(connection):
     """Add and assign persistent risk profiles to existing accounts."""
 
@@ -362,6 +399,7 @@ def init_db():
 
         migrate_trade_columns(connection)
         migrate_account_ownership(connection)
+        migrate_participant_milestones(connection)
         migrate_account_risk_profiles(connection)
         migrate_copy_execution_leases(connection)
 
