@@ -18,6 +18,7 @@ from app.maintenance import (
     acquire_restore_lock,
     release_restore_lock,
     is_restore_lock_active,
+    verify_approved_restore_plan,
 )
 from app import database
 from app.database import init_db
@@ -958,6 +959,86 @@ class DailyMaintenanceTests(unittest.TestCase):
                     live_database_path=database.DB_PATH,
                 )
             self.assertTrue(database.DB_PATH.is_file())
+
+
+    def test_approved_restore_plan_preflight_rechecks_fingerprints_and_readiness(self):
+        zone = ZoneInfo("Africa/Johannesburg")
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-staged.sqlite3"
+            source.write_bytes(b"source artifact")
+            rollback.write_bytes(b"rollback artifact")
+            staged.write_bytes(b"staged artifact")
+            plan = {
+                "plan_id": "a" * 32,
+                "backup_file": str(source),
+                "staging_file": str(staged),
+                "pre_restore_backup_file": str(rollback),
+                "status": "APPROVED",
+                "created_at": datetime(2026, 11, 16, 12, 0, tzinfo=zone).isoformat(),
+            }
+            fingerprints = {
+                "source_sha256": sha256_file(source),
+                "staged_sha256": sha256_file(staged),
+                "rollback_sha256": sha256_file(rollback),
+            }
+            with patch("app.maintenance.is_restore_lock_active", return_value=False), patch(
+                "app.maintenance.verify_restore_execution_readiness",
+                return_value={"status": "RESTORE_EXECUTION_PREFLIGHT_PASSED"},
+            ) as readiness:
+                result = verify_approved_restore_plan(
+                    plan, fingerprints, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                    now=datetime(2026, 11, 16, 12, 5, tzinfo=zone),
+                )
+            self.assertEqual(result["status"], "APPROVED_RESTORE_PREFLIGHT_PASSED")
+            self.assertTrue(result["plan_approved"])
+            self.assertTrue(result["artifact_fingerprints_match"])
+            self.assertFalse(result["execution_authorized"])
+            self.assertFalse(result["live_database_replaced"])
+            readiness.assert_called_once()
+
+    def test_approved_restore_plan_preflight_blocks_expiry_and_fingerprint_mismatch(self):
+        zone = ZoneInfo("Africa/Johannesburg")
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-staged.sqlite3"
+            source.write_bytes(b"source")
+            rollback.write_bytes(b"rollback")
+            staged.write_bytes(b"staged")
+            plan = {
+                "plan_id": "b" * 32,
+                "backup_file": str(source),
+                "staging_file": str(staged),
+                "pre_restore_backup_file": str(rollback),
+                "status": "APPROVED",
+                "created_at": datetime(2026, 11, 16, 12, 0, tzinfo=zone).isoformat(),
+            }
+            fingerprints = {
+                "source_sha256": sha256_file(source),
+                "staged_sha256": sha256_file(staged),
+                "rollback_sha256": sha256_file(rollback),
+            }
+            with patch("app.maintenance.is_restore_lock_active", return_value=False):
+                with self.assertRaisesRegex(ValueError, "expired"):
+                    verify_approved_restore_plan(
+                        plan, fingerprints, backup_dir=backup_dir,
+                        now=datetime(2026, 11, 16, 12, 31, tzinfo=zone),
+                    )
+                staged.write_bytes(b"tampered staged artifact")
+                with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
+                    verify_approved_restore_plan(
+                        plan, fingerprints, backup_dir=backup_dir,
+                        now=datetime(2026, 11, 16, 12, 5, tzinfo=zone),
+                    )
 
 
 if __name__ == "__main__":
