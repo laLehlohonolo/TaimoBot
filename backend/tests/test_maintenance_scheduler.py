@@ -72,6 +72,51 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(second["status"], "SKIPPED")
         self.assertIn("explicit retry", second["reason"])
         self.assertEqual(backup.call_count, 1)
+    def test_explicit_failed_retry_preserves_attempt_audit_history(self):
+        day = date(2026, 11, 12)
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+
+        def successful_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_file.write_bytes(b"verified-test-backup")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        with patch(
+            "app.maintenance_scheduler.create_verified_backup",
+            side_effect=[RuntimeError("temporary disk issue"), successful_backup],
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+        ):
+            failed = run_maintenance_for_date(day)
+            automatic = run_maintenance_for_date(day)
+            retried = run_maintenance_for_date(day, retry_failed=True)
+
+        self.assertEqual(failed["status"], "MAINTENANCE_FAILED")
+        self.assertEqual(automatic["status"], "SKIPPED")
+        self.assertEqual(retried["status"], "MAINTENANCE_COMPLETE")
+
+        with database.get_connection() as connection:
+            attempts = connection.execute(
+                """
+                SELECT status, error_summary
+                FROM maintenance_run_attempts
+                WHERE run_date = ?
+                ORDER BY started_at, attempt_token
+                """,
+                (day.isoformat(),),
+            ).fetchall()
+            current = connection.execute(
+                "SELECT status FROM maintenance_runs WHERE run_date = ?",
+                (day.isoformat(),),
+            ).fetchone()
+
+        self.assertEqual([row["status"] for row in attempts], ["FAILED", "COMPLETE"])
+        self.assertIn("temporary disk issue", attempts[0]["error_summary"])
+        self.assertIsNone(attempts[1]["error_summary"])
+        self.assertEqual(current["status"], "COMPLETE")
+
     def test_daily_maintenance_runs_once_and_records_completion(self):
         day = date(2026, 11, 15)
         backup_dir = self.root / "backups"
