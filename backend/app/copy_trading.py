@@ -240,6 +240,34 @@ def _copy_for_relationship(relationship, source):
             stored_status = current["status"]
 
             if stored_status == "PENDING":
+                # A different worker may have committed the follower trade but
+                # not yet finalized the execution row. Do not recover/finalize
+                # that trade while its lease is still live: the lease owner is
+                # responsible for the outcome. Recovery is safe only after the
+                # lease expires (or when no lease owner remains).
+                live_foreign_lease = (
+                    current["lease_token"]
+                    and current["lease_token"] != execution_token
+                    and current["lease_expires_at"]
+                    and connection.execute(
+                        """
+                        SELECT 1
+                        WHERE datetime(?) > CURRENT_TIMESTAMP
+                        """,
+                        (current["lease_expires_at"],)
+                    ).fetchone()
+                )
+                if live_foreign_lease:
+                    return {
+                        "relationship_id": relationship_id,
+                        "follower_account_id": follower_id,
+                        "status": "PENDING",
+                        "copied_trade_id": None,
+                        "failure_reason": current["failure_reason"],
+                        "duplicate_prevented": True,
+                        "recovery_deferred": True
+                    }
+
                 existing_trade = connection.execute(
                     """
                     SELECT trade_id, account_id, copied_from_trade_id, status
