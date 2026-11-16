@@ -194,15 +194,17 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertIn("did not complete safely", result["error"])
         with database.get_connection() as connection:
             run = connection.execute(
-                "SELECT status, error_summary FROM maintenance_runs WHERE run_date = ?",
+                "SELECT status, backup_file, error_summary FROM maintenance_runs WHERE run_date = ?",
                 (day.isoformat(),),
             ).fetchone()
             attempt = connection.execute(
-                "SELECT status, error_summary FROM maintenance_run_attempts WHERE run_date = ?",
+                "SELECT status, backup_file, error_summary FROM maintenance_run_attempts WHERE run_date = ?",
                 (day.isoformat(),),
             ).fetchone()
         self.assertEqual(run["status"], "FAILED")
         self.assertEqual(attempt["status"], "FAILED")
+        self.assertEqual(run["backup_file"], str(backup_file))
+        self.assertEqual(attempt["backup_file"], str(backup_file))
         self.assertIn("BACKUP_RETENTION_BLOCKED", run["error_summary"])
         self.assertIn("BACKUP_RETENTION_BLOCKED", attempt["error_summary"])
 
@@ -360,15 +362,16 @@ class MaintenanceSchedulerTests(unittest.TestCase):
             ).fetchone()
             attempt = connection.execute(
                 """
-                SELECT status, error_summary
+                SELECT status, backup_file, error_summary
                 FROM maintenance_run_attempts WHERE run_date = ?
                 """,
                 (day.isoformat(),),
             ).fetchone()
 
         self.assertEqual(run["status"], "FAILED")
-        self.assertIsNone(run["backup_file"])
+        self.assertEqual(run["backup_file"], str(backup_file))
         self.assertEqual(attempt["status"], "FAILED")
+        self.assertEqual(attempt["backup_file"], str(backup_file))
         self.assertIn("simulated audit write failure", attempt["error_summary"])
 
 
