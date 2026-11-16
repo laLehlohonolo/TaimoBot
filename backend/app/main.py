@@ -192,6 +192,32 @@ def health_check():
 def retry_maintenance(request: MaintenanceRetryRequest, user=Depends(current_user)):
     """Admin-only, explicit recovery for a failed or stale maintenance run."""
     require_admin(user)
+
+    # A recovery request must match an existing persisted run. Without this
+    # check, retry_failed=True could create a brand-new run for an arbitrary
+    # date instead of recovering a failed attempt.
+    with get_connection() as connection:
+        run = connection.execute(
+            "SELECT status FROM maintenance_runs WHERE run_date = ?",
+            (request.run_date.isoformat(),),
+        ).fetchone()
+
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No maintenance run exists for the requested date.",
+        )
+
+    expected_status = "FAILED" if request.retry_mode == "FAILED" else "RUNNING"
+    if run["status"] != expected_status:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Retry mode {request.retry_mode} requires an existing "
+                f"{expected_status} maintenance run; found {run['status']}."
+            ),
+        )
+
     result = run_maintenance_for_date(
         request.run_date,
         retry_failed=request.retry_mode == "FAILED",
