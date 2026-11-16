@@ -75,6 +75,30 @@ class PaperTradingTests(unittest.TestCase):
             symbol=symbol
         )
 
+    def test_first_successful_paper_trade_records_first_trade_milestone_once(self):
+        with database.get_connection() as connection:
+            before = connection.execute(
+                "SELECT first_trade_at FROM participant_milestones WHERE user_id = ?",
+                (self.user_id,)
+            ).fetchone()["first_trade_at"]
+        self.assertIsNone(before)
+
+        self.open_trade("MILESTONE-FIRST-TRADE")
+        with database.get_connection() as connection:
+            first = connection.execute(
+                "SELECT first_trade_at FROM participant_milestones WHERE user_id = ?",
+                (self.user_id,)
+            ).fetchone()["first_trade_at"]
+        self.assertIsNotNone(first)
+
+        self.open_trade("MILESTONE-SECOND-TRADE")
+        with database.get_connection() as connection:
+            second = connection.execute(
+                "SELECT first_trade_at FROM participant_milestones WHERE user_id = ?",
+                (self.user_id,)
+            ).fetchone()["first_trade_at"]
+        self.assertEqual(first, second)
+
     def test_one_percent_risk_calculation(self):
         result = calculate_position_size(
             account_balance=10000,
