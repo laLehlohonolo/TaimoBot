@@ -1021,5 +1021,115 @@ class PaperTradingTests(unittest.TestCase):
         self.assertLess(preview["net_pnl"], 0)
         self.assertFalse(preview["should_take_profit"])
 
+
+    def test_group_profit_preview_aggregates_positions_and_group_costs_once(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        first = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="GROUP-PREVIEW-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+        second = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="GROUP-PREVIEW-002",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+
+        response = self.client.post(
+            f"/groups/{group_id}/profit-preview",
+            json={
+                "current_price": 4001,
+                "spread_cost": 0.2,
+                "commission_cost": 0.1,
+                "swap_cost": 0.1,
+                "other_costs": 0.1,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()
+        expected_gross = first["quantity"] + second["quantity"]
+        self.assertEqual(preview["group_id"], group_id)
+        self.assertEqual(
+            set(preview["trade_ids"]),
+            {first["trade_id"], second["trade_id"]},
+        )
+        self.assertEqual(preview["position_count"], 2)
+        self.assertAlmostEqual(preview["gross_pnl"], expected_gross)
+        self.assertAlmostEqual(preview["total_costs"], 0.5)
+        self.assertAlmostEqual(preview["net_pnl"], expected_gross - 0.5)
+        self.assertTrue(preview["read_only"])
+        self.assertFalse(preview["execution_triggered"])
+        self.assertEqual(
+            preview["cost_allocation"],
+            "proportional_to_position_quantity",
+        )
+
+        with database.get_connection() as connection:
+            states = connection.execute(
+                """
+                SELECT status, realized_pnl
+                FROM trades
+                WHERE position_group_id = ?
+                """,
+                (group_id,),
+            ).fetchall()
+            balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()["balance"]
+
+        self.assertEqual([row["status"] for row in states], ["OPEN", "OPEN"])
+        self.assertEqual(sum(row["realized_pnl"] for row in states), 0)
+        self.assertEqual(balance, 10000)
+
+    def test_group_profit_preview_rejects_group_without_open_positions(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        group_id = group_response.json()["group_id"]
+
+        response = self.client.post(
+            f"/groups/{group_id}/profit-preview",
+            json={"current_price": 4001},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("open positions", response.json()["detail"])
+
+    def test_group_profit_preview_requires_authentication(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        group_id = group_response.json()["group_id"]
+        unauthenticated = TestClient(app)
+
+        try:
+            response = unauthenticated.post(
+                f"/groups/{group_id}/profit-preview",
+                json={"current_price": 4001},
+            )
+        finally:
+            unauthenticated.close()
+
+        self.assertEqual(response.status_code, 401)
+
 if __name__ == "__main__":
     unittest.main()
