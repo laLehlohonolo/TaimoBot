@@ -140,6 +140,35 @@ class CopyTradeReplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replicate_open_trade(source["trade_id"])
 
+    def test_unavailable_follower_account_records_failure_without_affecting_source(self):
+        source = self.create_source_trade("SOURCE-MISSING-FOLLOWER")
+        # Simulate a legacy/orphaned relationship whose paper account is no
+        # longer available. Production foreign-key enforcement stays enabled.
+        with database.get_connection() as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute(
+                "DELETE FROM paper_accounts WHERE account_id = 'FOLLOWER'"
+            )
+
+        result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn("account not found", result["copies"][0]["failure_reason"].lower())
+
+        with database.get_connection() as connection:
+            source_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+            execution_status = connection.execute(
+                "SELECT status FROM copy_executions WHERE source_trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+
+        self.assertEqual(source_status, "OPEN")
+        self.assertEqual(execution_status, "FAILED")
+
     def test_follower_risk_rejection_is_recorded_without_affecting_source(self):
         # Consume the follower's full combined risk budget first.
         for number, symbol in enumerate(("EURUSD", "GBPUSD"), start=1):
@@ -302,6 +331,58 @@ class CopyTradeReplicationTests(unittest.TestCase):
             ).fetchone()["total"]
 
         self.assertEqual(count, 0)
+
+    def test_paused_or_stopped_relationship_finalizes_pending_without_opening_copy(self):
+        for index, status in enumerate(("PAUSED", "STOPPED"), start=1):
+            source = self.create_source_trade(f"SOURCE-INACTIVE-PENDING-{index}")
+            relationship_id = self._create_pending_copy_execution(source["trade_id"])
+            with database.get_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE copy_relationships
+                    SET status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE relationship_id = ?
+                    """,
+                    (status, relationship_id)
+                )
+
+            result = replicate_open_trade(source["trade_id"])
+            self.assertEqual(result["eligible_followers"], 1)
+            self.assertEqual(result["failed_copies"], 1)
+            self.assertEqual(result["copies"][0]["status"], "FAILED")
+            self.assertIn(status.lower(), result["copies"][0]["failure_reason"].lower())
+
+            with database.get_connection() as connection:
+                execution = connection.execute(
+                    """
+                    SELECT status FROM copy_executions
+                    WHERE relationship_id = ? AND source_trade_id = ?
+                    """,
+                    (relationship_id, source["trade_id"])
+                ).fetchone()
+                follower_count = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total FROM trades
+                    WHERE account_id = 'FOLLOWER'
+                      AND client_order_id = ?
+                    """,
+                    (f"COPY-{relationship_id}-{source['trade_id']}",)
+                ).fetchone()["total"]
+
+            self.assertEqual(execution["status"], "FAILED")
+            self.assertEqual(follower_count, 0)
+
+            # Re-enable only to set up the next independent test case.
+            if status == "PAUSED":
+                with database.get_connection() as connection:
+                    connection.execute(
+                        """
+                        UPDATE copy_relationships
+                        SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                        WHERE relationship_id = ?
+                        """,
+                        (relationship_id,)
+                    )
 
     def test_restart_reconciles_pending_copy_after_source_and_follower_closed(self):
         source = self.create_source_trade("SOURCE-CLOSED-PENDING-RECOVERY")
