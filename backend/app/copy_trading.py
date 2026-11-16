@@ -157,6 +157,9 @@ def replicate_open_trade(source_trade_id):
 
         if source["status"] != "OPEN":
             _reconcile_pending_for_closed_source(dict(source), connection)
+            # Persist recovery before raising: the connection context rolls
+            # back on exceptions, even when recovery itself succeeded.
+            connection.commit()
             raise ValueError("Only open source trades can be copied.")
 
         relationships = connection.execute(
