@@ -343,5 +343,43 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertIn("newer maintenance claim", attempt["error_summary"])
 
 
+    def test_each_retry_uses_an_isolated_restore_staging_file(self):
+        day = date(2026, 11, 20)
+        staging_paths = []
+        verification_attempts = 0
+
+        def verify_to_distinct_staging_files(backup_path, staging_path):
+            nonlocal verification_attempts
+            verification_attempts += 1
+            staging_paths.append(Path(staging_path))
+            if verification_attempts == 1:
+                raise RuntimeError("simulated restore verification failure")
+            return {"status": "RESTORE_CANDIDATE_VERIFIED"}
+
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+
+        def fake_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_file.write_bytes(b"verified-test-backup")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup", side_effect=fake_backup
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            side_effect=verify_to_distinct_staging_files,
+        ):
+            failed = run_maintenance_for_date(day)
+            retried = run_maintenance_for_date(day, retry_failed=True)
+
+        self.assertEqual(failed["status"], "MAINTENANCE_FAILED")
+        self.assertEqual(retried["status"], "MAINTENANCE_COMPLETE")
+        self.assertEqual(len(staging_paths), 2)
+        self.assertNotEqual(staging_paths[0], staging_paths[1])
+        self.assertTrue(all(path.parent == backup_dir / "recovery-staging" for path in staging_paths))
+        self.assertTrue(all(not path.exists() for path in staging_paths))
+
+
 if __name__ == "__main__":
     unittest.main()
