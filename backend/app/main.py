@@ -48,6 +48,7 @@ from .auth_routes import (
     require_admin,
 )
 from .strategy_knowledge import list_strategies, create_strategy, get_strategy
+from .profit_taking import evaluate_position_profit
 from .safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
@@ -132,6 +133,15 @@ class CloseTradeRequest(BaseModel):
 
 class CloseGroupRequest(BaseModel):
     exit_price: float = Field(gt=0)
+
+
+class ProfitPreviewRequest(BaseModel):
+    current_price: float = Field(gt=0)
+    spread_cost: float = Field(default=0, ge=0)
+    commission_cost: float = Field(default=0, ge=0)
+    swap_cost: float = Field(default=0, ge=0)
+    other_costs: float = Field(default=0, ge=0)
+    minimum_net_profit: float = Field(default=0, ge=0)
 
 
 class CopyRelationshipRequest(BaseModel):
@@ -433,6 +443,59 @@ def create_trade(request: TradeRequest, user=Depends(current_user)):
             status_code=400,
             detail=str(error)
         )
+
+
+@app.post("/trades/{trade_id}/profit-preview")
+def trade_profit_preview(
+    trade_id: str,
+    request: ProfitPreviewRequest,
+    user=Depends(current_user)
+):
+    """Return a read-only net profit estimate for an owned open paper trade."""
+    require_trade_access(trade_id, user)
+    with get_connection() as connection:
+        trade = connection.execute(
+            """
+            SELECT trade_id, account_id, symbol, side, quantity, entry_price, status
+            FROM trades
+            WHERE trade_id = ?
+            """,
+            (trade_id,)
+        ).fetchone()
+
+    if trade is None:
+        raise HTTPException(status_code=404, detail="Trade not found.")
+    if trade["status"] != "OPEN":
+        raise HTTPException(
+            status_code=409,
+            detail="Profit preview is available only for open trades."
+        )
+
+    try:
+        result = evaluate_position_profit(
+            {
+                "side": trade["side"],
+                "entry_price": trade["entry_price"],
+                "quantity": trade["quantity"],
+            },
+            request.current_price,
+            spread_cost=request.spread_cost,
+            commission_cost=request.commission_cost,
+            swap_cost=request.swap_cost,
+            other_costs=request.other_costs,
+            minimum_net_profit=request.minimum_net_profit,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    return {
+        "trade_id": trade["trade_id"],
+        "account_id": trade["account_id"],
+        "symbol": trade["symbol"],
+        **result,
+        "read_only": True,
+        "execution_triggered": False,
+    }
 
 
 @app.post("/trades/{trade_id}/close")
