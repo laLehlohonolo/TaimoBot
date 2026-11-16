@@ -551,6 +551,33 @@ def release_restore_lock(lock_token: str) -> dict:
     return {"status": "RESTORE_LOCK_RELEASED", "database_quiescent": False}
 
 
+def inspect_sqlite_sidecars(database_path: Path) -> dict:
+    """Read-only inventory of SQLite WAL/SHM files beside a database.
+
+    Any present sidecar requires explicit handling after the restore lock has
+    quiesced the application. This helper never deletes, truncates, or opens
+    sidecars as databases.
+    """
+    base = Path(database_path)
+    found = []
+    for suffix, kind in (("-wal", "WAL"), ("-shm", "SHM")):
+        sidecar = Path(str(base) + suffix)
+        try:
+            metadata = sidecar.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ValueError(f"SQLite {kind} sidecar cannot be inspected safely.") from error
+        if sidecar.is_symlink() or not sidecar.is_file():
+            raise ValueError(f"SQLite {kind} sidecar is not a regular managed file.")
+        found.append({"name": sidecar.name, "kind": kind, "size_bytes": metadata.st_size})
+    return {
+        "status": "SIDECARS_CLEAR" if not found else "SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING",
+        "sidecars": found,
+        "mutation_performed": False,
+    }
+
+
 def verify_restore_execution_readiness(
     source_backup: Path,
     staged_candidate: Path,
@@ -606,6 +633,8 @@ def verify_restore_execution_readiness(
     if not staged_records.get(Path(staged_candidate).name, {}).get("restore_ready"):
         raise ValueError("The staged restore candidate is not restore-ready.")
 
+    sidecar_inventory = inspect_sqlite_sidecars(live_path)
+
     try:
         with sqlite3.connect(f"file:{live_path}?mode=ro", uri=True, timeout=10) as live:
             live_integrity = live.execute("PRAGMA integrity_check").fetchone()
@@ -620,6 +649,8 @@ def verify_restore_execution_readiness(
         "staged_candidate_verified": True,
         "rollback_backup_verified": True,
         "live_database_verified": True,
+        "sqlite_sidecars": sidecar_inventory,
+        "sidecar_handling_required_after_lock": sidecar_inventory["status"] != "SIDECARS_CLEAR",
         "execution_authorized": False,
         "live_database_replaced": False,
     }
