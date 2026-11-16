@@ -211,6 +211,7 @@ def cleanup_expired_backups(
         candidates = []
 
     deleted: list[str] = []
+    deletion_failures: list[str] = []
     if not dry_run:
         original_identities = {path: identity for path, _, identity in verified}
         for candidate in candidates:
@@ -245,9 +246,17 @@ def cleanup_expired_backups(
                 deleted.append(candidate.name)
             except (sqlite3.Error, OSError, ValueError):
                 invalid.append(candidate.name)
+                deletion_failures.append(candidate.name)
 
     return {
-        "status": "BACKUP_RETENTION_DRY_RUN" if dry_run else "BACKUP_RETENTION_COMPLETE",
+        "status": (
+            "BACKUP_RETENTION_DRY_RUN"
+            if dry_run
+            else "BACKUP_RETENTION_BLOCKED"
+            if deletion_failures
+            else "BACKUP_RETENTION_COMPLETE"
+        ),
+        "deletion_failures": deletion_failures,
         "dry_run": dry_run,
         "retention_days": retention_days,
         "cutoff": datetime.fromtimestamp(cutoff, SAST).isoformat(),
