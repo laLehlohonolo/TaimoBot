@@ -18,7 +18,7 @@ from .maintenance_scheduler import (
 )
 from .maintenance import (
     BACKUP_DIR, SAST, create_verified_backup, is_maintenance_window,
-    inspect_recovery_candidates, verify_restore_candidate,
+    inspect_recovery_candidates, verify_restore_candidate, sha256_file,
 )
 from .cors import configure_cors
 from .risk import (
@@ -313,9 +313,15 @@ def prepare_maintenance_restore(request: MaintenanceRestorePrepareRequest, user=
         staged_record = next((item for item in staged_inventory.get("candidates", []) if item.get("file_name") == staging_path.name), None)
         if staged_inventory.get("status") != "RECOVERY_INVENTORY_COMPLETE" or staged_record is None or not staged_record.get("restore_ready"):
             raise RuntimeError("Staged restore failed schema or foreign-key verification.")
+        selected_backup_hash = sha256_file(selected_backup)
+        staged_candidate_hash = sha256_file(staging_path)
+        rollback_backup_path = Path(pre_restore_backup["backup_file"]).resolve()
+        rollback_backup_hash = sha256_file(rollback_backup_path)
         with get_connection() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS maintenance_restore_plans (plan_id TEXT PRIMARY KEY, backup_file TEXT NOT NULL, staging_file TEXT NOT NULL, pre_restore_backup_file TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('PREPARED','APPROVED','APPLIED','FAILED','EXPIRED')), created_at TEXT NOT NULL, created_by TEXT NOT NULL)")
-            connection.execute("INSERT INTO maintenance_restore_plans (plan_id, backup_file, staging_file, pre_restore_backup_file, status, created_at, created_by) VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)", (plan_id, str(selected_backup.resolve()), str(staging_path.resolve()), str(Path(pre_restore_backup['backup_file']).resolve()), datetime.now(SAST).isoformat(), str(user.get('email', ''))))
+            connection.execute("CREATE TABLE IF NOT EXISTS maintenance_restore_artifacts (plan_id TEXT PRIMARY KEY REFERENCES maintenance_restore_plans(plan_id) ON DELETE CASCADE, source_sha256 TEXT NOT NULL, staged_sha256 TEXT NOT NULL, rollback_sha256 TEXT NOT NULL)")
+            connection.execute("INSERT INTO maintenance_restore_plans (plan_id, backup_file, staging_file, pre_restore_backup_file, status, created_at, created_by) VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)", (plan_id, str(selected_backup.resolve()), str(staging_path.resolve()), str(rollback_backup_path), datetime.now(SAST).isoformat(), str(user.get('email', ''))))
+            connection.execute("INSERT INTO maintenance_restore_artifacts (plan_id, source_sha256, staged_sha256, rollback_sha256) VALUES (?, ?, ?, ?)", (plan_id, selected_backup_hash, staged_candidate_hash, rollback_backup_hash))
     except Exception as error:
         try:
             staging_path.unlink(missing_ok=True)
@@ -342,11 +348,22 @@ def approve_maintenance_restore(request: MaintenanceRestoreApproveRequest, user=
             """,
             (request.plan_id,),
         ).fetchone()
+        artifact_hashes = connection.execute(
+            """
+            SELECT source_sha256, staged_sha256, rollback_sha256
+            FROM maintenance_restore_artifacts WHERE plan_id = ?
+            """,
+            (request.plan_id,),
+        ).fetchone() if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='maintenance_restore_artifacts'"
+        ).fetchone() else None
 
     if plan is None:
         raise HTTPException(status_code=404, detail="Restore plan not found.")
     if plan["status"] != "PREPARED":
         raise HTTPException(status_code=409, detail="Only a PREPARED restore plan can be approved.")
+    if artifact_hashes is None:
+        raise HTTPException(status_code=409, detail="Restore plan has no immutable artifact fingerprints; prepare it again.")
 
     try:
         created_at = datetime.fromisoformat(plan["created_at"])
@@ -383,6 +400,19 @@ def approve_maintenance_restore(request: MaintenanceRestoreApproveRequest, user=
             raise ValueError("Pre-restore rollback backup no longer passes recovery checks.")
         if not staged_records.get(staging_file.name, {}).get("restore_ready"):
             raise ValueError("Staged restore candidate no longer passes recovery checks.")
+
+        current_hashes = (
+            sha256_file(selected_backup),
+            sha256_file(staging_file),
+            sha256_file(pre_restore_backup),
+        )
+        expected_hashes = (
+            artifact_hashes["source_sha256"],
+            artifact_hashes["staged_sha256"],
+            artifact_hashes["rollback_sha256"],
+        )
+        if current_hashes != expected_hashes:
+            raise ValueError("A recovery artifact changed after preparation; create a new restore plan.")
 
         with get_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
