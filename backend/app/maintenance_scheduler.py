@@ -240,9 +240,21 @@ def run_maintenance_for_date(
             "live_database_replaced": False,
         }
     except Exception as error:
-        staging_path.unlink(missing_ok=True)
+        # A staging-file cleanup failure must not prevent the maintenance
+        # failure and audit records from being committed. Preserve both errors
+        # so operators can identify the leftover recovery artifact.
+        try:
+            staging_path.unlink(missing_ok=True)
+            cleanup_error = None
+        except OSError as staging_cleanup_error:
+            cleanup_error = str(staging_cleanup_error)[:200]
         completed_at = datetime.now(SAST).isoformat()
-        error_summary = str(error)[:500]
+        error_summary = str(error)[:250]
+        if cleanup_error:
+            error_summary = (
+                f"{error_summary}; staging cleanup also failed: {cleanup_error}"
+            )
+        error_summary = error_summary[:500]
         with database.get_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             updated = connection.execute(
