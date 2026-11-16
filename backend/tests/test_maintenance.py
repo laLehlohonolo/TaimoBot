@@ -243,6 +243,43 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertTrue(old_backup.exists())
             self.assertTrue(recent_backup.exists())
 
+    def test_backup_retention_never_deletes_live_database_or_corrupt_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            live_db = root / "taimobot-20241101-230000-live.sqlite3"
+            corrupt_backup = root / "taimobot-20241102-230000-corrupt.sqlite3"
+            expired_backup = root / "taimobot-20241103-230000-expired.sqlite3"
+            recent_backup = root / "taimobot-20261116-110000-recent.sqlite3"
+
+            with sqlite3.connect(live_db) as connection:
+                connection.execute("CREATE TABLE live_marker (value TEXT)")
+                connection.execute("INSERT INTO live_marker VALUES ('must-survive')")
+            corrupt_backup.write_bytes(b"not a sqlite database")
+            for backup_path in (expired_backup, recent_backup):
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            os.utime(live_db, (old_time, old_time))
+            os.utime(corrupt_backup, (old_time, old_time))
+            os.utime(expired_backup, (old_time, old_time))
+
+            result = cleanup_expired_backups(
+                backup_dir=root, now=now, dry_run=False,
+                live_database_path=live_db,
+            )
+
+            self.assertEqual(result["deleted"], [expired_backup.name])
+            self.assertTrue(live_db.exists())
+            self.assertTrue(corrupt_backup.exists())
+            self.assertIn(corrupt_backup.name, result["invalid_or_unreadable"])
+            with sqlite3.connect(live_db) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM live_marker").fetchone()[0],
+                    "must-survive",
+                )
+
     def test_backup_retention_rejects_less_than_one_year(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "at least 365 days"):
