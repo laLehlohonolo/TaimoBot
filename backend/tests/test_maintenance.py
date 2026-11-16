@@ -632,6 +632,113 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(rejected.exception.status_code, 400)
 
 
+    def test_restore_approval_revalidates_artifacts_and_only_changes_plan_status(self):
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+
+        backup_dir = Path(self.temp_dir.name) / "backups"
+        staging_dir = backup_dir / "recovery-staging"
+        staging_dir.mkdir(parents=True)
+        source = backup_dir / "taimobot-source.sqlite3"
+        rollback = backup_dir / "taimobot-rollback.sqlite3"
+        staged = staging_dir / "taimobot-restore-plan.sqlite3"
+        for artifact in (source, rollback, staged):
+            artifact.write_bytes(b"verified-fixture")
+        plan_id = "a" * 32
+        with database.get_connection() as connection:
+            connection.execute(
+                """CREATE TABLE maintenance_restore_plans (
+                    plan_id TEXT PRIMARY KEY, backup_file TEXT NOT NULL,
+                    staging_file TEXT NOT NULL, pre_restore_backup_file TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO maintenance_restore_plans
+                VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)""",
+                (plan_id, str(source), str(staged), str(rollback),
+                 datetime.now(ZoneInfo("Africa/Johannesburg")).isoformat(), "ops@example.com"),
+            )
+
+        def ready_inventory(directory=None):
+            names = (
+                [source.name, rollback.name] if Path(directory) == backup_dir
+                else [staged.name]
+            )
+            return {
+                "status": "RECOVERY_INVENTORY_COMPLETE",
+                "candidates": [{"file_name": name, "restore_ready": True} for name in names],
+            }
+
+        with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+            "app.main.inspect_recovery_candidates", side_effect=ready_inventory
+        ):
+            result = approve_maintenance_restore(
+                MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                {"email": "ops@example.com"},
+            )
+
+        self.assertEqual(result["status"], "RESTORE_APPROVED")
+        self.assertFalse(result["restore_application_authorized"])
+        self.assertFalse(result["live_database_replaced"])
+        with database.get_connection() as connection:
+            status = connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id = ?", (plan_id,)
+            ).fetchone()["status"]
+        self.assertEqual(status, "APPROVED")
+
+    def test_restore_approval_blocks_unverified_staging_and_leaves_plan_prepared(self):
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+        from fastapi import HTTPException
+
+        backup_dir = Path(self.temp_dir.name) / "backups"
+        staging_dir = backup_dir / "recovery-staging"
+        staging_dir.mkdir(parents=True)
+        source = backup_dir / "taimobot-source.sqlite3"
+        rollback = backup_dir / "taimobot-rollback.sqlite3"
+        staged = staging_dir / "taimobot-restore-plan.sqlite3"
+        for artifact in (source, rollback, staged):
+            artifact.write_bytes(b"fixture")
+        plan_id = "b" * 32
+        with database.get_connection() as connection:
+            connection.execute(
+                """CREATE TABLE maintenance_restore_plans (
+                    plan_id TEXT PRIMARY KEY, backup_file TEXT NOT NULL,
+                    staging_file TEXT NOT NULL, pre_restore_backup_file TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO maintenance_restore_plans
+                VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)""",
+                (plan_id, str(source), str(staged), str(rollback),
+                 datetime.now(ZoneInfo("Africa/Johannesburg")).isoformat(), "ops@example.com"),
+            )
+
+        def inventory(directory=None):
+            names = [source.name, rollback.name] if Path(directory) == backup_dir else [staged.name]
+            return {
+                "status": "RECOVERY_INVENTORY_COMPLETE",
+                "candidates": [
+                    {"file_name": name, "restore_ready": name != staged.name}
+                    for name in names
+                ],
+            }
+
+        with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+            "app.main.inspect_recovery_candidates", side_effect=inventory
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                approve_maintenance_restore(
+                    MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                    {"email": "ops@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        with database.get_connection() as connection:
+            status = connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id = ?", (plan_id,)
+            ).fetchone()["status"]
+        self.assertEqual(status, "PREPARED")
+
 
 if __name__ == "__main__":
     unittest.main()
