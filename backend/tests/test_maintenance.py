@@ -19,6 +19,7 @@ from app.maintenance import (
     release_restore_lock,
     is_restore_lock_active,
     verify_approved_restore_plan,
+    inspect_sqlite_sidecars,
 )
 from app import database
 from app.database import init_db
@@ -1039,6 +1040,65 @@ class DailyMaintenanceTests(unittest.TestCase):
                         plan, fingerprints, backup_dir=backup_dir,
                         now=datetime(2026, 11, 16, 12, 5, tzinfo=zone),
                     )
+
+
+    def test_sqlite_sidecar_inventory_reports_wal_and_shm_without_mutating(self):
+        with tempfile.TemporaryDirectory() as directory:
+            live = Path(directory) / "live.sqlite3"
+            live.write_bytes(b"live-db")
+            clear = inspect_sqlite_sidecars(live)
+            self.assertEqual(clear["status"], "SIDECARS_CLEAR")
+            wal = Path(str(live) + "-wal")
+            shm = Path(str(live) + "-shm")
+            wal.write_bytes(b"wal-pending-data")
+            shm.write_bytes(b"shared-memory")
+            before = (wal.read_bytes(), shm.read_bytes())
+            result = inspect_sqlite_sidecars(live)
+            self.assertEqual(result["status"], "SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING")
+            self.assertEqual({item["kind"] for item in result["sidecars"]}, {"WAL", "SHM"})
+            self.assertFalse(result["mutation_performed"])
+            self.assertEqual((wal.read_bytes(), shm.read_bytes()), before)
+
+    def test_sqlite_sidecar_inventory_fails_closed_for_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            live = Path(directory) / "live.sqlite3"
+            live.write_bytes(b"live-db")
+            target = Path(directory) / "outside"
+            target.write_bytes(b"outside-data")
+            wal = Path(str(live) + "-wal")
+            wal.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "not a regular managed file"):
+                inspect_sqlite_sidecars(live)
+            self.assertEqual(target.read_bytes(), b"outside-data")
+
+    def test_restore_execution_preflight_reports_sidecars_for_locked_handling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-restore-plan.sqlite3"
+            for target in (source, rollback, staged):
+                with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                    live.backup(copy)
+            wal = Path(str(database.DB_PATH) + "-wal")
+            wal.write_bytes(b"pending")
+            try:
+                result = verify_restore_execution_readiness(
+                    source, staged, rollback,
+                    backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+                self.assertTrue(result["sidecar_handling_required_after_lock"])
+                self.assertEqual(
+                    result["sqlite_sidecars"]["status"],
+                    "SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING",
+                )
+                self.assertTrue(wal.exists())
+            finally:
+                wal.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
