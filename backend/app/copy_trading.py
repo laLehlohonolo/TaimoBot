@@ -571,6 +571,67 @@ def _copy_for_relationship(relationship, source):
         }
 
 
+def _reconcile_pending_copy_executions_for_closed_source(connection, source_trade_id):
+    """Resolve pending copy records once their source can no longer be copied."""
+    pending = connection.execute(
+        """
+        SELECT relationship_id, source_trade_id
+        FROM copy_executions
+        WHERE source_trade_id = ?
+          AND status = 'PENDING'
+        """,
+        (source_trade_id,)
+    ).fetchall()
+
+    for execution in pending:
+        follower = connection.execute(
+            """
+            SELECT trade_id, status
+            FROM trades
+            WHERE copied_from_trade_id = ?
+              AND account_id = (
+                  SELECT follower_account_id
+                  FROM copy_relationships
+                  WHERE relationship_id = ?
+              )
+            ORDER BY opened_at DESC, trade_id
+            LIMIT 1
+            """,
+            (source_trade_id, execution["relationship_id"])
+        ).fetchone()
+
+        if follower is not None and follower["status"] == "CLOSED":
+            status = "CLOSED"
+            reason = None
+            copied_trade_id = follower["trade_id"]
+        else:
+            status = "FAILED"
+            reason = "Source trade closed before the follower copy was committed."
+            copied_trade_id = follower["trade_id"] if follower else None
+
+        connection.execute(
+            """
+            UPDATE copy_executions
+            SET status = ?,
+                copied_trade_id = COALESCE(copied_trade_id, ?),
+                failure_reason = ?,
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE relationship_id = ?
+              AND source_trade_id = ?
+              AND status = 'PENDING'
+            """,
+            (
+                status,
+                copied_trade_id,
+                reason,
+                execution["relationship_id"],
+                source_trade_id
+            )
+        )
+
+
 def close_trade_with_copies(trade_id, exit_price):
     """
     Close an original source trade and every open direct copy atomically.
@@ -692,11 +753,18 @@ def close_trade_with_copies(trade_id, exit_price):
             connection.execute(
                 """
                 UPDATE copy_executions
-                SET status = 'CLOSED', updated_at = CURRENT_TIMESTAMP
+                SET status = 'CLOSED',
+                    failure_reason = NULL,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE source_trade_id = ?
                   AND status = 'COPIED'
                 """,
                 (trade_id,)
+            )
+            _reconcile_pending_copy_executions_for_closed_source(
+                connection, trade_id
             )
 
         group_ids = {
@@ -883,11 +951,17 @@ def close_position_group_with_copies(group_id, exit_price):
                 """
                 UPDATE copy_executions
                 SET status = 'CLOSED',
+                    failure_reason = NULL,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE source_trade_id = ?
                   AND status = 'COPIED'
                 """,
                 (source_id,)
+            )
+            _reconcile_pending_copy_executions_for_closed_source(
+                connection, source_id
             )
 
         connection.execute(
