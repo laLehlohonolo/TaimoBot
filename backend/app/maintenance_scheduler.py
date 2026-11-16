@@ -15,6 +15,7 @@ from . import database
 from .maintenance import (
     BACKUP_DIR,
     SAST,
+    cleanup_expired_backups,
     create_verified_backup,
     is_maintenance_window,
     verify_restore_candidate,
@@ -169,6 +170,14 @@ def run_maintenance_for_date(
         )
         staging_path.unlink(missing_ok=True)
 
+        # Retention cleanup runs only after a fresh backup and isolated restore
+        # candidate have both passed verification. One year is the hard minimum.
+        retention_result = cleanup_expired_backups(
+            backup_dir=BACKUP_DIR,
+            retention_days=365,
+            dry_run=False,
+        )
+
         completed_at = datetime.now(SAST).isoformat()
         with database.get_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -221,6 +230,7 @@ def run_maintenance_for_date(
             "run_date": day_key,
             "backup": backup_result,
             "restore_verification": restore_result,
+            "backup_retention": retention_result,
             "live_database_replaced": False,
         }
     except Exception as error:
