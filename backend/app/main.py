@@ -16,7 +16,7 @@ from .maintenance_scheduler import (
     run_maintenance_for_date,
 )
 from .maintenance import (
-    BACKUP_DIR, create_verified_backup, is_maintenance_window,
+    BACKUP_DIR, SAST, create_verified_backup, is_maintenance_window,
     inspect_recovery_candidates, verify_restore_candidate,
 )
 from .cors import configure_cors
@@ -295,7 +295,7 @@ def prepare_maintenance_restore(request: MaintenanceRestorePrepareRequest, user=
     if selected_backup.is_symlink() or not selected_backup.is_file() or selected_backup.resolve().parent != backup_directory:
         raise HTTPException(status_code=409, detail="Selected backup is not a safe managed file.")
     plan_id = uuid4().hex
-    staging_path = backup_directory / "recovery-staging" / ("approved-candidate-" + plan_id + ".sqlite3")
+    staging_path = backup_directory / "recovery-staging" / ("taimobot-restore-" + plan_id + ".sqlite3")
     try:
         pre_restore_backup = create_verified_backup()
         if pre_restore_backup.get("status") != "BACKUP_VERIFIED":
@@ -303,9 +303,13 @@ def prepare_maintenance_restore(request: MaintenanceRestorePrepareRequest, user=
         staged = verify_restore_candidate(selected_backup, staging_path)
         if staged.get("status") != "RESTORE_CANDIDATE_VERIFIED":
             raise RuntimeError("Selected restore candidate did not verify.")
+        staged_inventory = inspect_recovery_candidates(staging_path.parent)
+        staged_record = next((item for item in staged_inventory.get("candidates", []) if item.get("file_name") == staging_path.name), None)
+        if staged_inventory.get("status") != "RECOVERY_INVENTORY_COMPLETE" or staged_record is None or not staged_record.get("restore_ready"):
+            raise RuntimeError("Staged restore failed schema or foreign-key verification.")
         with get_connection() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS maintenance_restore_plans (plan_id TEXT PRIMARY KEY, backup_file TEXT NOT NULL, staging_file TEXT NOT NULL, pre_restore_backup_file TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('PREPARED','APPROVED','APPLIED','FAILED','EXPIRED')), created_at TEXT NOT NULL, created_by TEXT NOT NULL)")
-            connection.execute("INSERT INTO maintenance_restore_plans (plan_id, backup_file, staging_file, pre_restore_backup_file, status, created_at, created_by) VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)", (plan_id, str(selected_backup.resolve()), str(staging_path.resolve()), str(Path(pre_restore_backup['backup_file']).resolve()), datetime.now().astimezone().isoformat(), str(user.get('email', ''))))
+            connection.execute("INSERT INTO maintenance_restore_plans (plan_id, backup_file, staging_file, pre_restore_backup_file, status, created_at, created_by) VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)", (plan_id, str(selected_backup.resolve()), str(staging_path.resolve()), str(Path(pre_restore_backup['backup_file']).resolve()), datetime.now(SAST).isoformat(), str(user.get('email', ''))))
     except Exception as error:
         try:
             staging_path.unlink(missing_ok=True)
