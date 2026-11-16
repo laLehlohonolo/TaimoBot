@@ -642,7 +642,7 @@ def _reconcile_pending_copy_executions_for_closed_source(connection, source_trad
             copied_trade_id = follower["trade_id"]
         else:
             status = "FAILED"
-            reason = "Source trade closed before the follower copy was committed."
+            reason = "Copy rejected: source trade must remain open; source trade closed before the follower copy was committed."
             copied_trade_id = follower["trade_id"] if follower else None
 
         connection.execute(
