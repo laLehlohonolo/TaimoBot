@@ -44,6 +44,37 @@ def get_connection():
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 30000")
 
+    # Connections opened before the restore lock must also stop accepting
+    # writes once quiescence begins; checking only at connection creation
+    # would leave an idle, previously-open connection as a bypass.
+    write_actions = {
+        sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+        sqlite3.SQLITE_CREATE_INDEX, sqlite3.SQLITE_CREATE_TABLE,
+        sqlite3.SQLITE_CREATE_TEMP_INDEX, sqlite3.SQLITE_CREATE_TEMP_TABLE,
+        sqlite3.SQLITE_CREATE_TEMP_TRIGGER, sqlite3.SQLITE_CREATE_TEMP_VIEW,
+        sqlite3.SQLITE_CREATE_TRIGGER, sqlite3.SQLITE_CREATE_VIEW,
+        sqlite3.SQLITE_DROP_INDEX, sqlite3.SQLITE_DROP_TABLE,
+        sqlite3.SQLITE_DROP_TEMP_INDEX, sqlite3.SQLITE_DROP_TEMP_TABLE,
+        sqlite3.SQLITE_DROP_TEMP_TRIGGER, sqlite3.SQLITE_DROP_TEMP_VIEW,
+        sqlite3.SQLITE_DROP_TRIGGER, sqlite3.SQLITE_DROP_VIEW,
+        sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_REINDEX,
+        sqlite3.SQLITE_ANALYZE, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH,
+    }
+
+    def restore_quiescence_authorizer(action, arg1, arg2, database_name, trigger_name):
+        try:
+            locked = lock_path.exists() or lock_path.is_symlink()
+        except OSError:
+            locked = True
+        if not locked:
+            return sqlite3.SQLITE_OK
+        if action in write_actions:
+            return sqlite3.SQLITE_DENY
+        if action == sqlite3.SQLITE_PRAGMA and arg2 is not None:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    connection.set_authorizer(restore_quiescence_authorizer)
     return connection
 
 
