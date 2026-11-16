@@ -280,6 +280,36 @@ class DailyMaintenanceTests(unittest.TestCase):
                     "must-survive",
                 )
 
+    def test_backup_retention_ignores_restore_staging_and_temporary_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            old_backup = root / "taimobot-20241101-230000-expired.sqlite3"
+            recent_backup = root / "taimobot-20261116-110000-recent.sqlite3"
+            staging_dir = root / "recovery-staging"
+            staging_dir.mkdir()
+            staging_file = staging_dir / "candidate-2026-11-16-attempt.sqlite3"
+            temporary_file = root / ".taimobot-backup-in-progress.tmp"
+
+            for backup_path in (old_backup, recent_backup, staging_file):
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+            temporary_file.write_bytes(b"backup still being written")
+
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            os.utime(old_backup, (old_time, old_time))
+
+            result = cleanup_expired_backups(
+                backup_dir=root, now=now, dry_run=False,
+                live_database_path=self.original_db_path,
+            )
+
+            self.assertEqual(result["deleted"], [old_backup.name])
+            self.assertFalse(old_backup.exists())
+            self.assertTrue(recent_backup.exists())
+            self.assertTrue(staging_file.exists())
+            self.assertTrue(temporary_file.exists())
+
     def test_backup_retention_rejects_less_than_one_year(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "at least 365 days"):
