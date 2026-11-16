@@ -303,6 +303,54 @@ class CopyTradeReplicationTests(unittest.TestCase):
 
         self.assertEqual(count, 0)
 
+    def test_source_close_during_copy_execution_keeps_follower_and_execution_closed(self):
+        source = self.create_source_trade("SOURCE-CLOSE-DURING-COPY")
+        original_open = copy_trading.open_paper_trade
+        close_result = {}
+
+        def open_copy_then_close_source(**kwargs):
+            copied = original_open(**kwargs)
+            # Simulate the source being closed after the follower trade is
+            # committed but before copy_executions is finalized as COPIED.
+            close_result.update(
+                close_trade_with_copies(source["trade_id"], 3990)
+            )
+            return copied
+
+        with patch(
+            "app.copy_trading.open_paper_trade",
+            side_effect=open_copy_then_close_source
+        ):
+            result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["copies"][0]["status"], "CLOSED")
+        self.assertEqual(close_result["closed_copies"], 1)
+
+        with database.get_connection() as connection:
+            source_row = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()
+            follower_row = connection.execute(
+                """
+                SELECT trade_id, status FROM trades
+                WHERE account_id = 'FOLLOWER'
+                """
+            ).fetchone()
+            execution = connection.execute(
+                """
+                SELECT status, copied_trade_id FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()
+
+        self.assertEqual(source_row["status"], "CLOSED")
+        self.assertEqual(follower_row["status"], "CLOSED")
+        self.assertEqual(execution["status"], "CLOSED")
+        self.assertEqual(execution["copied_trade_id"], follower_row["trade_id"])
+
     def test_source_closed_before_atomic_copy_insert_prevents_follower_entry(self):
         source = self.create_source_trade("SOURCE-CLOSE-RACE")
         original_open = copy_trading.open_paper_trade
