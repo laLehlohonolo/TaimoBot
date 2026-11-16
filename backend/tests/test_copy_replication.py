@@ -353,9 +353,17 @@ class CopyTradeReplicationTests(unittest.TestCase):
         original_open = copy_trading.open_paper_trade
 
         def pause_relationship_then_attempt_copy(**kwargs):
-            copy_trading.update_copy_relationship_status(
-                relationship_id, "PAUSED"
-            )
+            # Simulate the relationship being paused by another request
+            # immediately before the atomic follower-entry transaction.
+            with database.get_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE copy_relationships
+                    SET status = 'PAUSED', updated_at = CURRENT_TIMESTAMP
+                    WHERE relationship_id = ?
+                    """,
+                    (relationship_id,)
+                )
             return original_open(**kwargs)
 
         with patch(
