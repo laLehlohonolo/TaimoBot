@@ -412,7 +412,7 @@ def approve_maintenance_restore(request: MaintenanceRestoreApproveRequest, user=
             artifact_hashes["rollback_sha256"],
         )
         if current_hashes != expected_hashes:
-            raise ValueError("A recovery artifact changed after preparation; create a new restore plan.")
+            raise ValueError("Recovery artifact fingerprint mismatch: an artifact changed after preparation; create a new restore plan.")
 
         with get_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
