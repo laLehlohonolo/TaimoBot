@@ -125,6 +125,39 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertIsNone(attempts[1]["error_summary"])
         self.assertEqual(current["status"], "COMPLETE")
 
+    def test_retention_cleanup_is_skipped_when_restore_verification_fails(self):
+        day = date(2026, 11, 18)
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+
+        def fake_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(backup_file) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        with patch(
+            "app.maintenance_scheduler.BACKUP_DIR", backup_dir
+        ), patch(
+            "app.maintenance_scheduler.create_verified_backup",
+            side_effect=fake_backup,
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            side_effect=RuntimeError("restore verification failed"),
+        ), patch(
+            "app.maintenance_scheduler.cleanup_expired_backups"
+        ) as cleanup:
+            result = run_maintenance_for_date(day)
+
+        self.assertEqual(result["status"], "MAINTENANCE_FAILED")
+        cleanup.assert_not_called()
+        with database.get_connection() as connection:
+            run = connection.execute(
+                "SELECT status FROM maintenance_runs WHERE run_date = ?",
+                (day.isoformat(),),
+            ).fetchone()
+        self.assertEqual(run["status"], "FAILED")
+
     def test_daily_maintenance_runs_once_and_records_completion(self):
         day = date(2026, 11, 15)
         backup_dir = self.root / "backups"
