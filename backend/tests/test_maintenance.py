@@ -571,16 +571,26 @@ class DailyMaintenanceTests(unittest.TestCase):
                 "app.main.require_admin"
             ), patch(
                 "app.main.inspect_recovery_candidates",
-                return_value={
+                side_effect=lambda directory=None: {
                     "status": "RECOVERY_INVENTORY_COMPLETE",
-                    "candidates": [{"file_name": selected.name, "restore_ready": True}],
+                    "candidates": [{
+                        "file_name": (
+                            selected.name if directory is None
+                            else next(Path(directory).glob("taimobot-restore-*.sqlite3")).name
+                        ),
+                        "restore_ready": True,
+                    }],
                 },
             ), patch(
                 "app.main.create_verified_backup",
                 return_value={"status": "BACKUP_VERIFIED", "backup_file": str(pre_restore)},
             ) as create_backup, patch(
                 "app.main.verify_restore_candidate",
-                return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+                side_effect=lambda backup, staging: (
+                    staging.parent.mkdir(parents=True, exist_ok=True),
+                    staging.write_bytes(b"verified-staged-copy"),
+                    {"status": "RESTORE_CANDIDATE_VERIFIED"},
+                )[-1],
             ) as verify_candidate:
                 result = prepare_maintenance_restore(
                     MaintenanceRestorePrepareRequest(
