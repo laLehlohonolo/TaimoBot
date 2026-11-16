@@ -258,32 +258,54 @@ def _copy_for_relationship(relationship, source):
             copied_trade_id = copied["trade_id"]
 
         with transaction() as connection:
+            copied_row = connection.execute(
+                """
+                SELECT status, account_id, copied_from_trade_id
+                FROM trades
+                WHERE trade_id = ?
+                """,
+                (copied_trade_id,)
+            ).fetchone()
+            if (
+                copied_row is None
+                or copied_row["account_id"] != follower_id
+                or copied_row["copied_from_trade_id"] not in (None, source_trade_id)
+            ):
+                raise ValueError(
+                    "Copy finalization stopped: follower trade does not match "
+                    "the expected account and source."
+                )
+
             connection.execute(
                 """
                 UPDATE trades
                 SET copied_from_trade_id = ?
                 WHERE trade_id = ? AND account_id = ?
+                  AND copied_from_trade_id IS NULL
                 """,
                 (source_trade_id, copied_trade_id, follower_id)
+            )
+            final_status = (
+                "CLOSED" if copied_row["status"] == "CLOSED" else "COPIED"
             )
             connection.execute(
                 """
                 UPDATE copy_executions
                 SET copied_trade_id = ?,
-                    status = 'COPIED',
+                    status = ?,
                     failure_reason = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE relationship_id = ?
                   AND source_trade_id = ?
                   AND status = 'PENDING'
                 """,
-                (copied_trade_id, relationship_id, source_trade_id)
+                (copied_trade_id, final_status, relationship_id, source_trade_id)
             )
 
         return {
             "relationship_id": relationship_id,
             "follower_account_id": follower_id,
-            "status": "COPIED",
+            "status": final_status,
             "copied_trade_id": copied_trade_id,
             "duplicate_prevented": False
         }
