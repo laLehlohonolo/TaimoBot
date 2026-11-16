@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timedelta
 from pathlib import Path
+import sqlite3
 from uuid import uuid4
 
 from . import database
@@ -181,7 +182,7 @@ def run_maintenance_for_date(
                 (completed_at, backup_result["backup_file"], day_key, claim_token),
             )
             if updated.rowcount == 1:
-                connection.execute(
+                audited = connection.execute(
                     """
                     UPDATE maintenance_run_attempts
                     SET status = 'COMPLETE', completed_at = ?, backup_file = ?,
@@ -190,6 +191,10 @@ def run_maintenance_for_date(
                     """,
                     (completed_at, backup_result["backup_file"], claim_token),
                 )
+                if audited.rowcount != 1:
+                    raise sqlite3.IntegrityError(
+                        "Maintenance completion audit row was missing or not RUNNING."
+                    )
                 connection.commit()
             else:
                 connection.execute(
@@ -233,7 +238,7 @@ def run_maintenance_for_date(
                 (completed_at, error_summary, day_key, claim_token),
             )
             if updated.rowcount == 1:
-                connection.execute(
+                audited = connection.execute(
                     """
                     UPDATE maintenance_run_attempts
                     SET status = 'FAILED', completed_at = ?, error_summary = ?
@@ -241,6 +246,10 @@ def run_maintenance_for_date(
                     """,
                     (completed_at, error_summary, claim_token),
                 )
+                if audited.rowcount != 1:
+                    raise sqlite3.IntegrityError(
+                        "Maintenance failure audit row was missing or not RUNNING."
+                    )
                 connection.commit()
             else:
                 connection.execute(
