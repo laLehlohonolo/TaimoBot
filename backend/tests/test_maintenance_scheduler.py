@@ -159,7 +159,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "MAINTENANCE_COMPLETE")
         self.assertEqual(call_order, ["backup", "restore", "retention"])
-        self.assertEqual(result["retention"]["status"], "BACKUP_RETENTION_COMPLETE")
+        self.assertEqual(result["backup_retention"]["status"], "BACKUP_RETENTION_COMPLETE")
 
     def test_retention_cleanup_is_skipped_when_restore_verification_fails(self):
         day = date(2026, 11, 18)
