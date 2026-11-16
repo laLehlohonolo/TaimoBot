@@ -546,13 +546,14 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         with database.get_connection() as connection:
             attempt = connection.execute(
                 """
-                SELECT status, error_summary
+                SELECT status, backup_file, error_summary
                 FROM maintenance_run_attempts
                 WHERE run_date = ?
                 """,
                 (day.isoformat(),),
             ).fetchone()
         self.assertEqual(attempt["status"], "SUPERSEDED")
+        self.assertEqual(attempt["backup_file"], str(backup_file))
         self.assertIn("newer maintenance claim", attempt["error_summary"])
 
 
