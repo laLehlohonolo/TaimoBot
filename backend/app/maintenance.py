@@ -289,6 +289,127 @@ def cleanup_expired_backups(
     }
 
 
+
+def inspect_recovery_candidates(backup_dir: Path | None = None) -> dict:
+    """Read-only inventory of managed backups with integrity and schema checks.
+
+    A file is restore-ready only when SQLite integrity, essential TaimoBot
+    tables/columns, and foreign-key checks all pass. This does not restore or
+    modify any database.
+    """
+    directory = Path(backup_dir or BACKUP_DIR)
+    if not directory.exists():
+        return {"status": "NO_BACKUP_DIRECTORY", "candidates": []}
+    if not directory.is_dir():
+        return {"status": "RECOVERY_INVENTORY_BLOCKED", "candidates": []}
+
+    required_columns = {
+        "users": {"user_id", "email", "password_hash", "created_at"},
+        "paper_accounts": {"account_id", "starting_balance", "balance"},
+        "trades": {
+            "trade_id", "account_id", "client_order_id", "symbol",
+            "side", "quantity", "entry_price", "stop_loss", "status",
+            "risk_amount", "realized_pnl",
+        },
+        "position_groups": {"group_id", "account_id", "symbol", "side", "status"},
+        "copy_relationships": {
+            "relationship_id", "source_account_id", "follower_account_id", "status",
+        },
+        "copy_executions": {
+            "copy_execution_id", "relationship_id", "source_trade_id", "status",
+        },
+        "participant_milestones": {"user_id", "joined_at", "first_trade_at"},
+        "system_safety_state": {"singleton_id", "emergency_stop_active"},
+    }
+
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return {"status": "RECOVERY_INVENTORY_BLOCKED", "candidates": []}
+
+    candidates = []
+    for path in entries:
+        if not path.name.startswith("taimobot-") or not path.name.endswith(".sqlite3"):
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+
+        issues = []
+        integrity = "not_checked"
+        missing_schema = []
+        foreign_key_violations = None
+        try:
+            stat = path.stat(follow_symlinks=False)
+            with sqlite3.connect(
+                f"file:{path.resolve()}?mode=ro", uri=True, timeout=10
+            ) as connection:
+                result = connection.execute("PRAGMA integrity_check").fetchone()
+                integrity = result[0] if result else "no_result"
+                if integrity != "ok":
+                    issues.append("SQLITE_INTEGRITY_FAILED")
+
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                for table, expected_columns in required_columns.items():
+                    if table not in tables:
+                        missing_schema.append(table)
+                        continue
+                    actual_columns = {
+                        row[1] for row in connection.execute(
+                            f"PRAGMA table_info({table})"
+                        )
+                    }
+                    missing = expected_columns - actual_columns
+                    if missing:
+                        missing_schema.append(
+                            f"{table}:" + ",".join(sorted(missing))
+                        )
+                if missing_schema:
+                    issues.append("TAIMOBOT_SCHEMA_INCOMPLETE")
+
+                foreign_key_violations = len(
+                    connection.execute("PRAGMA foreign_key_check").fetchall()
+                )
+                if foreign_key_violations:
+                    issues.append("FOREIGN_KEY_VIOLATIONS")
+
+            candidates.append({
+                "file_name": path.name,
+                "size_bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, SAST).isoformat(),
+                "integrity_check": integrity,
+                "missing_schema": missing_schema,
+                "foreign_key_violations": foreign_key_violations,
+                "restore_ready": not issues,
+                "issues": issues,
+            })
+        except (sqlite3.Error, OSError, ValueError):
+            candidates.append({
+                "file_name": path.name,
+                "integrity_check": integrity,
+                "missing_schema": missing_schema,
+                "foreign_key_violations": foreign_key_violations,
+                "restore_ready": False,
+                "issues": ["BACKUP_UNREADABLE"],
+            })
+
+    candidates.sort(
+        key=lambda item: (item.get("modified_at", ""), item["file_name"]),
+        reverse=True,
+    )
+    return {
+        "status": "RECOVERY_INVENTORY_COMPLETE",
+        "candidate_count": len(candidates),
+        "restore_ready_count": sum(1 for item in candidates if item["restore_ready"]),
+        "candidates": candidates,
+        "live_database_replaced": False,
+    }
+
+
 def verify_restore_candidate(backup_path: Path, staging_path: Path) -> dict:
     """Restore into an isolated staging DB and verify; never replace the live DB."""
     source = Path(backup_path)
