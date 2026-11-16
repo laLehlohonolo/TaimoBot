@@ -59,6 +59,38 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.assertTrue(milestone["joined_at"])
         self.assertIsNone(milestone["first_trade_at"])
 
+    def test_participant_timeline_requires_authentication(self):
+        response = self.client.get("/auth/participant/timeline")
+        self.assertEqual(response.status_code, 401)
+
+    def test_participant_timeline_returns_only_authenticated_users_milestones(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "timeline@example.com", "password": "StrongPassphrase123!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "timeline@example.com", "password": "StrongPassphrase123!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+
+        response = self.client.get(
+            "/auth/participant/timeline",
+            headers=headers
+        )
+
+        self.assertEqual(response.status_code, 200)
+        timeline = response.json()
+        self.assertTrue(timeline["joined_at"])
+        self.assertIsNone(timeline["first_trade_at"])
+        self.assertEqual(timeline["loyalty_milestone_years"], 10)
+        self.assertEqual(timeline["loyalty_reward_status"], "TO_BE_DETERMINED")
+        self.assertEqual(
+            set(timeline),
+            {"joined_at", "first_trade_at", "loyalty_milestone_years", "loyalty_reward_status"}
+        )
+
     def test_duplicate_email_is_rejected_case_insensitively(self):
         register_user("same@example.com", "StrongPassphrase123!")
         with self.assertRaises(AuthenticationError):
