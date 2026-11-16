@@ -76,6 +76,21 @@ def run_maintenance_for_date(
         if "run_token" not in columns:
             connection.execute("ALTER TABLE maintenance_runs ADD COLUMN run_token TEXT")
 
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_run_attempts (
+                attempt_token TEXT PRIMARY KEY,
+                run_date TEXT NOT NULL,
+                status TEXT NOT NULL
+                    CHECK (status IN ('RUNNING', 'COMPLETE', 'FAILED', 'SUPERSEDED')),
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                backup_file TEXT,
+                error_summary TEXT
+            )
+            """
+        )
+
         connection.execute("BEGIN IMMEDIATE")
         existing = connection.execute(
             "SELECT status, started_at FROM maintenance_runs WHERE run_date = ?",
@@ -130,6 +145,14 @@ def run_maintenance_for_date(
             """,
             (day_key, started, claim_token),
         )
+        connection.execute(
+            """
+            INSERT INTO maintenance_run_attempts (
+                attempt_token, run_date, status, started_at
+            ) VALUES (?, ?, 'RUNNING', ?)
+            """,
+            (claim_token, day_key, started),
+        )
         connection.commit()
 
     staging_path = BACKUP_DIR / "recovery-staging" / f"candidate-{day_key}.sqlite3"
@@ -161,11 +184,39 @@ def run_maintenance_for_date(
                 ),
             )
         if updated.rowcount != 1:
+            with database.get_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE maintenance_run_attempts
+                    SET status = 'SUPERSEDED', completed_at = ?,
+                        error_summary = ?
+                    WHERE attempt_token = ? AND status = 'RUNNING'
+                    """,
+                    (
+                        datetime.now(SAST).isoformat(),
+                        "A newer maintenance claim replaced this worker.",
+                        claim_token,
+                    ),
+                )
             return {
                 "status": "MAINTENANCE_SUPERSEDED",
                 "run_date": day_key,
                 "reason": "A newer maintenance claim replaced this worker.",
             }
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE maintenance_run_attempts
+                SET status = 'COMPLETE', completed_at = ?, backup_file = ?
+                WHERE attempt_token = ? AND status = 'RUNNING'
+                """,
+                (
+                    datetime.now(SAST).isoformat(),
+                    backup_result["backup_file"],
+                    claim_token,
+                ),
+            )
 
         return {
             "status": "MAINTENANCE_COMPLETE",
@@ -195,11 +246,38 @@ def run_maintenance_for_date(
                 ),
             )
         if updated.rowcount != 1:
+            with database.get_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE maintenance_run_attempts
+                    SET status = 'SUPERSEDED', completed_at = ?,
+                        error_summary = ?
+                    WHERE attempt_token = ? AND status = 'RUNNING'
+                    """,
+                    (
+                        datetime.now(SAST).isoformat(),
+                        "A newer maintenance claim replaced this worker.",
+                        claim_token,
+                    ),
+                )
             return {
                 "status": "MAINTENANCE_SUPERSEDED",
                 "run_date": day_key,
                 "reason": "A newer maintenance claim replaced this worker.",
             }
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE maintenance_run_attempts
+                SET status = 'FAILED', completed_at = ?, error_summary = ?
+                WHERE attempt_token = ? AND status = 'RUNNING'
+                """,
+                (
+                    datetime.now(SAST).isoformat(),
+                    str(error)[:500],
+                    claim_token,
+                ),
+            )
         return {
             "status": "MAINTENANCE_FAILED",
             "run_date": day_key,
