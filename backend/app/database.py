@@ -108,6 +108,37 @@ def migrate_account_risk_profiles(connection):
 
 
 
+def migrate_copy_execution_leases(connection):
+    """Add token-owned expiry leases for safe copy-worker recovery."""
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(
+            "PRAGMA table_info(copy_executions)"
+        ).fetchall()
+    }
+
+    if "lease_token" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE copy_executions ADD COLUMN lease_token TEXT"
+        )
+
+    if "lease_expires_at" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE copy_executions ADD COLUMN lease_expires_at TEXT"
+        )
+
+    # Legacy PENDING rows have no owner token. Expire them at migration so
+    # the first new worker can safely claim and reconcile them.
+    connection.execute(
+        """
+        UPDATE copy_executions
+        SET lease_expires_at = CURRENT_TIMESTAMP
+        WHERE status = 'PENDING'
+          AND lease_token IS NULL
+        """
+    )
+
+
 def seed_strategy_knowledge(connection):
     """Insert reference techniques as unvalidated knowledge, never as approved signals."""
     techniques = [["builtin-scalping","Scalping","SHORT_TERM","Short-duration trading that seeks small price movements and generally closes positions within a short time window.","Define a short-term market condition, confirm spread and volatility are acceptable, and require a clear entry trigger.","Use a predefined price or signal-based exit; consider costs and close when the setup invalidates.","Small targets can be consumed by spread, commission and slippage. Validate net expectancy and avoid excessive trade frequency."],["builtin-day-trading","Day trading","INTRADAY","Positions are opened and closed within the same trading day.","Use intraday market structure, session context and a documented entry trigger.","Close according to target, stop, invalidation or end-of-session rules.","Intraday volatility and transaction costs can materially affect outcomes."],["builtin-swing-trading","Swing trading","MULTI_DAY","Aims to capture price moves over multiple sessions.","Identify a broader directional or range setup and define invalidation before entry.","Use a planned target, trailing rule or setup invalidation.","Overnight gaps, swaps and wider stops must be included in risk calculations."],["builtin-trend-following","Trend following","TREND","Attempts to participate in sustained directional market movement.","Require objective trend conditions and a separate entry confirmation.","Exit on trend invalidation, protective stop or predefined trailing logic.","Can suffer repeated losses in sideways markets."],["builtin-breakout","Breakout trading","MOMENTUM","Looks for price to move beyond a defined support, resistance or range boundary.","Define the range objectively and require a breakout confirmation or retest.","Exit if the breakout fails, at a planned target or through a trailing rule.","False breakouts and slippage around fast moves are key risks."],["builtin-mean-reversion","Mean reversion","RANGE","Looks for price to return toward a defined average or range after an extension.","Require evidence of range conditions and a measurable deviation from a reference level.","Exit near the reference level or if the range thesis is invalidated.","Can fail severely when a new trend begins; never average down without validated risk."],["builtin-price-action","Price action","STRUCTURE","Uses price structure, candles and key levels to form trade hypotheses.","Define structure, key levels and a reproducible confirmation pattern.","Exit on structural invalidation or a predefined reward/risk plan.","Subjective pattern interpretation must be converted into testable rules."],["builtin-support-resistance","Support and resistance","LEVELS","Uses historically observed price areas as possible decision levels.","Identify levels from a documented lookback and require a reaction or confirmation.","Exit at the next level, target or invalidation point.","Levels are zones, not guarantees; avoid assuming a level must hold."],["builtin-momentum","Momentum trading","MOMENTUM","Seeks to participate in price moves with measurable directional strength.","Require a defined momentum measure and price confirmation.","Exit when momentum weakens, target is reached or stop is triggered.","Momentum can reverse quickly; account for volatility and execution costs."],["builtin-multi-timeframe","Multi-timeframe analysis","CONFIRMATION","Combines context from higher and lower chart timeframes.","Use a higher timeframe for context and a lower timeframe for a precise trigger.","Exit according to the execution timeframe while respecting higher-timeframe invalidation.","Timeframe conflicts and look-ahead bias must be controlled."],["builtin-volatility","Volatility-aware trading","VOLATILITY","Adapts entry filters, stop distances and targets to measured volatility.","Measure current volatility and require a suitable regime before entry.","Use volatility-adjusted exits and close if conditions materially change.","Volatility sizing must not increase monetary risk beyond the account limit."],["builtin-session","Session-based trading","SESSION","Studies recurring market-session behavior and liquidity conditions.","Use explicitly defined session windows and test across many dates.","Apply session-specific exits and avoid assuming historical patterns repeat.","Session effects can change and require ongoing out-of-sample validation."]]
@@ -325,6 +356,7 @@ def init_db():
         migrate_trade_columns(connection)
         migrate_account_ownership(connection)
         migrate_account_risk_profiles(connection)
+        migrate_copy_execution_leases(connection)
 
         connection.execute(
             """
