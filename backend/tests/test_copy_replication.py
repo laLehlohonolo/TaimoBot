@@ -377,7 +377,19 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertIsNotNone(inserted)
         self.assertEqual(inserted["copied_from_trade_id"], source["trade_id"])
 
-        # Recovery must find the committed trade before considering lease expiry.
+        # Simulate a crashed worker: its lease has expired, so recovery may
+        # safely adopt the already-committed follower trade.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET lease_token = NULL,
+                    lease_expires_at = datetime('now', '-1 minute')
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source["trade_id"])
+            )
+
         recovered = replicate_open_trade(source["trade_id"])
         self.assertEqual(recovered["successful_copies"], 1)
         self.assertTrue(recovered["copies"][0]["recovered"])
@@ -419,6 +431,17 @@ class CopyTradeReplicationTests(unittest.TestCase):
             stop_loss=3990,
             symbol="XAUUSD"
         )
+        # This fixture represents an abandoned worker after the trade commit.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET lease_token = NULL,
+                    lease_expires_at = datetime('now', '-1 minute')
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source["trade_id"])
+            )
 
         result = replicate_open_trade(source["trade_id"])
         self.assertEqual(result["successful_copies"], 1)
