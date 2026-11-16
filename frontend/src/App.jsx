@@ -36,7 +36,8 @@ function AuthPanel({ onAuthenticated }) {
     setBusy(true);
     setError("");
     try {
-      if (mode === "register") {
+      const justRegistered = mode === "register";
+      if (justRegistered) {
         await apiRequest("/auth/register", {
           method: "POST",
           body: JSON.stringify({ email, password })
@@ -46,7 +47,7 @@ function AuthPanel({ onAuthenticated }) {
         method: "POST",
         body: JSON.stringify({ email, password })
       });
-      onAuthenticated(session);
+      onAuthenticated(session, justRegistered);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed.");
     } finally {
@@ -181,10 +182,42 @@ function StrategyLibrary({ token }) {
   );
 }
 
+function WelcomeCelebration({ onClose }) {
+  return (
+    <div className="welcome-overlay" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+      <div className="welcome-confetti" aria-hidden="true"><span>✦</span><span>✧</span><span>✦</span><span>✧</span><span>✦</span><span>✧</span></div>
+      <div className="welcome-card">
+        <div className="welcome-emblem" aria-hidden="true">T</div>
+        <p className="eyebrow">A NEW JOURNEY BEGINS</p>
+        <h2 id="welcome-title">Welcome to <em>TaimoBot.</em></h2>
+        <p>Your place in the TaimoBot community starts today. Your journey, milestones and trading history will grow with you.</p>
+        <div className="welcome-signature">WELCOME ABOARD · LET'S BUILD YOUR LEGACY</div>
+        <button className="primary-button" type="button" onClick={onClose}>Enter your workspace</button>
+      </div>
+    </div>
+  );
+}
+
+function ParticipantJourney({ timeline }) {
+  const formatDate = value => value ? new Date(value.replace(" ", "T") + (value.endsWith("Z") ? "" : "Z")).toLocaleDateString("en-ZA", { day: "numeric", month: "long", year: "numeric" }) : "Not yet recorded";
+  return (
+    <section className="panel participant-journey">
+      <div><p className="eyebrow">YOUR TAIMOBOT STORY</p><h2>Participant journey</h2><p className="muted">Your joining milestone is the start of your 10-year loyalty journey. Trading milestones are tracked separately.</p></div>
+      <div className="journey-grid">
+        <article><span className="journey-icon">✦</span><small>JOINED TAIMOBOT</small><strong>{formatDate(timeline.joined_at)}</strong><span>10-year loyalty clock starts here</span></article>
+        <article><span className="journey-icon">↗</span><small>FIRST SUCCESSFUL TRADE</small><strong>{formatDate(timeline.first_trade_at)}</strong><span>{timeline.first_trade_at ? "Your trading history has begun" : "Recorded when your first paper trade opens"}</span></article>
+        <article><span className="journey-icon">🏆</span><small>10-YEAR RECOGNITION</small><strong>Coming in your tenth year</strong><span>Recognition confirmed; reward to be decided in the future</span></article>
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [health, setHealth] = useState(null);
   const [safety, setSafety] = useState(null);
   const [session, setSession] = useState(null);
+  const [showWelcome, setShowWelcome] = useState(false);
+  const [participantTimeline, setParticipantTimeline] = useState(null);
   const [accounts, setAccounts] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [account, setAccount] = useState(null);
@@ -260,6 +293,17 @@ export default function App() {
   }, []);
 
   useEffect(() => { refreshPublicStatus(); }, [refreshPublicStatus]);
+  useEffect(() => {
+    if (!session?.access_token) {
+      setParticipantTimeline(null);
+      return;
+    }
+    let active = true;
+    apiRequest("/auth/participant/timeline", {}, session.access_token)
+      .then(result => { if (active) setParticipantTimeline(result); })
+      .catch(() => { if (active) setParticipantTimeline(null); });
+    return () => { active = false; };
+  }, [session]);
   useEffect(() => {
     if (session?.access_token) loadAccounts(session.access_token);
     else {
@@ -345,7 +389,7 @@ export default function App() {
       {error && <div className="notice error" role="alert"><strong>Workspace notice</strong><span>{error}</span></div>}
 
       {!session ? (
-        <AuthPanel onAuthenticated={setSession} />
+        <AuthPanel onAuthenticated={(nextSession, justRegistered) => { setSession(nextSession); setShowWelcome(Boolean(justRegistered)); }} />
       ) : (
         <section className="workspace">
           <div className="workspace-heading">
@@ -353,6 +397,7 @@ export default function App() {
             <StatusPill good={true}>Authenticated</StatusPill>
           </div>
 
+          {participantTimeline && <ParticipantJourney timeline={participantTimeline} />}
           <div className="account-layout">
             <aside className="panel account-sidebar">
               <h3>Your accounts</h3>
@@ -400,6 +445,7 @@ export default function App() {
         </div>
       </section>
 
+      {showWelcome && <WelcomeCelebration onClose={() => setShowWelcome(false)} />}
       <footer><span>TAIMOBOT · BUILD 0.2.0</span><span>{lastChecked ? "Last checked " + lastChecked.toLocaleTimeString() : "Awaiting status check"} · Africa/Johannesburg · Session is memory-only</span></footer>
     </main>
   );
