@@ -48,7 +48,7 @@ from .auth_routes import (
     require_admin,
 )
 from .strategy_knowledge import list_strategies, create_strategy, get_strategy
-from .profit_taking import evaluate_position_profit
+from .profit_taking import evaluate_position_profit, evaluate_group_profit
 from .safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
@@ -385,6 +385,84 @@ def group_details(group_id: str, user=Depends(current_user)):
             status_code=404,
             detail=str(error)
         )
+
+
+@app.post("/groups/{group_id}/profit-preview")
+def group_profit_preview(
+    group_id: str,
+    request: ProfitPreviewRequest,
+    user=Depends(current_user)
+):
+    """Return a read-only aggregate net profit estimate for an open group."""
+    require_group_access(group_id, user)
+    with get_connection() as connection:
+        group = connection.execute(
+            """
+            SELECT group_id, account_id, symbol, side, status
+            FROM position_groups
+            WHERE group_id = ?
+            """,
+            (group_id,)
+        ).fetchone()
+        trades = connection.execute(
+            """
+            SELECT trade_id, side, entry_price, quantity
+            FROM trades
+            WHERE position_group_id = ?
+              AND status = 'OPEN'
+            ORDER BY created_at, trade_id
+            """,
+            (group_id,)
+        ).fetchall()
+
+    if group is None:
+        raise HTTPException(status_code=404, detail="Position group not found.")
+    if not trades:
+        raise HTTPException(
+            status_code=409,
+            detail="Profit preview is available only for groups with open positions."
+        )
+
+    # Request costs are group-level estimates. Allocate them by quantity so
+    # they are counted once in the aggregate, not once per position.
+    total_quantity = sum(float(trade["quantity"]) for trade in trades)
+    cost_totals = {
+        "spread_cost": request.spread_cost,
+        "commission_cost": request.commission_cost,
+        "swap_cost": request.swap_cost,
+        "other_costs": request.other_costs,
+    }
+    positions = []
+    trade_ids = []
+    for trade in trades:
+        weight = float(trade["quantity"]) / total_quantity
+        positions.append({
+            "side": trade["side"],
+            "entry_price": trade["entry_price"],
+            "quantity": trade["quantity"],
+            "current_price": request.current_price,
+            **{name: amount * weight for name, amount in cost_totals.items()},
+        })
+        trade_ids.append(trade["trade_id"])
+
+    try:
+        result = evaluate_group_profit(
+            positions,
+            minimum_net_profit=request.minimum_net_profit,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    return {
+        "group_id": group["group_id"],
+        "account_id": group["account_id"],
+        "symbol": group["symbol"],
+        "trade_ids": trade_ids,
+        **result,
+        "read_only": True,
+        "execution_triggered": False,
+        "cost_allocation": "proportional_to_position_quantity",
+    }
 
 
 @app.post("/groups/{group_id}/close")
