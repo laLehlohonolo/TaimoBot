@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -168,6 +169,11 @@ class MaintenanceRestorePrepareRequest(BaseModel):
     confirm_preparation: bool
 
 
+class MaintenanceRestoreApproveRequest(BaseModel):
+    plan_id: str = Field(min_length=32, max_length=32, pattern=r"^[a-f0-9]{32}$")
+    confirm_approval: bool
+
+
 class StrategyKnowledgeRequest(BaseModel):
     name: str = Field(min_length=3, max_length=100)
     category: str = Field(min_length=3, max_length=40, pattern=r"^[A-Z][A-Z0-9_]*$")
@@ -317,6 +323,95 @@ def prepare_maintenance_restore(request: MaintenanceRestorePrepareRequest, user=
             pass
         raise HTTPException(status_code=500, detail="Restore preparation failed safely: " + str(error)[:200]) from error
     return {"status":"RESTORE_PREPARED", "plan_id":plan_id, "selected_backup":request.backup_file_name, "selected_backup_verified":True, "pre_restore_backup_verified":True, "staged_candidate_verified":True, "approval_required":True, "live_database_replaced":False, "trading_mode":"paper"}
+
+
+
+@app.post("/maintenance/restore/approve")
+def approve_maintenance_restore(request: MaintenanceRestoreApproveRequest, user=Depends(current_user)):
+    """Approve a prepared restore only after revalidating every recovery artifact."""
+    require_admin(user)
+    if not request.confirm_approval:
+        raise HTTPException(status_code=400, detail="Explicit restore approval is required.")
+
+    with get_connection() as connection:
+        plan = connection.execute(
+            """
+            SELECT plan_id, backup_file, staging_file, pre_restore_backup_file,
+                   status, created_at
+            FROM maintenance_restore_plans WHERE plan_id = ?
+            """,
+            (request.plan_id,),
+        ).fetchone()
+
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Restore plan not found.")
+    if plan["status"] != "PREPARED":
+        raise HTTPException(status_code=409, detail="Only a PREPARED restore plan can be approved.")
+
+    try:
+        created_at = datetime.fromisoformat(plan["created_at"])
+        if created_at.tzinfo is None:
+            raise ValueError("Restore plan timestamp has no timezone.")
+        age_seconds = (datetime.now(SAST) - created_at.astimezone(SAST)).total_seconds()
+        if age_seconds < 0 or age_seconds > 30 * 60:
+            raise ValueError("Restore plan has expired.")
+
+        backup_directory = Path(BACKUP_DIR).resolve()
+        staging_directory = (backup_directory / "recovery-staging").resolve()
+        selected_backup = Path(plan["backup_file"])
+        staging_file = Path(plan["staging_file"])
+        pre_restore_backup = Path(plan["pre_restore_backup_file"])
+        for artifact, expected_parent in (
+            (selected_backup, backup_directory),
+            (pre_restore_backup, backup_directory),
+            (staging_file, staging_directory),
+        ):
+            if artifact.is_symlink() or not artifact.is_file() or artifact.resolve().parent != expected_parent:
+                raise ValueError("A required restore artifact is missing or outside its managed directory.")
+
+        source_inventory = inspect_recovery_candidates(backup_directory)
+        staged_inventory = inspect_recovery_candidates(staging_directory)
+        source_records = {item.get("file_name"): item for item in source_inventory.get("candidates", [])}
+        staged_records = {item.get("file_name"): item for item in staged_inventory.get("candidates", [])}
+        if source_inventory.get("status") != "RECOVERY_INVENTORY_COMPLETE":
+            raise ValueError("Managed backup inventory could not be verified.")
+        if staged_inventory.get("status") != "RECOVERY_INVENTORY_COMPLETE":
+            raise ValueError("Staged recovery inventory could not be verified.")
+        if not source_records.get(selected_backup.name, {}).get("restore_ready"):
+            raise ValueError("Selected source backup no longer passes recovery checks.")
+        if not source_records.get(pre_restore_backup.name, {}).get("restore_ready"):
+            raise ValueError("Pre-restore rollback backup no longer passes recovery checks.")
+        if not staged_records.get(staging_file.name, {}).get("restore_ready"):
+            raise ValueError("Staged restore candidate no longer passes recovery checks.")
+
+        with get_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                """
+                UPDATE maintenance_restore_plans SET status = 'APPROVED'
+                WHERE plan_id = ? AND status = 'PREPARED'
+                """,
+                (request.plan_id,),
+            )
+            if updated.rowcount != 1:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail="Restore plan changed before approval.")
+            connection.commit()
+    except HTTPException:
+        raise
+    except (OSError, sqlite3.Error, ValueError) as error:
+        raise HTTPException(status_code=409, detail="Restore approval blocked: " + str(error)[:180]) from error
+
+    return {
+        "status": "RESTORE_APPROVED",
+        "plan_id": request.plan_id,
+        "source_backup_verified": True,
+        "pre_restore_backup_verified": True,
+        "staged_candidate_verified": True,
+        "restore_application_authorized": False,
+        "live_database_replaced": False,
+        "trading_mode": "paper",
+    }
 
 
 @app.get("/safety/status")
