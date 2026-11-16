@@ -15,6 +15,9 @@ from app.maintenance import (
     verify_restore_candidate,
     verify_restore_execution_readiness,
     sha256_file,
+    acquire_restore_lock,
+    release_restore_lock,
+    is_restore_lock_active,
 )
 from app import database
 from app.database import init_db
@@ -826,6 +829,58 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertEqual(sha256_file(artifact, chunk_size=7), sha256_file(artifact))
             with self.assertRaises(ValueError):
                 sha256_file(artifact, chunk_size=0)
+
+
+    def test_restore_lock_quiesces_application_connections_and_requires_owner_token(self):
+        from app.database import get_connection
+
+        plan_id = "d" * 32
+        lock = acquire_restore_lock(plan_id)
+        self.assertEqual(lock["status"], "RESTORE_LOCK_ACQUIRED")
+        self.assertTrue(lock["database_quiescent"])
+        self.assertTrue(is_restore_lock_active())
+        self.assertTrue(Path(lock["lock_file"]).is_file())
+
+        with self.assertRaisesRegex(sqlite3.OperationalError, "controlled restore"):
+            get_connection()
+
+        with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+            release_restore_lock("e" * 32)
+        self.assertTrue(is_restore_lock_active())
+
+        released = release_restore_lock(lock["lock_token"])
+        self.assertEqual(released["status"], "RESTORE_LOCK_RELEASED")
+        self.assertFalse(is_restore_lock_active())
+        with get_connection() as connection:
+            self.assertIsNotNone(connection.execute("SELECT 1").fetchone())
+
+    def test_restore_lock_is_exclusive_and_never_reclaims_an_existing_lock(self):
+        first = acquire_restore_lock("f" * 32)
+        try:
+            with self.assertRaises(FileExistsError):
+                acquire_restore_lock("1" * 32)
+            self.assertTrue(is_restore_lock_active())
+        finally:
+            release_restore_lock(first["lock_token"])
+
+    def test_restore_lock_fails_closed_when_existing_writer_cannot_quiesce(self):
+        from app.database import get_connection
+
+        connection = get_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            with self.assertRaises(sqlite3.OperationalError):
+                acquire_restore_lock("2" * 32, timeout_seconds=0.01)
+            self.assertFalse(is_restore_lock_active())
+        finally:
+            connection.rollback()
+            connection.close()
+
+    def test_restore_lock_rejects_invalid_plan_and_release_tokens(self):
+        with self.assertRaisesRegex(ValueError, "plan ID"):
+            acquire_restore_lock("../unsafe")
+        with self.assertRaisesRegex(ValueError, "lock token"):
+            release_restore_lock("not-a-token")
 
     def test_restore_execution_preflight_verifies_source_stage_rollback_and_live_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
