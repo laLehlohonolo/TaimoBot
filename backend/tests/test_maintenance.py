@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.maintenance import (
+    cleanup_expired_backups,
     create_verified_backup,
     is_maintenance_window,
     verify_restore_candidate,
@@ -91,6 +93,69 @@ class DailyMaintenanceTests(unittest.TestCase):
             for backup_path in (first_path, second_path):
                 with sqlite3.connect(backup_path) as connection:
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_backup_retention_dry_run_then_deletes_only_expired_verified_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            old_backup = root / "taimobot-20241101-230000-old.sqlite3"
+            recent_backup = root / "taimobot-20261115-230000-recent.sqlite3"
+            newest_backup = root / "taimobot-20261116-230000-newest.sqlite3"
+
+            for backup_path in (old_backup, recent_backup, newest_backup):
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+                    connection.execute("INSERT INTO sample VALUES (?)", (backup_path.name,))
+
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            recent_time = now.timestamp() - 1 * 24 * 60 * 60
+            newest_time = now.timestamp() - 60
+            os.utime(old_backup, (old_time, old_time))
+            os.utime(recent_backup, (recent_time, recent_time))
+            os.utime(newest_backup, (newest_time, newest_time))
+
+            preview = cleanup_expired_backups(
+                backup_dir=root, now=now, dry_run=True,
+                live_database_path=self.original_db_path,
+            )
+            self.assertEqual(preview["status"], "BACKUP_RETENTION_DRY_RUN")
+            self.assertEqual(preview["candidates"], [old_backup.name])
+            self.assertEqual(preview["deleted"], [])
+            self.assertTrue(old_backup.exists())
+
+            result = cleanup_expired_backups(
+                backup_dir=root, now=now, dry_run=False,
+                live_database_path=self.original_db_path,
+            )
+            self.assertEqual(result["deleted"], [old_backup.name])
+            self.assertFalse(old_backup.exists())
+            self.assertTrue(recent_backup.exists())
+            self.assertTrue(newest_backup.exists())
+            self.assertEqual(result["newest_verified_backup"], newest_backup.name)
+
+    def test_backup_retention_fails_safe_without_recent_verified_recovery_point(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            old_backup = root / "taimobot-20241101-230000-old.sqlite3"
+            with sqlite3.connect(old_backup) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            os.utime(old_backup, (old_time, old_time))
+
+            result = cleanup_expired_backups(
+                backup_dir=root, now=now, dry_run=False,
+                live_database_path=self.original_db_path,
+            )
+            self.assertFalse(result["recent_recovery_point_verified"])
+            self.assertEqual(result["candidates"], [])
+            self.assertEqual(result["deleted"], [])
+            self.assertTrue(old_backup.exists())
+
+    def test_backup_retention_rejects_less_than_one_year(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "at least 365 days"):
+                cleanup_expired_backups(backup_dir=Path(directory), retention_days=30)
 
     def test_restore_verification_uses_staging_and_does_not_replace_live_db(self):
         with tempfile.TemporaryDirectory() as directory:
