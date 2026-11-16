@@ -7,7 +7,11 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from .database import init_db, get_connection
-from .maintenance_scheduler import maintenance_scheduler, get_maintenance_status
+from .maintenance_scheduler import (
+    maintenance_scheduler,
+    get_maintenance_status,
+    run_maintenance_for_date,
+)
 from .maintenance import is_maintenance_window
 from .cors import configure_cors
 from .risk import (
@@ -148,6 +152,11 @@ class CopyRelationshipRequest(BaseModel):
     source_account_id: str = Field(min_length=1, max_length=100)
 
 
+class MaintenanceRetryRequest(BaseModel):
+    run_date: date
+    retry_mode: Literal["FAILED", "STALE_RUNNING"]
+
+
 class StrategyKnowledgeRequest(BaseModel):
     name: str = Field(min_length=3, max_length=100)
     category: str = Field(min_length=3, max_length=40, pattern=r"^[A-Z][A-Z0-9_]*$")
@@ -176,6 +185,41 @@ def health_check():
         "api": "TaimoBot",
         "trading_mode": "paper"
     }
+
+
+@app.post("/maintenance/retry")
+def retry_maintenance(request: MaintenanceRetryRequest, user=Depends(current_user)):
+    """Admin-only, explicit recovery for a failed or stale maintenance run."""
+    require_admin(user)
+    result = run_maintenance_for_date(
+        request.run_date,
+        retry_failed=request.retry_mode == "FAILED",
+        retry_stale_running=request.retry_mode == "STALE_RUNNING",
+    )
+
+    response = {
+        "status": result["status"],
+        "run_date": result.get("run_date", request.run_date.isoformat()),
+        "operator_triggered": True,
+    }
+    if result.get("reason"):
+        response["reason"] = result["reason"]
+    if result.get("error"):
+        response["error"] = result["error"]
+    if result.get("backup"):
+        response["backup"] = {
+            "status": result["backup"].get("status"),
+            "integrity_check": result["backup"].get("integrity_check"),
+            "created_at": result["backup"].get("created_at"),
+            "timezone": result["backup"].get("timezone"),
+        }
+    if result.get("restore_verification"):
+        response["restore_verification"] = {
+            "status": result["restore_verification"].get("status"),
+            "integrity_check": result["restore_verification"].get("integrity_check"),
+            "live_database_replaced": False,
+        }
+    return response
 
 
 @app.get("/safety/status")
