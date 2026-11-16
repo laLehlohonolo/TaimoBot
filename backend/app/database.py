@@ -173,6 +173,13 @@ def init_db():
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS participant_milestones (
+                user_id TEXT PRIMARY KEY,
+                joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                first_trade_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS auth_login_attempts (
                 email TEXT PRIMARY KEY,
                 attempts INTEGER NOT NULL DEFAULT 0,
