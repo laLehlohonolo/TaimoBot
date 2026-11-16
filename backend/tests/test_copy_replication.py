@@ -1003,8 +1003,10 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(close_result["status"], "CLOSED")
         self.assertEqual(close_result["closed_copies"], 1)
         self.assertEqual(copy_result["successful_copies"], 0)
-        self.assertEqual(copy_result["copies"][0]["status"], "PENDING")
-        self.assertTrue(copy_result["copies"][0]["recovery_deferred"])
+        self.assertEqual(copy_result["copies"][0]["status"], "CLOSED")
+        self.assertEqual(
+            copy_result["copies"][0]["copied_trade_id"], copied_ids[0]
+        )
 
         with database.get_connection() as connection:
             source_status = connection.execute(
