@@ -48,6 +48,17 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.assertNotIn("StrongPassphrase123!", row["password_hash"])
         self.assertTrue(row["password_hash"].startswith("pbkdf2_sha256$"))
 
+    def test_registration_creates_participant_joining_milestone(self):
+        user = register_user("milestone@example.com", "StrongPassphrase123!")
+        with database.get_connection() as connection:
+            milestone = connection.execute(
+                "SELECT joined_at, first_trade_at FROM participant_milestones WHERE user_id = ?",
+                (user["user_id"],)
+            ).fetchone()
+        self.assertIsNotNone(milestone)
+        self.assertTrue(milestone["joined_at"])
+        self.assertIsNone(milestone["first_trade_at"])
+
     def test_duplicate_email_is_rejected_case_insensitively(self):
         register_user("same@example.com", "StrongPassphrase123!")
         with self.assertRaises(AuthenticationError):
