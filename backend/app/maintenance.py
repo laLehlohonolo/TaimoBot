@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from . import database
@@ -38,8 +39,12 @@ def create_verified_backup(
 
     local_now = (now or datetime.now(SAST)).astimezone(SAST)
     stamp = local_now.strftime("%Y%m%d-%H%M%S")
-    final_path = destination_dir / f"taimobot-{stamp}.sqlite3"
-    temporary_path = destination_dir / f".{final_path.name}.tmp"
+    # Multiple workers or operator retries can start within the same second.
+    # Give every backup attempt its own final and temporary path so SQLite
+    # copies cannot overwrite or delete one another during publication.
+    attempt_id = uuid4().hex
+    final_path = destination_dir / f"taimobot-{stamp}-{attempt_id}.sqlite3"
+    temporary_path = destination_dir / f".taimobot-{stamp}-{attempt_id}.tmp"
 
     try:
         with sqlite3.connect(str(source), timeout=30) as live:
