@@ -11,6 +11,7 @@ from app.maintenance import (
     cleanup_expired_backups,
     create_verified_backup,
     is_maintenance_window,
+    inspect_recovery_candidates,
     verify_restore_candidate,
 )
 from app import database
@@ -497,6 +498,34 @@ class DailyMaintenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "at least 365 days"):
                 cleanup_expired_backups(backup_dir=Path(directory), retention_days=30)
+
+    def test_recovery_inventory_checks_integrity_schema_and_foreign_keys_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid_backup = root / "taimobot-20261116-230000-valid.sqlite3"
+            incomplete_backup = root / "taimobot-20261116-220000-incomplete.sqlite3"
+            corrupt_backup = root / "taimobot-20261116-210000-corrupt.sqlite3"
+
+            with sqlite3.connect(database.DB_PATH) as source, sqlite3.connect(valid_backup) as target:
+                source.backup(target)
+            with sqlite3.connect(incomplete_backup) as connection:
+                connection.execute("CREATE TABLE users (user_id TEXT PRIMARY KEY)")
+            corrupt_backup.write_bytes(b"not a sqlite database")
+
+            before_live_bytes = database.DB_PATH.read_bytes()
+            result = inspect_recovery_candidates(root)
+            by_name = {item["file_name"]: item for item in result["candidates"]}
+
+            self.assertEqual(result["status"], "RECOVERY_INVENTORY_COMPLETE")
+            self.assertEqual(result["candidate_count"], 3)
+            self.assertTrue(by_name[valid_backup.name]["restore_ready"])
+            self.assertEqual(by_name[valid_backup.name]["integrity_check"], "ok")
+            self.assertFalse(by_name[incomplete_backup.name]["restore_ready"])
+            self.assertIn("TAIMOBOT_SCHEMA_INCOMPLETE", by_name[incomplete_backup.name]["issues"])
+            self.assertFalse(by_name[corrupt_backup.name]["restore_ready"])
+            self.assertIn("BACKUP_UNREADABLE", by_name[corrupt_backup.name]["issues"])
+            self.assertEqual(database.DB_PATH.read_bytes(), before_live_bytes)
+            self.assertFalse(result["live_database_replaced"])
 
     def test_restore_verification_uses_staging_and_does_not_replace_live_db(self):
         with tempfile.TemporaryDirectory() as directory:
