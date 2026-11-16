@@ -260,7 +260,12 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(copy_status, "FAILED")
 
 
-    def _create_pending_copy_execution(self, source_trade_id, updated_at_sql="CURRENT_TIMESTAMP"):
+    def _create_pending_copy_execution(
+        self,
+        source_trade_id,
+        updated_at_sql="CURRENT_TIMESTAMP",
+        lease_expires_at_sql="datetime('now', '+5 minutes')"
+    ):
         with database.get_connection() as connection:
             relationship_id = connection.execute(
                 "SELECT relationship_id FROM copy_relationships"
@@ -269,11 +274,16 @@ class CopyTradeReplicationTests(unittest.TestCase):
                 f"""
                 INSERT INTO copy_executions (
                     copy_execution_id, relationship_id, source_trade_id,
-                    status, updated_at
+                    status, updated_at, lease_token, lease_expires_at
                 )
-                VALUES (?, ?, ?, 'PENDING', {updated_at_sql})
+                VALUES (?, ?, ?, 'PENDING', {updated_at_sql}, ?, {lease_expires_at_sql})
                 """,
-                ("PENDING-" + source_trade_id, relationship_id, source_trade_id)
+                (
+                    "PENDING-" + source_trade_id,
+                    relationship_id,
+                    source_trade_id,
+                    "TEST-LEASE-" + source_trade_id
+                )
             )
         return relationship_id
 
@@ -331,6 +341,62 @@ class CopyTradeReplicationTests(unittest.TestCase):
             ).fetchone()["total"]
 
         self.assertEqual(count, 0)
+
+    def test_expired_lease_reclaim_rejects_old_worker_token(self):
+        source = self.create_source_trade("SOURCE-LEASE-OWNER-ROTATION")
+        relationship_id = self._create_pending_copy_execution(
+            source["trade_id"],
+            "datetime('now', '-10 minutes')",
+            "datetime('now', '-10 minutes')"
+        )
+        old_token = "TEST-LEASE-" + source["trade_id"]
+        original_open = copy_trading.open_paper_trade
+        old_worker_rejections = []
+
+        def verify_old_worker_is_fenced(**kwargs):
+            with self.assertRaisesRegex(ValueError, "lease token"):
+                original_open(
+                    account_id="FOLLOWER",
+                    client_order_id="OLD-WORKER-" + source["trade_id"],
+                    side="BUY",
+                    entry_price=4000,
+                    stop_loss=3990,
+                    symbol="XAUUSD",
+                    copy_source_trade_id=source["trade_id"],
+                    copy_relationship_id=relationship_id,
+                    copy_execution_token=old_token
+                )
+            old_worker_rejections.append(True)
+            self.assertNotEqual(kwargs["copy_execution_token"], old_token)
+            return original_open(**kwargs)
+
+        with patch(
+            "app.copy_trading.open_paper_trade",
+            side_effect=verify_old_worker_is_fenced
+        ):
+            result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "COPIED")
+        self.assertEqual(old_worker_rejections, [True])
+
+        with database.get_connection() as connection:
+            executions = connection.execute(
+                """
+                SELECT status, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source["trade_id"])
+            ).fetchone()
+            follower_trades = connection.execute(
+                "SELECT COUNT(*) AS total FROM trades WHERE account_id = 'FOLLOWER'"
+            ).fetchone()["total"]
+
+        self.assertEqual(executions["status"], "COPIED")
+        self.assertIsNone(executions["lease_token"])
+        self.assertIsNone(executions["lease_expires_at"])
+        self.assertEqual(follower_trades, 1)
 
     def test_paused_or_stopped_relationship_finalizes_pending_without_opening_copy(self):
         for index, status in enumerate(("PAUSED", "STOPPED"), start=1):
@@ -578,6 +644,7 @@ class CopyTradeReplicationTests(unittest.TestCase):
         source = self.create_source_trade("SOURCE-RECOVERY-STALE")
         self._create_pending_copy_execution(
             source["trade_id"],
+            "datetime('now', '-10 minutes')",
             "datetime('now', '-10 minutes')"
         )
 
