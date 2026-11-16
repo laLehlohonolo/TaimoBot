@@ -245,6 +245,35 @@ def _copy_for_relationship(relationship, source):
                 # that trade while its lease is still live: the lease owner is
                 # responsible for the outcome. Recovery is safe only after the
                 # lease expires (or when no lease owner remains).
+                if current["relationship_status"] != "ACTIVE":
+                    reason = (
+                        "Copy relationship is "
+                        + current["relationship_status"]
+                        + "; pending copy was not opened."
+                    )
+                    connection.execute(
+                        """
+                        UPDATE copy_executions
+                        SET status = 'FAILED',
+                            failure_reason = ?,
+                            lease_token = NULL,
+                            lease_expires_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE relationship_id = ?
+                          AND source_trade_id = ?
+                          AND status = 'PENDING'
+                        """,
+                        (reason, relationship_id, source_trade_id)
+                    )
+                    return {
+                        "relationship_id": relationship_id,
+                        "follower_account_id": follower_id,
+                        "status": "FAILED",
+                        "copied_trade_id": None,
+                        "failure_reason": reason,
+                        "duplicate_prevented": True
+                    }
+
                 live_foreign_lease = (
                     current["lease_token"]
                     and current["lease_token"] != execution_token
@@ -329,35 +358,6 @@ def _copy_for_relationship(relationship, source):
                         "copied_trade_id": existing_trade["trade_id"],
                         "duplicate_prevented": True,
                         "recovered": True
-                    }
-
-                if current["relationship_status"] != "ACTIVE":
-                    reason = (
-                        "Copy relationship is "
-                        + current["relationship_status"]
-                        + "; pending copy was not opened."
-                    )
-                    connection.execute(
-                        """
-                        UPDATE copy_executions
-                        SET status = 'FAILED',
-                            failure_reason = ?,
-                            lease_token = NULL,
-                            lease_expires_at = NULL,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE relationship_id = ?
-                          AND source_trade_id = ?
-                          AND status = 'PENDING'
-                        """,
-                        (reason, relationship_id, source_trade_id)
-                    )
-                    return {
-                        "relationship_id": relationship_id,
-                        "follower_account_id": follower_id,
-                        "status": "FAILED",
-                        "copied_trade_id": None,
-                        "failure_reason": reason,
-                        "duplicate_prevented": True
                     }
 
                 # A live lease is not stealable just because a process restarted.
