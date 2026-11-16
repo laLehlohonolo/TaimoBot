@@ -156,7 +156,11 @@ def run_maintenance_for_date(
         )
         connection.commit()
 
-    staging_path = BACKUP_DIR / "recovery-staging" / f"candidate-{day_key}.sqlite3"
+    staging_path = (
+        BACKUP_DIR
+        / "recovery-staging"
+        / f"candidate-{day_key}-{claim_token}.sqlite3"
+    )
     try:
         backup_result = create_verified_backup()
         restore_result = verify_restore_candidate(
