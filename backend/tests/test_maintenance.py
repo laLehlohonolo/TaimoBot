@@ -555,5 +555,73 @@ class DailyMaintenanceTests(unittest.TestCase):
                 )
 
 
+
+    def test_admin_restore_preparation_creates_verified_pre_restore_backup_and_isolated_plan(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            selected = backup_dir / "taimobot-valid.sqlite3"
+            selected.write_bytes(b"selected-backup")
+            pre_restore = backup_dir / "taimobot-pre-restore.sqlite3"
+            pre_restore.write_bytes(b"pre-restore-backup")
+
+            with patch("app.main.BACKUP_DIR", backup_dir), patch(
+                "app.main.require_admin"
+            ), patch(
+                "app.main.inspect_recovery_candidates",
+                return_value={
+                    "status": "RECOVERY_INVENTORY_COMPLETE",
+                    "candidates": [{"file_name": selected.name, "restore_ready": True}],
+                },
+            ), patch(
+                "app.main.create_verified_backup",
+                return_value={"status": "BACKUP_VERIFIED", "backup_file": str(pre_restore)},
+            ) as create_backup, patch(
+                "app.main.verify_restore_candidate",
+                return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+            ) as verify_candidate:
+                result = prepare_maintenance_restore(
+                    MaintenanceRestorePrepareRequest(
+                        backup_file_name=selected.name,
+                        confirm_preparation=True,
+                    ),
+                    {"email": "ops@example.com"},
+                )
+
+            self.assertEqual(result["status"], "RESTORE_PREPARED")
+            self.assertTrue(result["selected_backup_verified"])
+            self.assertTrue(result["pre_restore_backup_verified"])
+            self.assertTrue(result["staged_candidate_verified"])
+            self.assertTrue(result["approval_required"])
+            self.assertFalse(result["live_database_replaced"])
+            create_backup.assert_called_once()
+            verify_candidate.assert_called_once()
+            with database.get_connection() as connection:
+                plan = connection.execute(
+                    "SELECT status, pre_restore_backup_file FROM maintenance_restore_plans WHERE plan_id = ?",
+                    (result["plan_id"],),
+                ).fetchone()
+            self.assertEqual(plan["status"], "PREPARED")
+            self.assertEqual(plan["pre_restore_backup_file"], str(pre_restore.resolve()))
+
+    def test_admin_restore_preparation_requires_explicit_confirmation(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+
+        with patch("app.main.require_admin"):
+            with self.assertRaises(HTTPException) as rejected:
+                prepare_maintenance_restore(
+                    MaintenanceRestorePrepareRequest(
+                        backup_file_name="taimobot-valid.sqlite3",
+                        confirm_preparation=False,
+                    ),
+                    {"email": "ops@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 400)
+
+
+
 if __name__ == "__main__":
     unittest.main()
