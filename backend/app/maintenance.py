@@ -160,13 +160,32 @@ def cleanup_expired_backups(
     verified: list[tuple[Path, float, tuple[int, int, int, int]]] = []
     invalid: list[str] = []
 
-    for candidate in directory.glob("taimobot-*.sqlite3"):
-        if candidate.is_symlink() or not candidate.is_file():
-            continue
-        if candidate.resolve() == live_path:
+    # If the directory cannot be enumerated reliably, do not make any
+    # deletion decisions from a partial view of the recovery set.
+    try:
+        directory_entries = list(directory.iterdir())
+    except OSError as error:
+        return {
+            "status": "BACKUP_RETENTION_BLOCKED",
+            "reason": "Backup directory could not be inspected safely.",
+            "metadata_error": str(error)[:300],
+            "dry_run": dry_run,
+            "retention_days": retention_days,
+            "candidates": [],
+            "deleted": [],
+            "live_database_replaced": False,
+        }
+
+    for candidate in directory_entries:
+        if not candidate.name.startswith("taimobot-") or not candidate.name.endswith(".sqlite3"):
             continue
         try:
-            with sqlite3.connect(f"file:{candidate.resolve()}?mode=ro", uri=True, timeout=10) as check:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            resolved_candidate = candidate.resolve()
+            if resolved_candidate == live_path:
+                continue
+            with sqlite3.connect(f"file:{resolved_candidate}?mode=ro", uri=True, timeout=10) as check:
                 integrity = check.execute("PRAGMA integrity_check").fetchone()
             if not integrity or integrity[0] != "ok":
                 invalid.append(candidate.name)
@@ -175,6 +194,7 @@ def cleanup_expired_backups(
             identity = (file_stat.st_dev, file_stat.st_ino, file_stat.st_size, file_stat.st_mtime_ns)
             verified.append((candidate, file_stat.st_mtime, identity))
         except (sqlite3.Error, OSError, ValueError):
+            # An unreadable or unstable file is never considered for deletion.
             invalid.append(candidate.name)
 
     verified.sort(key=lambda item: (item[1], item[0].name), reverse=True)
