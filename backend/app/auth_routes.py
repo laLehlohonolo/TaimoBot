@@ -151,3 +151,32 @@ def require_admin(user):
             detail="Administrator privileges required."
         )
     return user
+
+
+@router.get("/participant/timeline")
+def participant_timeline(user=Depends(current_user)):
+    """Return the authenticated participant's immutable joining and first-trade milestones."""
+    from .database import get_connection
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT users.created_at AS joined_at,
+                   participant_milestones.first_trade_at
+            FROM users
+            LEFT JOIN participant_milestones
+              ON participant_milestones.user_id = users.user_id
+            WHERE users.user_id = ?
+            """,
+            (user["user_id"],)
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Participant record not found.")
+
+    return {
+        "joined_at": row["joined_at"],
+        "first_trade_at": row["first_trade_at"],
+        "loyalty_milestone_years": 10,
+        "loyalty_reward_status": "TO_BE_DETERMINED",
+    }
