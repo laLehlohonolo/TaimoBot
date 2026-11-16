@@ -109,6 +109,48 @@ class CopyTradeReplicationTests(unittest.TestCase):
             ).fetchone()["total"]
         self.assertEqual(count, 1)
 
+    def test_concurrent_replication_of_same_source_creates_one_follower_trade(self):
+        source = self.create_source_trade(order_id="SOURCE-SAME-TRADE-RACE")
+        start = Barrier(2)
+
+        def replicate():
+            start.wait()
+            return replicate_open_trade(source["trade_id"])
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: replicate(), range(2)))
+
+        self.assertEqual(
+            sum(result["successful_copies"] for result in results),
+            1
+        )
+
+        with database.get_connection() as connection:
+            trades = connection.execute(
+                """
+                SELECT trade_id, copied_from_trade_id, status
+                FROM trades
+                WHERE account_id = 'FOLLOWER'
+                  AND copied_from_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchall()
+            executions = connection.execute(
+                """
+                SELECT status, copied_trade_id, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchall()
+
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(executions[0]["status"], "COPIED")
+        self.assertEqual(executions[0]["copied_trade_id"], trades[0]["trade_id"])
+        self.assertIsNone(executions[0]["lease_token"])
+        self.assertIsNone(executions[0]["lease_expires_at"])
+
     def test_paused_relationship_receives_no_copy(self):
         source = self.create_source_trade()
         with database.get_connection() as connection:
