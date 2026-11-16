@@ -726,6 +726,8 @@ def verify_approved_restore_plan(
         "staged_candidate_verified": True,
         "rollback_backup_verified": True,
         "live_database_verified": True,
+        "sqlite_sidecars": readiness.get("sqlite_sidecars", {"status": "NOT_REPORTED", "sidecars": []}),
+        "sidecar_handling_required_after_lock": readiness.get("sidecar_handling_required_after_lock", True),
         "execution_authorized": False,
         "live_database_replaced": False,
         "trading_mode": "paper",
