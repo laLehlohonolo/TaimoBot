@@ -157,7 +157,7 @@ def cleanup_expired_backups(
             "deleted": [],
             "live_database_replaced": False,
         }
-    verified: list[tuple[Path, float]] = []
+    verified: list[tuple[Path, float, tuple[int, int, int, int]]] = []
     invalid: list[str] = []
 
     for candidate in directory.glob("taimobot-*.sqlite3"):
@@ -171,16 +171,18 @@ def cleanup_expired_backups(
             if not integrity or integrity[0] != "ok":
                 invalid.append(candidate.name)
                 continue
-            verified.append((candidate, candidate.stat().st_mtime))
+            file_stat = candidate.stat(follow_symlinks=False)
+            identity = (file_stat.st_dev, file_stat.st_ino, file_stat.st_size, file_stat.st_mtime_ns)
+            verified.append((candidate, file_stat.st_mtime, identity))
         except (sqlite3.Error, OSError, ValueError):
             invalid.append(candidate.name)
 
     verified.sort(key=lambda item: (item[1], item[0].name), reverse=True)
     newest_verified = verified[0][0] if verified else None
-    has_recent_recovery_point = any(timestamp >= cutoff for _, timestamp in verified)
+    has_recent_recovery_point = any(timestamp >= cutoff for _, timestamp, _ in verified)
 
     candidates = [
-        path for path, timestamp in verified
+        path for path, timestamp, _ in verified
         if timestamp < cutoff
         and path != newest_verified
         and path.resolve() not in protected_paths
@@ -190,16 +192,34 @@ def cleanup_expired_backups(
 
     deleted: list[str] = []
     if not dry_run:
+        original_identities = {path: identity for path, _, identity in verified}
         for candidate in candidates:
-            # Re-check immediately before deletion; fail closed if the file
-            # changed, became a symlink, or is no longer a valid SQLite DB.
-            if candidate.is_symlink() or not candidate.is_file():
-                continue
+            # Re-check identity, age and integrity immediately before deletion.
+            # A replaced file must not inherit the older file's expiry decision.
             try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                before = candidate.stat(follow_symlinks=False)
+                before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                if (
+                    before_identity != original_identities[candidate]
+                    or before.st_mtime >= cutoff
+                    or candidate.resolve() == live_path
+                    or candidate.resolve() in protected_paths
+                ):
+                    continue
                 with sqlite3.connect(f"file:{candidate.resolve()}?mode=ro", uri=True, timeout=10) as check:
                     integrity = check.execute("PRAGMA integrity_check").fetchone()
                 if not integrity or integrity[0] != "ok":
                     invalid.append(candidate.name)
+                    continue
+                after = candidate.stat(follow_symlinks=False)
+                after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                if (
+                    candidate.is_symlink()
+                    or after_identity != original_identities[candidate]
+                    or after.st_mtime >= cutoff
+                ):
                     continue
                 candidate.unlink()
                 deleted.append(candidate.name)
