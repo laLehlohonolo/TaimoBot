@@ -149,6 +149,57 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(row[1], first["backup"]["backup_file"])
 
 
+    def test_completion_and_audit_roll_back_together_when_audit_write_fails(self):
+        day = date(2026, 11, 17)
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+
+        def fake_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_file.write_bytes(b"verified-test-backup")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_completion_audit
+                BEFORE UPDATE OF status ON maintenance_run_attempts
+                WHEN NEW.status = 'COMPLETE'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated audit write failure');
+                END
+                """
+            )
+
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup", side_effect=fake_backup
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+        ):
+            result = run_maintenance_for_date(day)
+
+        self.assertEqual(result["status"], "MAINTENANCE_FAILED")
+        self.assertIn("simulated audit write failure", result["error"])
+
+        with database.get_connection() as connection:
+            run = connection.execute(
+                "SELECT status, backup_file FROM maintenance_runs WHERE run_date = ?",
+                (day.isoformat(),),
+            ).fetchone()
+            attempt = connection.execute(
+                """
+                SELECT status, error_summary
+                FROM maintenance_run_attempts WHERE run_date = ?
+                """,
+                (day.isoformat(),),
+            ).fetchone()
+
+        self.assertEqual(run["status"], "FAILED")
+        self.assertIsNone(run["backup_file"])
+        self.assertEqual(attempt["status"], "FAILED")
+        self.assertIn("simulated audit write failure", attempt["error_summary"])
+
     def test_reclaimed_claim_fences_off_stale_worker_completion(self):
         day = date(2026, 11, 16)
         backup_dir = self.root / "backups"
