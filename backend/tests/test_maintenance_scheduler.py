@@ -219,23 +219,12 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
     def test_admin_retry_endpoint_requires_admin_and_reports_verified_recovery(self):
         day = date(2026, 11, 18)
-        with database.get_connection() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS maintenance_runs (
-                    run_date TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    completed_at TEXT,
-                    backup_file TEXT,
-                    error_summary TEXT
-                )
-                """
-            )
-            connection.execute(
-                "INSERT INTO maintenance_runs (run_date, status, started_at) VALUES (?, 'FAILED', ?)",
-                (day.isoformat(), datetime.now(SAST).isoformat()),
-            )
+        with patch(
+            "app.maintenance_scheduler.create_verified_backup",
+            side_effect=RuntimeError("seed failed maintenance run"),
+        ):
+            seeded = run_maintenance_for_date(day)
+        self.assertEqual(seeded["status"], "MAINTENANCE_FAILED")
 
         with patch.dict("os.environ", {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}), patch(
             "app.maintenance_scheduler.create_verified_backup"
@@ -286,6 +275,8 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         day = date(2026, 11, 19)
         admin = {"email": "ops@example.com"}
         with patch.dict("os.environ", {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
+            # The endpoint must safely return 404 even before the scheduler
+            # has ever created its maintenance_runs table.
             with self.assertRaises(HTTPException) as missing:
                 retry_maintenance(
                     MaintenanceRetryRequest(run_date=day, retry_mode="FAILED"),
@@ -293,23 +284,12 @@ class MaintenanceSchedulerTests(unittest.TestCase):
                 )
             self.assertEqual(missing.exception.status_code, 404)
 
-            with database.get_connection() as connection:
-                connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS maintenance_runs (
-                        run_date TEXT PRIMARY KEY,
-                        status TEXT NOT NULL,
-                        started_at TEXT NOT NULL,
-                        completed_at TEXT,
-                        backup_file TEXT,
-                        error_summary TEXT
-                    )
-                    """
-                )
-                connection.execute(
-                    "INSERT INTO maintenance_runs (run_date, status, started_at) VALUES (?, 'FAILED', ?)",
-                    (day.isoformat(), datetime.now(SAST).isoformat()),
-                )
+            with patch(
+                "app.maintenance_scheduler.create_verified_backup",
+                side_effect=RuntimeError("seed failed maintenance run"),
+            ):
+                seeded = run_maintenance_for_date(day)
+            self.assertEqual(seeded["status"], "MAINTENANCE_FAILED")
 
             with self.assertRaises(HTTPException) as mismatch:
                 retry_maintenance(
