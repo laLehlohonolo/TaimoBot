@@ -161,6 +161,48 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(call_order, ["backup", "restore", "retention"])
         self.assertEqual(result["backup_retention"]["status"], "BACKUP_RETENTION_COMPLETE")
 
+    def test_blocked_retention_marks_maintenance_run_and_attempt_failed(self):
+        day = date(2026, 11, 22)
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+
+        def fake_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(backup_file) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup", side_effect=fake_backup
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+        ), patch(
+            "app.maintenance_scheduler.cleanup_expired_backups",
+            return_value={
+                "status": "BACKUP_RETENTION_BLOCKED",
+                "candidates": [],
+                "deleted": [],
+            },
+        ):
+            result = run_maintenance_for_date(day)
+
+        self.assertEqual(result["status"], "MAINTENANCE_FAILED")
+        self.assertIn("did not complete safely", result["error"])
+        with database.get_connection() as connection:
+            run = connection.execute(
+                "SELECT status, error_summary FROM maintenance_runs WHERE run_date = ?",
+                (day.isoformat(),),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT status, error_summary FROM maintenance_run_attempts WHERE run_date = ?",
+                (day.isoformat(),),
+            ).fetchone()
+        self.assertEqual(run["status"], "FAILED")
+        self.assertEqual(attempt["status"], "FAILED")
+        self.assertIn("BACKUP_RETENTION_BLOCKED", run["error_summary"])
+        self.assertIn("BACKUP_RETENTION_BLOCKED", attempt["error_summary"])
+
     def test_retention_cleanup_is_skipped_when_restore_verification_fails(self):
         day = date(2026, 11, 18)
         backup_dir = self.root / "backups"
