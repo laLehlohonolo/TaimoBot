@@ -40,11 +40,13 @@ def run_maintenance_for_date(
     run_date: date | None = None,
     *,
     retry_failed: bool = False,
+    retry_stale_running: bool = False,
 ) -> dict:
     """Run one backup + isolated restore verification per SAST day.
 
-    retry_failed is explicit operator-controlled behavior; the scheduler never
-    sets it. A per-attempt token fences off workers whose lease was reclaimed.
+    Failed and stale-running claims require explicit operator-controlled
+    retries; the scheduler never sets either flag. A per-attempt token fences
+    off workers whose claim was explicitly reclaimed.
     """
     now = datetime.now(SAST)
     day = run_date or now.date()
@@ -88,14 +90,19 @@ def run_maintenance_for_date(
                     "reason": f"Maintenance for {day_key} is already complete.",
                     "run_date": day_key,
                 }
-            if status == "RUNNING" and not _running_claim_is_stale(
-                existing["started_at"], now
-            ):
-                return {
-                    "status": "SKIPPED",
-                    "reason": f"Maintenance for {day_key} is already running.",
-                    "run_date": day_key,
-                }
+            if status == "RUNNING":
+                stale = _running_claim_is_stale(existing["started_at"], now)
+                if not stale or not retry_stale_running:
+                    reason = (
+                        "an explicit stale-run recovery is required"
+                        if stale
+                        else "a maintenance run is already active"
+                    )
+                    return {
+                        "status": "SKIPPED",
+                        "reason": f"Maintenance for {day_key}: {reason}.",
+                        "run_date": day_key,
+                    }
             if status == "FAILED" and not retry_failed:
                 return {
                     "status": "SKIPPED",
