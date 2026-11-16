@@ -123,3 +123,36 @@ td{color:#c6d8cc}
 .strategy-disclaimer{font-size:9px;line-height:1.6;color:#718a7a;margin:14px 0 0}
 .notice.success{background:rgba(54,130,83,.12);border:1px solid rgba(90,185,130,.25);color:#9bd8af}
 @media(max-width:720px){.strategy-library{padding:17px}.strategy-list{grid-template-columns:1fr}.strategy-heading{flex-direction:column}.strategy-form{grid-template-columns:1fr}.strategy-form>div:first-child,.strategy-form button{grid-column:auto}}
+
+
+/* Participant welcome and milestone journey */
+.participant-journey{margin:0 0 16px;padding:22px}
+.participant-journey h2{margin:0 0 5px}
+.participant-journey>.muted{margin:0}
+.journey-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:17px}
+.journey-grid article{display:flex;flex-direction:column;gap:7px;min-width:0;padding:15px;background:#091a12;border:1px solid rgba(145,181,156,.14);border-radius:9px}
+.journey-icon{font-size:20px;color:#83dca4}
+.journey-grid small{font-family:"DM Mono",monospace;font-size:9px;letter-spacing:.08em;color:#829b8b}
+.journey-grid strong{font-size:13px;color:#e2eee6;overflow-wrap:anywhere}
+.journey-grid article>span:last-child{font-size:10px;line-height:1.5;color:#91a99a}
+.welcome-overlay{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(2,10,7,.88);backdrop-filter:blur(9px);animation:welcome-fade .35s ease both}
+.welcome-card{position:relative;width:min(100%,470px);padding:38px 30px 30px;text-align:center;background:linear-gradient(150deg,#153b29,#0b1d14);border:1px solid rgba(111,211,150,.42);border-radius:18px;box-shadow:0 25px 90px rgba(0,0,0,.48);animation:welcome-rise .65s cubic-bezier(.2,.8,.2,1) both}
+.welcome-emblem{display:grid;place-items:center;width:64px;height:64px;margin:0 auto 22px;border:1px solid #75d69a;border-radius:19px;color:#a5f1bd;font-size:35px;font-weight:800;box-shadow:0 0 35px rgba(103,218,148,.22);animation:welcome-pulse 2.4s ease-in-out infinite}
+.welcome-card h2{font-size:clamp(25px,6vw,34px);margin:0 0 12px}
+.welcome-card h2 em{font-style:normal;color:#8ae2a9}
+.welcome-card>p:not(.eyebrow){color:#b0c8b8;font-size:13px;line-height:1.8;margin:0 auto 22px;max-width:340px}
+.welcome-signature{font-family:"DM Mono",monospace;font-size:9px;letter-spacing:.12em;color:#7fc99a;margin:0 0 23px}
+.welcome-card .primary-button{width:100%}
+.welcome-confetti{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+.welcome-confetti span{position:absolute;top:-10%;left:12%;color:#83dca4;font-size:23px;animation:welcome-fall 3.4s linear infinite}
+.welcome-confetti span:nth-child(2){left:29%;animation-delay:.7s;color:#c5a66b}
+.welcome-confetti span:nth-child(3){left:53%;animation-delay:1.3s}
+.welcome-confetti span:nth-child(4){left:73%;animation-delay:.3s;color:#c5a66b}
+.welcome-confetti span:nth-child(5){left:89%;animation-delay:1.8s}
+.welcome-confetti span:nth-child(6){left:42%;animation-delay:2.1s;color:#c5a66b}
+@keyframes welcome-fade{from{opacity:0}to{opacity:1}}
+@keyframes welcome-rise{from{opacity:0;transform:translateY(22px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes welcome-pulse{0%,100%{box-shadow:0 0 18px rgba(103,218,148,.15)}50%{box-shadow:0 0 38px rgba(103,218,148,.38)}}
+@keyframes welcome-fall{0%{transform:translateY(-5vh) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(110vh) rotate(260deg);opacity:0}}
+@media(max-width:650px){.journey-grid{grid-template-columns:1fr}.welcome-card{padding:30px 22px}}
+@media(prefers-reduced-motion:reduce){.welcome-overlay,.welcome-card,.welcome-emblem,.welcome-confetti span{animation:none!important}}
