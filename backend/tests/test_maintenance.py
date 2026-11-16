@@ -306,6 +306,30 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertTrue(old_backup.exists())
             self.assertTrue(recent_backup.exists())
 
+    def test_backup_retention_fails_closed_when_backup_directory_cannot_be_listed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            old_backup = root / "taimobot-20241101-230000-old.sqlite3"
+            recent_backup = root / "taimobot-20261116-110000-recent.sqlite3"
+            for backup_path in (old_backup, recent_backup):
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            os.utime(old_backup, (old_time, old_time))
+
+            with patch.object(Path, "iterdir", side_effect=PermissionError("permission denied")):
+                result = cleanup_expired_backups(
+                    backup_dir=root, now=now, dry_run=False,
+                    live_database_path=self.original_db_path,
+                )
+
+            self.assertEqual(result["status"], "BACKUP_RETENTION_BLOCKED")
+            self.assertEqual(result["candidates"], [])
+            self.assertEqual(result["deleted"], [])
+            self.assertTrue(old_backup.exists())
+            self.assertTrue(recent_backup.exists())
+
     def test_backup_retention_never_deletes_live_database_or_corrupt_backup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
