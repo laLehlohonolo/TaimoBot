@@ -133,6 +133,31 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertTrue(newest_backup.exists())
             self.assertEqual(result["newest_verified_backup"], newest_backup.name)
 
+    def test_backup_retention_keeps_backup_exactly_at_one_year_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            boundary_backup = root / "taimobot-20251116-120000-boundary.sqlite3"
+            recent_backup = root / "taimobot-20261116-110000-recent.sqlite3"
+            expired_backup = root / "taimobot-20251116-115959-expired.sqlite3"
+            for backup_path in (boundary_backup, recent_backup, expired_backup):
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+
+            cutoff = now.timestamp() - 365 * 24 * 60 * 60
+            os.utime(boundary_backup, (cutoff, cutoff))
+            os.utime(expired_backup, (cutoff - 1, cutoff - 1))
+
+            result = cleanup_expired_backups(
+                backup_dir=root, now=now, dry_run=False,
+                live_database_path=self.original_db_path,
+            )
+
+            self.assertEqual(result["deleted"], [expired_backup.name])
+            self.assertTrue(boundary_backup.exists())
+            self.assertTrue(recent_backup.exists())
+            self.assertFalse(expired_backup.exists())
+
     def test_backup_retention_fails_safe_without_recent_verified_recovery_point(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
