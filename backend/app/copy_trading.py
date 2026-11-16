@@ -164,12 +164,22 @@ def replicate_open_trade(source_trade_id):
 
         relationships = connection.execute(
             """
-            SELECT relationship_id, follower_account_id
-            FROM copy_relationships
-            WHERE source_account_id = ? AND status = 'ACTIVE'
-            ORDER BY created_at, relationship_id
+            SELECT cr.relationship_id, cr.follower_account_id, cr.status
+            FROM copy_relationships AS cr
+            WHERE cr.source_account_id = ?
+              AND (
+                    cr.status = 'ACTIVE'
+                    OR EXISTS (
+                        SELECT 1
+                        FROM copy_executions AS ce
+                        WHERE ce.relationship_id = cr.relationship_id
+                          AND ce.source_trade_id = ?
+                          AND ce.status = 'PENDING'
+                    )
+              )
+            ORDER BY cr.created_at, cr.relationship_id
             """,
-            (source["account_id"],)
+            (source["account_id"], source_trade_id)
         ).fetchall()
 
     results = [
@@ -201,9 +211,15 @@ def _copy_for_relationship(relationship, source):
     with transaction() as connection:
         current = connection.execute(
             """
-            SELECT status, copied_trade_id, failure_reason
-            FROM copy_executions
-            WHERE relationship_id = ? AND source_trade_id = ?
+            SELECT
+                ce.status,
+                ce.copied_trade_id,
+                ce.failure_reason,
+                cr.status AS relationship_status
+            FROM copy_executions AS ce
+            JOIN copy_relationships AS cr
+              ON cr.relationship_id = ce.relationship_id
+            WHERE ce.relationship_id = ? AND ce.source_trade_id = ?
             """,
             (relationship_id, source_trade_id)
         ).fetchone()
@@ -273,6 +289,36 @@ def _copy_for_relationship(relationship, source):
                         "copied_trade_id": existing_trade["trade_id"],
                         "duplicate_prevented": True,
                         "recovered": True
+                    }
+
+                # A paused/stopped relationship must not leave an uncommitted
+                # pending copy waiting for a lease timeout. A committed follower
+                # trade was reconciled above and remains protected/closable.
+                if current["relationship_status"] != "ACTIVE":
+                    reason = (
+                        "Copy relationship is "
+                        + current["relationship_status"]
+                        + "; pending copy was not opened."
+                    )
+                    connection.execute(
+                        """
+                        UPDATE copy_executions
+                        SET status = 'FAILED',
+                            failure_reason = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE relationship_id = ?
+                          AND source_trade_id = ?
+                          AND status = 'PENDING'
+                        """,
+                        (reason, relationship_id, source_trade_id)
+                    )
+                    return {
+                        "relationship_id": relationship_id,
+                        "follower_account_id": follower_id,
+                        "status": "FAILED",
+                        "copied_trade_id": None,
+                        "failure_reason": reason,
+                        "duplicate_prevented": True
                     }
 
                 # A PENDING row may belong to a live worker. Only reclaim it
