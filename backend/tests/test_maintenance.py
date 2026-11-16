@@ -152,6 +152,97 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertEqual(result["deleted"], [])
             self.assertTrue(old_backup.exists())
 
+    def test_backup_retention_preserves_latest_recorded_and_active_attempt_backups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            latest_recorded = root / "taimobot-20241101-230000-recorded.sqlite3"
+            active_attempt = root / "taimobot-20241102-230000-active.sqlite3"
+            expired_candidate = root / "taimobot-20241103-230000-expired.sqlite3"
+            recent_backup = root / "taimobot-20261116-110000-recent.sqlite3"
+            for backup_path in (latest_recorded, active_attempt, expired_candidate, recent_backup):
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            for backup_path in (latest_recorded, active_attempt, expired_candidate):
+                os.utime(backup_path, (old_time, old_time))
+
+            with database.get_connection() as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE maintenance_runs (
+                        run_date TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        backup_file TEXT,
+                        error_summary TEXT,
+                        run_token TEXT
+                    );
+                    CREATE TABLE maintenance_run_attempts (
+                        attempt_token TEXT PRIMARY KEY,
+                        run_date TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        backup_file TEXT,
+                        error_summary TEXT
+                    );
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO maintenance_runs (
+                        run_date, status, started_at, completed_at, backup_file
+                    ) VALUES ('2025-10-01', 'COMPLETE', '2025-10-01', '2025-10-01', ?)
+                    """,
+                    (str(latest_recorded),),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO maintenance_run_attempts (
+                        attempt_token, run_date, status, started_at, backup_file
+                    ) VALUES ('active-attempt', '2026-11-16', 'RUNNING', '2026-11-16', ?)
+                    """,
+                    (str(active_attempt),),
+                )
+
+            result = cleanup_expired_backups(
+                backup_dir=root, now=now, dry_run=False,
+                live_database_path=self.original_db_path,
+            )
+            self.assertEqual(result["deleted"], [expired_candidate.name])
+            self.assertTrue(latest_recorded.exists())
+            self.assertTrue(active_attempt.exists())
+            self.assertTrue(recent_backup.exists())
+
+    def test_backup_retention_fails_closed_when_maintenance_metadata_cannot_be_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            old_backup = root / "taimobot-20241101-230000-old.sqlite3"
+            recent_backup = root / "taimobot-20261116-110000-recent.sqlite3"
+            for backup_path in (old_backup, recent_backup):
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+            old_time = now.timestamp() - 400 * 24 * 60 * 60
+            os.utime(old_backup, (old_time, old_time))
+
+            with patch(
+                "app.maintenance.database.get_connection",
+                side_effect=sqlite3.OperationalError("metadata unavailable"),
+            ):
+                result = cleanup_expired_backups(
+                    backup_dir=root, now=now, dry_run=False,
+                    live_database_path=self.original_db_path,
+                )
+
+            self.assertEqual(result["status"], "BACKUP_RETENTION_BLOCKED")
+            self.assertEqual(result["candidates"], [])
+            self.assertEqual(result["deleted"], [])
+            self.assertTrue(old_backup.exists())
+            self.assertTrue(recent_backup.exists())
+
     def test_backup_retention_rejects_less_than_one_year(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "at least 365 days"):
