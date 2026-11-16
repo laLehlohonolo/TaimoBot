@@ -95,5 +95,39 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.assertEqual(row[1], first["backup"]["backup_file"])
 
 
+    def test_reclaimed_claim_fences_off_stale_worker_completion(self):
+        day = date(2026, 11, 16)
+        backup_dir = self.root / "backups"
+        backup_file = backup_dir / "verified.sqlite3"
+
+        def reclaim_claim_during_backup():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_file.write_bytes(b"verified-test-backup")
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE maintenance_runs SET run_token = ? WHERE run_date = ?",
+                    ("newer-worker-token", day.isoformat()),
+                )
+            return {"backup_file": str(backup_file), "status": "BACKUP_VERIFIED"}
+
+        with patch("app.maintenance_scheduler.BACKUP_DIR", backup_dir), patch(
+            "app.maintenance_scheduler.create_verified_backup",
+            side_effect=reclaim_claim_during_backup,
+        ), patch(
+            "app.maintenance_scheduler.verify_restore_candidate",
+            return_value={"status": "RESTORE_CANDIDATE_VERIFIED"},
+        ):
+            result = run_maintenance_for_date(day)
+
+        self.assertEqual(result["status"], "MAINTENANCE_SUPERSEDED")
+        with database.get_connection() as connection:
+            row = connection.execute(
+                "SELECT status, run_token FROM maintenance_runs WHERE run_date = ?",
+                (day.isoformat(),),
+            ).fetchone()
+        self.assertEqual(row["status"], "RUNNING")
+        self.assertEqual(row["run_token"], "newer-worker-token")
+
+
 if __name__ == "__main__":
     unittest.main()
