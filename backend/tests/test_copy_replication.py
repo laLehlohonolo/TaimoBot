@@ -329,6 +329,83 @@ class CopyTradeReplicationTests(unittest.TestCase):
             )
         return relationship_id
 
+    def test_worker_crash_after_follower_insert_is_recovered_without_duplicate(self):
+        source = self.create_source_trade("SOURCE-CRASH-AFTER-INSERT")
+        original_open = copy_trading.open_paper_trade
+
+        class SimulatedWorkerCrash(BaseException):
+            pass
+
+        def insert_follower_then_crash(**kwargs):
+            # The follower trade commits before open_paper_trade returns.
+            # Simulate process death before copy execution finalization.
+            copied = original_open(**kwargs)
+            raise SimulatedWorkerCrash(copied["trade_id"])
+
+        with patch(
+            "app.copy_trading.open_paper_trade",
+            side_effect=insert_follower_then_crash
+        ):
+            with self.assertRaises(SimulatedWorkerCrash):
+                replicate_open_trade(source["trade_id"])
+
+        with database.get_connection() as connection:
+            relationship_id = connection.execute(
+                "SELECT relationship_id FROM copy_relationships"
+            ).fetchone()["relationship_id"]
+            order_id = f"COPY-{relationship_id}-{source['trade_id']}"
+            pending = connection.execute(
+                """
+                SELECT status, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source["trade_id"])
+            ).fetchone()
+            inserted = connection.execute(
+                """
+                SELECT trade_id, copied_from_trade_id
+                FROM trades
+                WHERE account_id = 'FOLLOWER' AND client_order_id = ?
+                """,
+                (order_id,)
+            ).fetchone()
+
+        self.assertEqual(pending["status"], "PENDING")
+        self.assertIsNotNone(pending["lease_token"])
+        self.assertIsNotNone(pending["lease_expires_at"])
+        self.assertIsNotNone(inserted)
+        self.assertEqual(inserted["copied_from_trade_id"], source["trade_id"])
+
+        # Recovery must find the committed trade before considering lease expiry.
+        recovered = replicate_open_trade(source["trade_id"])
+        self.assertEqual(recovered["successful_copies"], 1)
+        self.assertTrue(recovered["copies"][0]["recovered"])
+        self.assertEqual(recovered["copies"][0]["copied_trade_id"], inserted["trade_id"])
+
+        with database.get_connection() as connection:
+            follower_rows = connection.execute(
+                """
+                SELECT trade_id FROM trades
+                WHERE account_id = 'FOLLOWER' AND client_order_id = ?
+                """,
+                (order_id,)
+            ).fetchall()
+            execution = connection.execute(
+                """
+                SELECT status, copied_trade_id, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source["trade_id"])
+            ).fetchone()
+
+        self.assertEqual(len(follower_rows), 1)
+        self.assertEqual(execution["status"], "COPIED")
+        self.assertEqual(execution["copied_trade_id"], inserted["trade_id"])
+        self.assertIsNone(execution["lease_token"])
+        self.assertIsNone(execution["lease_expires_at"])
+
     def test_pending_copy_recovers_existing_committed_follower_trade(self):
         source = self.create_source_trade("SOURCE-RECOVERY-EXISTING")
         relationship_id = self._create_pending_copy_execution(source["trade_id"])
