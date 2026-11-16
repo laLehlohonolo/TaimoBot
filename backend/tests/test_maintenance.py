@@ -196,6 +196,29 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertTrue(expired.exists())
             self.assertGreaterEqual(expired.stat().st_mtime, now.timestamp() - 1)
 
+    def test_backup_retention_reports_blocked_when_expired_backup_cannot_be_deleted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            now = datetime(2026, 11, 16, 12, 0, tzinfo=ZoneInfo("Africa/Johannesburg"))
+            expired = root / "taimobot-20241101-230000-expired.sqlite3"
+            recent = root / "taimobot-20261116-110000-recent.sqlite3"
+            for backup_path in (expired, recent):
+                with sqlite3.connect(backup_path) as connection:
+                    connection.execute("CREATE TABLE sample (value TEXT)")
+            os.utime(expired, (now.timestamp() - 400 * 24 * 60 * 60,) * 2)
+
+            with patch.object(Path, "unlink", side_effect=PermissionError("deletion denied")):
+                result = cleanup_expired_backups(
+                    backup_dir=root, now=now, dry_run=False,
+                    live_database_path=self.original_db_path,
+                )
+
+            self.assertEqual(result["status"], "BACKUP_RETENTION_BLOCKED")
+            self.assertEqual(result["deleted"], [])
+            self.assertEqual(result["deletion_failures"], [expired.name])
+            self.assertTrue(expired.exists())
+            self.assertTrue(recent.exists())
+
     def test_backup_retention_fails_safe_without_recent_verified_recovery_point(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
