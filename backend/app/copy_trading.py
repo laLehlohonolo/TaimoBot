@@ -206,8 +206,10 @@ def _copy_for_relationship(relationship, source):
     follower_id = relationship["follower_account_id"]
     source_trade_id = source["trade_id"]
     order_id = f"COPY-{relationship_id}-{source_trade_id}"
+    execution_token = str(uuid.uuid4())
 
-    # The unique relationship/source row is the idempotency record.
+    # Claim a five-minute lease with a unique owner token. Every write that
+    # creates or finalizes a copy must prove it still owns this lease.
     with transaction() as connection:
         current = connection.execute(
             """
@@ -215,6 +217,8 @@ def _copy_for_relationship(relationship, source):
                 ce.status,
                 ce.copied_trade_id,
                 ce.failure_reason,
+                ce.lease_token,
+                ce.lease_expires_at,
                 cr.status AS relationship_status
             FROM copy_executions AS ce
             JOIN copy_relationships AS cr
@@ -228,8 +232,6 @@ def _copy_for_relationship(relationship, source):
             stored_status = current["status"]
 
             if stored_status == "PENDING":
-                # Recover a crash that happened after the follower trade
-                # committed but before its copy-execution row was finalized.
                 existing_trade = connection.execute(
                     """
                     SELECT trade_id, account_id, copied_from_trade_id, status
@@ -270,6 +272,8 @@ def _copy_for_relationship(relationship, source):
                         SET copied_trade_id = ?,
                             status = ?,
                             failure_reason = NULL,
+                            lease_token = NULL,
+                            lease_expires_at = NULL,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE relationship_id = ?
                           AND source_trade_id = ?
@@ -291,9 +295,6 @@ def _copy_for_relationship(relationship, source):
                         "recovered": True
                     }
 
-                # A paused/stopped relationship must not leave an uncommitted
-                # pending copy waiting for a lease timeout. A committed follower
-                # trade was reconciled above and remains protected/closable.
                 if current["relationship_status"] != "ACTIVE":
                     reason = (
                         "Copy relationship is "
@@ -305,6 +306,8 @@ def _copy_for_relationship(relationship, source):
                         UPDATE copy_executions
                         SET status = 'FAILED',
                             failure_reason = ?,
+                            lease_token = NULL,
+                            lease_expires_at = NULL,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE relationship_id = ?
                           AND source_trade_id = ?
@@ -321,20 +324,42 @@ def _copy_for_relationship(relationship, source):
                         "duplicate_prevented": True
                     }
 
-                # A PENDING row may belong to a live worker. Only reclaim it
-                # after five minutes without an update.
-                reclaimed = connection.execute(
+                # A live lease is not stealable just because a process restarted.
+                # Only an expired lease can be reclaimed by a new token owner.
+                if current["lease_expires_at"] and connection.execute(
+                    """
+                    SELECT 1
+                    WHERE datetime(?) > CURRENT_TIMESTAMP
+                    """,
+                    (current["lease_expires_at"],)
+                ).fetchone():
+                    return {
+                        "relationship_id": relationship_id,
+                        "follower_account_id": follower_id,
+                        "status": "PENDING",
+                        "copied_trade_id": None,
+                        "failure_reason": current["failure_reason"],
+                        "duplicate_prevented": True,
+                        "recovery_deferred": True
+                    }
+
+                claimed = connection.execute(
                     """
                     UPDATE copy_executions
-                    SET updated_at = CURRENT_TIMESTAMP
+                    SET lease_token = ?,
+                        lease_expires_at = datetime('now', '+5 minutes'),
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE relationship_id = ?
                       AND source_trade_id = ?
                       AND status = 'PENDING'
-                      AND datetime(updated_at) <= datetime('now', '-5 minutes')
+                      AND (
+                          lease_expires_at IS NULL
+                          OR datetime(lease_expires_at) <= CURRENT_TIMESTAMP
+                      )
                     """,
-                    (relationship_id, source_trade_id)
+                    (execution_token, relationship_id, source_trade_id)
                 )
-                if reclaimed.rowcount != 1:
+                if claimed.rowcount != 1:
                     return {
                         "relationship_id": relationship_id,
                         "follower_account_id": follower_id,
@@ -359,20 +384,23 @@ def _copy_for_relationship(relationship, source):
                 }
 
         else:
-            execution_id = str(uuid.uuid4())
             connection.execute(
                 """
                 INSERT INTO copy_executions (
                     copy_execution_id, relationship_id,
-                    source_trade_id, status
+                    source_trade_id, status, lease_token, lease_expires_at
                 )
-                VALUES (?, ?, ?, 'PENDING')
+                VALUES (?, ?, ?, 'PENDING', ?, datetime('now', '+5 minutes'))
                 """,
-                (execution_id, relationship_id, source_trade_id)
+                (
+                    str(uuid.uuid4()),
+                    relationship_id,
+                    source_trade_id,
+                    execution_token
+                )
             )
+
     try:
-        # Reject before opening if the follower's own combined risk budget
-        # cannot accommodate its assigned per-trade allocation.
         with get_connection() as connection:
             account = connection.execute(
                 """
@@ -419,7 +447,8 @@ def _copy_for_relationship(relationship, source):
                 take_profit=source["take_profit"],
                 symbol=source["symbol"],
                 copy_source_trade_id=source_trade_id,
-                copy_relationship_id=relationship_id
+                copy_relationship_id=relationship_id,
+                copy_execution_token=execution_token
             )
             copied_trade_id = copied["trade_id"]
 
@@ -454,19 +483,37 @@ def _copy_for_relationship(relationship, source):
             final_status = (
                 "CLOSED" if copied_row["status"] == "CLOSED" else "COPIED"
             )
-            connection.execute(
+            finalized = connection.execute(
                 """
                 UPDATE copy_executions
                 SET copied_trade_id = ?,
                     status = ?,
                     failure_reason = NULL,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE relationship_id = ?
                   AND source_trade_id = ?
                   AND status = 'PENDING'
+                  AND lease_token = ?
                 """,
-                (copied_trade_id, final_status, relationship_id, source_trade_id)
+                (
+                    copied_trade_id,
+                    final_status,
+                    relationship_id,
+                    source_trade_id,
+                    execution_token
+                )
             )
+            if finalized.rowcount != 1:
+                return {
+                    "relationship_id": relationship_id,
+                    "follower_account_id": follower_id,
+                    "status": "PENDING",
+                    "copied_trade_id": copied_trade_id,
+                    "duplicate_prevented": True,
+                    "recovery_deferred": True
+                }
 
         return {
             "relationship_id": relationship_id,
@@ -479,18 +526,32 @@ def _copy_for_relationship(relationship, source):
     except Exception as error:
         reason = str(error)[:500] or "Copy attempt failed."
         with transaction() as connection:
-            connection.execute(
+            failed = connection.execute(
                 """
                 UPDATE copy_executions
                 SET status = 'FAILED',
                     failure_reason = ?,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE relationship_id = ?
                   AND source_trade_id = ?
                   AND status = 'PENDING'
+                  AND lease_token = ?
                 """,
-                (reason, relationship_id, source_trade_id)
+                (reason, relationship_id, source_trade_id, execution_token)
             )
+
+        if failed.rowcount != 1:
+            return {
+                "relationship_id": relationship_id,
+                "follower_account_id": follower_id,
+                "status": "PENDING",
+                "copied_trade_id": None,
+                "failure_reason": "Copy lease ownership changed; recovery is deferred.",
+                "duplicate_prevented": True,
+                "recovery_deferred": True
+            }
 
         return {
             "relationship_id": relationship_id,
@@ -500,7 +561,6 @@ def _copy_for_relationship(relationship, source):
             "failure_reason": reason,
             "duplicate_prevented": False
         }
-
 
 
 def close_trade_with_copies(trade_id, exit_price):
