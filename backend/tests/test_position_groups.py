@@ -426,5 +426,107 @@ class PositionGroupTests(unittest.TestCase):
         self.assertEqual(execution_status, "COPIED")
 
 
+    def test_group_close_fails_uncommitted_pending_copy_and_releases_lease(self):
+        group_id = self.create_group()
+        relationship_id = self.create_follower_relationship()
+        opened = self.open_group_trade(group_id, "GROUP-PENDING-CLOSE-001")
+        self.assertEqual(opened.status_code, 200)
+        source_trade_id = opened.json()["trade_id"]
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO copy_executions (
+                    copy_execution_id, relationship_id, source_trade_id,
+                    status, lease_token, lease_expires_at
+                )
+                VALUES (
+                    'GROUP-PENDING-UNCOMMITTED', ?, ?, 'PENDING',
+                    'stale-group-worker', datetime('now', '+5 minutes')
+                )
+                """,
+                (relationship_id, source_trade_id)
+            )
+
+        response = self.client.post(
+            f"/groups/{group_id}/close",
+            json={"exit_price": 4010}
+        )
+        self.assertEqual(response.status_code, 200)
+
+        with database.get_connection() as connection:
+            execution = connection.execute(
+                """
+                SELECT status, failure_reason, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source_trade_id)
+            ).fetchone()
+
+        self.assertEqual(execution["status"], "FAILED")
+        self.assertIn("Source trade closed", execution["failure_reason"])
+        self.assertIsNone(execution["lease_token"])
+        self.assertIsNone(execution["lease_expires_at"])
+
+    def test_group_close_reconciles_pending_execution_for_closed_follower(self):
+        group_id = self.create_group()
+        relationship_id = self.create_follower_relationship()
+        opened = self.open_group_trade(group_id, "GROUP-PENDING-COMMITTED-001")
+        self.assertEqual(opened.status_code, 200)
+        source_trade_id = opened.json()["trade_id"]
+
+        with database.get_connection() as connection:
+            copied = connection.execute(
+                """
+                SELECT trade_id FROM trades
+                WHERE copied_from_trade_id = ?
+                  AND account_id = 'GROUP-FOLLOWER-001'
+                """,
+                (source_trade_id,)
+            ).fetchone()
+            self.assertIsNotNone(copied)
+
+            connection.execute(
+                """
+                UPDATE copy_executions
+                SET status = 'PENDING',
+                    copied_trade_id = NULL,
+                    lease_token = 'stale-group-worker',
+                    lease_expires_at = datetime('now', '+5 minutes')
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source_trade_id)
+            )
+
+        response = self.client.post(
+            f"/groups/{group_id}/close",
+            json={"exit_price": 4010}
+        )
+        self.assertEqual(response.status_code, 200)
+
+        with database.get_connection() as connection:
+            execution = connection.execute(
+                """
+                SELECT status, copied_trade_id, failure_reason,
+                       lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE relationship_id = ? AND source_trade_id = ?
+                """,
+                (relationship_id, source_trade_id)
+            ).fetchone()
+            copied_trade = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (copied["trade_id"],)
+            ).fetchone()
+
+        self.assertEqual(copied_trade["status"], "CLOSED")
+        self.assertEqual(execution["status"], "CLOSED")
+        self.assertEqual(execution["copied_trade_id"], copied["trade_id"])
+        self.assertIsNone(execution["failure_reason"])
+        self.assertIsNone(execution["lease_token"])
+        self.assertIsNone(execution["lease_expires_at"])
+
+
 if __name__ == "__main__":
     unittest.main()
