@@ -908,5 +908,129 @@ class CopyTradeReplicationTests(unittest.TestCase):
         )
 
 
+    def test_concurrent_source_close_wins_before_copy_insert(self):
+        source = self.create_source_trade("SOURCE-CONCURRENT-CLOSE-WINS")
+        original_open = copy_trading.open_paper_trade
+        copy_worker_ready = Event()
+        allow_copy_attempt = Event()
+
+        def pause_before_atomic_copy_insert(**kwargs):
+            copy_worker_ready.set()
+            if not allow_copy_attempt.wait(timeout=10):
+                raise TimeoutError("Test did not release the copy worker.")
+            return original_open(**kwargs)
+
+        with patch(
+            "app.copy_trading.open_paper_trade",
+            side_effect=pause_before_atomic_copy_insert
+        ):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                copy_future = executor.submit(
+                    replicate_open_trade, source["trade_id"]
+                )
+                self.assertTrue(copy_worker_ready.wait(timeout=5))
+
+                # Close commits while the copy worker is waiting. The atomic
+                # source-open check must reject the subsequent follower insert.
+                close_result = close_trade_with_copies(
+                    source["trade_id"], 3990
+                )
+                allow_copy_attempt.set()
+                copy_result = copy_future.result(timeout=10)
+
+        self.assertEqual(close_result["status"], "CLOSED")
+        self.assertEqual(copy_result["successful_copies"], 0)
+        self.assertEqual(copy_result["failed_copies"], 1)
+        self.assertEqual(copy_result["copies"][0]["status"], "FAILED")
+
+        with database.get_connection() as connection:
+            source_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+            follower_count = connection.execute(
+                "SELECT COUNT(*) AS total FROM trades WHERE account_id = 'FOLLOWER'"
+            ).fetchone()["total"]
+            execution = connection.execute(
+                """
+                SELECT status, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()
+
+        self.assertEqual(source_status, "CLOSED")
+        self.assertEqual(follower_count, 0)
+        self.assertEqual(execution["status"], "FAILED")
+        self.assertIsNone(execution["lease_token"])
+        self.assertIsNone(execution["lease_expires_at"])
+
+    def test_concurrent_source_close_after_copy_insert_closes_follower_before_finalization(self):
+        source = self.create_source_trade("SOURCE-CONCURRENT-COPY-WINS")
+        original_open = copy_trading.open_paper_trade
+        follower_inserted = Event()
+        allow_copy_finalization = Event()
+        copied_ids = []
+
+        def pause_after_atomic_copy_insert(**kwargs):
+            copied = original_open(**kwargs)
+            copied_ids.append(copied["trade_id"])
+            follower_inserted.set()
+            if not allow_copy_finalization.wait(timeout=10):
+                raise TimeoutError("Test did not release copy finalization.")
+            return copied
+
+        with patch(
+            "app.copy_trading.open_paper_trade",
+            side_effect=pause_after_atomic_copy_insert
+        ):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                copy_future = executor.submit(
+                    replicate_open_trade, source["trade_id"]
+                )
+                self.assertTrue(follower_inserted.wait(timeout=5))
+
+                # The follower insert has committed, but the copy execution is
+                # still PENDING. Source close must close both positions and
+                # terminalize the execution before the worker can finalize.
+                close_result = close_trade_with_copies(
+                    source["trade_id"], 3990
+                )
+                allow_copy_finalization.set()
+                copy_result = copy_future.result(timeout=10)
+
+        self.assertEqual(close_result["status"], "CLOSED")
+        self.assertEqual(close_result["closed_copies"], 1)
+        self.assertEqual(copy_result["successful_copies"], 0)
+        self.assertEqual(copy_result["copies"][0]["status"], "PENDING")
+        self.assertTrue(copy_result["copies"][0]["recovery_deferred"])
+
+        with database.get_connection() as connection:
+            source_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()["status"]
+            follower = connection.execute(
+                "SELECT trade_id, status FROM trades WHERE trade_id = ?",
+                (copied_ids[0],)
+            ).fetchone()
+            execution = connection.execute(
+                """
+                SELECT status, copied_trade_id, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()
+
+        self.assertEqual(source_status, "CLOSED")
+        self.assertEqual(follower["status"], "CLOSED")
+        self.assertEqual(execution["status"], "CLOSED")
+        self.assertEqual(execution["copied_trade_id"], follower["trade_id"])
+        self.assertIsNone(execution["lease_token"])
+        self.assertIsNone(execution["lease_expires_at"])
+
+
 if __name__ == "__main__":
     unittest.main()
