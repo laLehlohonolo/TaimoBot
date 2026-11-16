@@ -162,6 +162,7 @@ def run_maintenance_for_date(
         / "recovery-staging"
         / f"candidate-{day_key}-{claim_token}.sqlite3"
     )
+    backup_result = None
     try:
         backup_result = create_verified_backup()
         restore_result = verify_restore_candidate(
@@ -262,21 +263,40 @@ def run_maintenance_for_date(
                 UPDATE maintenance_runs
                 SET status = 'FAILED',
                     completed_at = ?,
+                    backup_file = ?,
                     error_summary = ?
                 WHERE run_date = ?
                   AND status = 'RUNNING'
                   AND run_token = ?
                 """,
-                (completed_at, error_summary, day_key, claim_token),
+                (
+                    completed_at,
+                    backup_result.get("backup_file")
+                    if isinstance(backup_result, dict)
+                    and backup_result.get("status") == "BACKUP_VERIFIED"
+                    else None,
+                    error_summary,
+                    day_key,
+                    claim_token,
+                ),
             )
             if updated.rowcount == 1:
                 audited = connection.execute(
                     """
                     UPDATE maintenance_run_attempts
-                    SET status = 'FAILED', completed_at = ?, error_summary = ?
+                    SET status = 'FAILED', completed_at = ?, backup_file = ?,
+                        error_summary = ?
                     WHERE attempt_token = ? AND status = 'RUNNING'
                     """,
-                    (completed_at, error_summary, claim_token),
+                    (
+                        completed_at,
+                        backup_result.get("backup_file")
+                        if isinstance(backup_result, dict)
+                        and backup_result.get("status") == "BACKUP_VERIFIED"
+                        else None,
+                        error_summary,
+                        claim_token,
+                    ),
                 )
                 if audited.rowcount != 1:
                     raise sqlite3.IntegrityError(
