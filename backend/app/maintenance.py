@@ -7,6 +7,9 @@ it never overwrites the live database automatically.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -449,6 +452,103 @@ def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
         for chunk in iter(lambda: artifact.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+
+def restore_lock_path() -> Path:
+    """Return the process-shared lock path adjacent to the live database."""
+    return Path(database.DB_PATH).with_name(Path(database.DB_PATH).name + ".restore.lock")
+
+
+def is_restore_lock_active() -> bool:
+    """Fail closed if a restore lock exists or cannot be safely inspected."""
+    lock_path = restore_lock_path()
+    try:
+        return lock_path.exists() or lock_path.is_symlink()
+    except OSError:
+        return True
+
+
+def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
+    """Acquire an exclusive process-shared lock and prove SQLite is quiescent.
+
+    The lock is deliberately not reclaimed automatically. An abandoned lock
+    requires operator investigation; deleting it based only on age or PID
+    could permit two restore workers to operate concurrently.
+    """
+    if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+        raise ValueError("A valid restore plan ID is required.")
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or timeout_seconds < 0:
+        raise ValueError("timeout_seconds must be a non-negative number.")
+
+    lock_path = restore_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid4().hex
+    payload = {
+        "plan_id": plan_id,
+        "lock_token": token,
+        "pid": os.getpid(),
+        "created_at": datetime.now(SAST).isoformat(),
+    }
+    descriptor = None
+    try:
+        descriptor = os.open(
+            str(lock_path),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as lock_file:
+            descriptor = None
+            lock_file.write(json.dumps(payload, sort_keys=True))
+            lock_file.flush()
+            os.fsync(lock_file.fileno())
+
+        # The lock file blocks new application DB connections. BEGIN EXCLUSIVE
+        # waits for existing SQLite readers/writers to leave their transactions.
+        with sqlite3.connect(str(database.DB_PATH), timeout=float(timeout_seconds)) as connection:
+            connection.execute("BEGIN EXCLUSIVE")
+            connection.commit()
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0].lower()
+            if journal_mode == "wal":
+                checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint and checkpoint[0] != 0:
+                    raise RuntimeError("SQLite WAL checkpoint is busy; active readers remain.")
+
+        return {
+            "status": "RESTORE_LOCK_ACQUIRED",
+            "plan_id": plan_id,
+            "lock_token": token,
+            "database_quiescent": True,
+            "lock_file": str(lock_path),
+        }
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            if lock_path.is_file() and not lock_path.is_symlink():
+                current = json.loads(lock_path.read_text(encoding="utf-8"))
+                if current.get("lock_token") == token:
+                    lock_path.unlink()
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        raise
+
+
+def release_restore_lock(lock_token: str) -> dict:
+    """Release only the lock owned by the supplied unpredictable token."""
+    if not isinstance(lock_token, str) or not re.fullmatch(r"[a-f0-9]{32}", lock_token):
+        raise ValueError("A valid restore lock token is required.")
+    lock_path = restore_lock_path()
+    if lock_path.is_symlink() or not lock_path.is_file():
+        raise RuntimeError("Restore lock is missing or unsafe.")
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("Restore lock metadata is unreadable; lock remains active.") from error
+    if payload.get("lock_token") != lock_token:
+        raise RuntimeError("Restore lock ownership mismatch; lock remains active.")
+    lock_path.unlink()
+    return {"status": "RESTORE_LOCK_RELEASED", "database_quiescent": False}
 
 
 def verify_restore_execution_readiness(
