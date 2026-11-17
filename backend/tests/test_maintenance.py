@@ -23,6 +23,7 @@ from app.maintenance import (
     verify_approved_restore_plan,
     inspect_sqlite_sidecars,
     inspect_restore_lock,
+    recover_abandoned_restore_lock,
 )
 from app import database
 from app.database import init_db
@@ -70,6 +71,62 @@ class DailyMaintenanceTests(unittest.TestCase):
         deactivate_emergency_stop()
         with patch("app.safety.is_maintenance_window", return_value=False):
             require_trading_enabled()
+
+    def test_abandoned_restore_lock_recovery_requires_explicit_confirmation(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        lock_path.write_text(json.dumps({
+            "plan_id": "d" * 32,
+            "pid": 999999,
+            "created_at": "2026-11-17T10:00:00+02:00",
+            "lock_token": "e" * 32,
+        }), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "confirm=True"):
+            recover_abandoned_restore_lock(
+                "operator@example.com", "INC-123", confirm=False,
+                audit_path=Path(self.temp_dir.name) / "audit.jsonl",
+            )
+        self.assertTrue(lock_path.exists())
+
+    def test_abandoned_restore_lock_recovery_requires_inactive_guard(self):
+        lock = acquire_restore_lock("f" * 32)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "not confirmed abandoned"):
+                recover_abandoned_restore_lock(
+                    "operator@example.com", "INC-124", confirm=True,
+                    audit_path=Path(self.temp_dir.name) / "audit.jsonl",
+                )
+            self.assertTrue(Path(lock["lock_file"]).exists())
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_abandoned_restore_lock_recovery_audits_before_removing_marker(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        guard_path = database.restore_guard_path()
+        lock_path.write_text(json.dumps({
+            "plan_id": "a" * 32,
+            "pid": 999999,
+            "created_at": "2026-11-17T10:00:00+02:00",
+            "lock_token": "b" * 32,
+        }), encoding="utf-8")
+        audit = Path(self.temp_dir.name) / "audit" / "recovery.jsonl"
+        live_before = database.DB_PATH.read_bytes()
+        result = recover_abandoned_restore_lock(
+            "operator@example.com", "INC-125", confirm=True, audit_path=audit,
+        )
+        records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(result["status"], "ABANDONED_RESTORE_LOCK_RECOVERED")
+        self.assertEqual(
+            [record["event"] for record in records],
+            ["RESTORE_LOCK_RECOVERY_STARTED", "RESTORE_LOCK_RECOVERY_COMPLETE"],
+        )
+        self.assertTrue(all(record["operator_id"] == "operator@example.com" for record in records))
+        self.assertTrue(all(record["incident_ref"] == "INC-125" for record in records))
+        self.assertFalse(lock_path.exists())
+        self.assertEqual(database.DB_PATH.read_bytes(), live_before)
+        self.assertFalse(result["database_changed"])
+        self.assertFalse(result["sidecars_changed"])
+        self.assertFalse(result["live_database_replaced"])
+        self.assertTrue(guard_path.exists())
 
     def test_restore_lock_inspection_fails_closed_for_unreadable_metadata(self):
         lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
