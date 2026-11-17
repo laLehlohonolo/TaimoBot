@@ -806,7 +806,7 @@ def recover_abandoned_restore_lock(
                     "database_changed": False,
                     "sidecars_changed": False,
                 }
-                data = (json.dumps(record, sort_keys=True) + "\\n").encode("utf-8")
+                data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
                 view = memoryview(data)
                 while view:
                     written = os.write(audit_fd, view)
