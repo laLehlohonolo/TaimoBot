@@ -26,6 +26,11 @@ def _acquire_connection_guard_fd() -> int:
                 "Database access blocked: a controlled restore has quiesced the application."
             )
         return descriptor
+    except BlockingIOError as error:
+        os.close(descriptor)
+        raise sqlite3.OperationalError(
+            "Database access blocked: a controlled restore is quiescing the application."
+        ) from error
     except Exception:
         os.close(descriptor)
         raise
