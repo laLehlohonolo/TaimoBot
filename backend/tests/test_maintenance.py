@@ -145,6 +145,34 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertTrue(lock_path.exists(), "marker must remain if STARTED audit cannot be written")
         self.assertFalse(audit.exists() and audit.stat().st_size > 0)
 
+    def test_abandoned_restore_recovery_records_started_if_completion_audit_fails(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        lock_path.write_text(json.dumps({
+            "plan_id": "4" * 32,
+            "pid": 999999,
+            "created_at": "2026-11-17T10:00:00+02:00",
+            "lock_token": "5" * 32,
+        }), encoding="utf-8")
+        audit = Path(self.temp_dir.name) / "completion-audit-failure.jsonl"
+        real_write = os.write
+        calls = {"count": 0}
+
+        def fail_second_audit_write(fd, data):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("simulated completion audit failure")
+            return real_write(fd, data)
+
+        with patch("app.maintenance.os.write", side_effect=fail_second_audit_write):
+            with self.assertRaisesRegex(OSError, "completion audit failure"):
+                recover_abandoned_restore_lock(
+                    "operator@example.com", "INC-129", confirm=True, audit_path=audit,
+                )
+        records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([record["event"] for record in records], ["RESTORE_LOCK_RECOVERY_STARTED"])
+        self.assertFalse(lock_path.exists(), "marker is already removed after durable STARTED audit")
+        self.assertTrue(all(record["database_changed"] is False for record in records))
+
     def test_abandoned_restore_recovery_rejects_symlink_audit_file(self):
         lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
         lock_path.write_text(json.dumps({
