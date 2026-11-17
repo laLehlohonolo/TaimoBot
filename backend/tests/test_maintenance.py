@@ -21,6 +21,7 @@ from app.maintenance import (
     is_restore_lock_active,
     verify_approved_restore_plan,
     inspect_sqlite_sidecars,
+    inspect_restore_lock,
 )
 from app import database
 from app.database import init_db
@@ -84,6 +85,13 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(worker.exitcode, 0)
         self.assertTrue(ready.is_set())
         self.assertTrue(is_restore_lock_active())
+        inspection = inspect_restore_lock()
+        self.assertEqual(
+            inspection["status"],
+            "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW",
+        )
+        self.assertFalse(inspection["automatic_recovery_performed"])
+        self.assertFalse(inspection["marker_removed"])
         with self.assertRaisesRegex(sqlite3.OperationalError, "controlled restore"):
             database.get_connection()
         # An abandoned marker is intentionally not reclaimed automatically.
@@ -961,6 +969,7 @@ class DailyMaintenanceTests(unittest.TestCase):
     def test_restore_lock_is_exclusive_and_never_reclaims_an_existing_lock(self):
         first = acquire_restore_lock("f" * 32)
         try:
+            self.assertEqual(inspect_restore_lock()["status"], "RESTORE_LOCK_ACTIVE")
             with self.assertRaisesRegex(RuntimeError, "another process"):
                 acquire_restore_lock("1" * 32, timeout_seconds=0.05)
             self.assertTrue(is_restore_lock_active())
