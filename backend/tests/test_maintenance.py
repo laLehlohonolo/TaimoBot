@@ -857,18 +857,20 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertIsNotNone(connection.execute("SELECT 1").fetchone())
 
 
-    def test_restore_quiescence_blocks_writes_from_connections_opened_before_lock(self):
+    def test_restore_quiescence_blocks_reads_and_writes_from_connections_opened_before_lock(self):
         from app.database import get_connection
 
         existing_connection = get_connection()
         lock = None
         try:
             lock = acquire_restore_lock("3" * 32)
-            self.assertEqual(existing_connection.execute("SELECT 1").fetchone()[0], 1)
+            with self.assertRaises(sqlite3.DatabaseError):
+                existing_connection.execute("SELECT 1").fetchone()
             with self.assertRaises(sqlite3.DatabaseError):
                 existing_connection.execute("CREATE TABLE restore_lock_bypass (value TEXT)")
             release_restore_lock(lock["lock_token"])
             lock = None
+            self.assertEqual(existing_connection.execute("SELECT 1").fetchone()[0], 1)
             existing_connection.execute("CREATE TABLE restore_lock_bypass (value TEXT)")
             self.assertIsNotNone(
                 existing_connection.execute(
