@@ -865,30 +865,26 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertIsNotNone(connection.execute("SELECT 1").fetchone())
 
 
-    def test_restore_quiescence_blocks_reads_and_writes_from_connections_opened_before_lock(self):
-        from app.database import get_connection
+    def test_restore_lock_refuses_to_start_while_application_connection_is_open(self):
+        from app.database import get_connection, open_connection_count
 
         existing_connection = get_connection()
-        lock = None
         try:
-            lock = acquire_restore_lock("3" * 32)
-            with self.assertRaises(sqlite3.DatabaseError):
-                existing_connection.execute("SELECT 1").fetchone()
-            with self.assertRaises(sqlite3.DatabaseError):
-                existing_connection.execute("CREATE TABLE restore_lock_bypass (value TEXT)")
-            release_restore_lock(lock["lock_token"])
-            lock = None
+            self.assertEqual(open_connection_count(), 1)
+            with self.assertRaisesRegex(RuntimeError, "connections remain open"):
+                acquire_restore_lock("3" * 32)
+            self.assertFalse(is_restore_lock_active())
             self.assertEqual(existing_connection.execute("SELECT 1").fetchone()[0], 1)
-            existing_connection.execute("CREATE TABLE restore_lock_bypass (value TEXT)")
-            self.assertIsNotNone(
-                existing_connection.execute(
-                    "SELECT name FROM sqlite_master WHERE name = 'restore_lock_bypass'"
-                ).fetchone()
-            )
         finally:
-            if lock is not None:
-                release_restore_lock(lock["lock_token"])
             existing_connection.close()
+
+        self.assertEqual(open_connection_count(), 0)
+        lock = acquire_restore_lock("3" * 32)
+        try:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "controlled restore"):
+                get_connection()
+        finally:
+            release_restore_lock(lock["lock_token"])
 
     def test_restore_lock_is_exclusive_and_never_reclaims_an_existing_lock(self):
         first = acquire_restore_lock("f" * 32)
@@ -905,7 +901,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         connection = get_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            with self.assertRaises(sqlite3.OperationalError):
+            with self.assertRaisesRegex(RuntimeError, "connections remain open"):
                 acquire_restore_lock("2" * 32, timeout_seconds=0.01)
             self.assertFalse(is_restore_lock_active())
         finally:
