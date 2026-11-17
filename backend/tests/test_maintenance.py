@@ -85,6 +85,18 @@ class DailyMaintenanceTests(unittest.TestCase):
                 worker.join(5)
         self.assertEqual(worker.exitcode, 0)
 
+    def test_live_backup_holds_process_guard_against_restore_race(self):
+        def attempt_restore_during_backup(*args, **kwargs):
+            return acquire_restore_lock("6" * 32, timeout_seconds=0.1)
+
+        with patch(
+            "app.maintenance.sqlite3.connect",
+            side_effect=attempt_restore_during_backup,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "another process"):
+                create_verified_backup()
+        self.assertFalse(is_restore_lock_active())
+
     def test_live_backup_is_blocked_while_restore_lock_is_active(self):
         lock = acquire_restore_lock("4" * 32)
         try:
