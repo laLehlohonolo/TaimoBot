@@ -581,6 +581,64 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
         raise
 
 
+def inspect_restore_lock() -> dict:
+    """Read-only inspection of a restore marker and its process-shared guard.
+
+    A marker whose OS guard is available is classified as abandoned, but is
+    never removed here. Operator review remains mandatory before recovery.
+    """
+    lock_path = restore_lock_path()
+    try:
+        metadata = lock_path.lstat()
+    except FileNotFoundError:
+        return {"status": "NO_RESTORE_LOCK", "marker_present": False}
+    except OSError:
+        return {"status": "RESTORE_LOCK_UNINSPECTABLE", "marker_present": True}
+    if lock_path.is_symlink() or not lock_path.is_file():
+        return {"status": "RESTORE_LOCK_UNSAFE_MARKER", "marker_present": True}
+
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        plan_id = payload.get("plan_id")
+        process_id = payload.get("pid")
+        created_at = payload.get("created_at")
+        if (
+            not isinstance(plan_id, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", plan_id)
+            or isinstance(process_id, bool)
+            or not isinstance(process_id, int)
+            or not isinstance(created_at, str)
+        ):
+            raise ValueError("invalid restore marker metadata")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"status": "RESTORE_LOCK_METADATA_UNREADABLE", "marker_present": True}
+
+    guard_fd = None
+    try:
+        guard_fd = os.open(str(database.restore_guard_path()), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            status = "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW"
+        except BlockingIOError:
+            status = "RESTORE_LOCK_ACTIVE"
+    except OSError:
+        status = "RESTORE_LOCK_GUARD_UNINSPECTABLE"
+    finally:
+        if guard_fd is not None:
+            os.close(guard_fd)
+
+    return {
+        "status": status,
+        "marker_present": True,
+        "plan_id": plan_id,
+        "process_id": process_id,
+        "created_at": created_at,
+        "marker_size_bytes": metadata.st_size,
+        "automatic_recovery_performed": False,
+        "marker_removed": False,
+    }
+
+
 def release_restore_lock(lock_token: str) -> dict:
     """Release only the lock owned by the supplied unpredictable token."""
     if not isinstance(lock_token, str) or not re.fullmatch(r"[a-f0-9]{32}", lock_token):
