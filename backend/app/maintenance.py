@@ -36,6 +36,13 @@ def create_verified_backup(
     """Create an online SQLite backup and verify it before publishing the file."""
     source = Path(source_path or database.DB_PATH)
     destination_dir = Path(backup_dir or BACKUP_DIR)
+    if (
+        source.resolve() == Path(database.DB_PATH).resolve()
+        and is_restore_lock_active()
+    ):
+        raise RuntimeError(
+            "Live database backup blocked: a controlled restore has quiesced the application."
+        )
     destination_dir.mkdir(parents=True, exist_ok=True)
 
     if not source.exists():
