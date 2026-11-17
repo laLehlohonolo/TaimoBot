@@ -74,6 +74,10 @@ trading mode. Keep the system in paper mode.
 2. Preserve a copy of the live database and any adjacent `-wal` / `-shm`
    files for investigation. Do not delete, rename, or checkpoint those files
    as part of lock recovery.
+   Preserve the adjacent `.restore.guard` file as well. It is the stable OS-lock
+   coordination file shared by backend processes; do not delete or replace it
+   during abandoned-marker recovery. The recovery helper removes only the
+   `.restore.lock` marker after acquiring the guard exclusively.
 3. From the `backend` directory, inspect the marker:
 
    ```bash
