@@ -128,6 +128,68 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["live_database_replaced"])
         self.assertTrue(guard_path.exists())
 
+    def test_abandoned_restore_recovery_audit_write_failure_preserves_marker(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        lock_path.write_text(json.dumps({
+            "plan_id": "c" * 32,
+            "pid": 999999,
+            "created_at": "2026-11-17T10:00:00+02:00",
+            "lock_token": "d" * 32,
+        }), encoding="utf-8")
+        audit = Path(self.temp_dir.name) / "audit-failure.jsonl"
+        with patch("app.maintenance.os.write", side_effect=OSError("simulated audit disk failure")):
+            with self.assertRaisesRegex(OSError, "simulated audit disk failure"):
+                recover_abandoned_restore_lock(
+                    "operator@example.com", "INC-126", confirm=True, audit_path=audit,
+                )
+        self.assertTrue(lock_path.exists(), "marker must remain if STARTED audit cannot be written")
+        self.assertFalse(audit.exists() and audit.stat().st_size > 0)
+
+    def test_abandoned_restore_recovery_rejects_symlink_audit_file(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        lock_path.write_text(json.dumps({
+            "plan_id": "e" * 32,
+            "pid": 999999,
+            "created_at": "2026-11-17T10:00:00+02:00",
+            "lock_token": "f" * 32,
+        }), encoding="utf-8")
+        target = Path(self.temp_dir.name) / "audit-target.jsonl"
+        target.write_text("preserve", encoding="utf-8")
+        audit = Path(self.temp_dir.name) / "audit-link.jsonl"
+        audit.symlink_to(target)
+        with self.assertRaises(OSError):
+            recover_abandoned_restore_lock(
+                "operator@example.com", "INC-127", confirm=True, audit_path=audit,
+            )
+        self.assertTrue(lock_path.exists())
+        self.assertEqual(target.read_text(encoding="utf-8"), "preserve")
+
+    def test_abandoned_restore_recovery_detects_marker_changed_after_inspection(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker = {
+            "plan_id": "1" * 32,
+            "pid": 999999,
+            "created_at": "2026-11-17T10:00:00+02:00",
+            "lock_token": "2" * 32,
+        }
+        lock_path.write_text(json.dumps(marker), encoding="utf-8")
+        original_inspect = inspect_restore_lock
+
+        def inspect_then_mutate():
+            result = original_inspect()
+            marker["plan_id"] = "3" * 32
+            lock_path.write_text(json.dumps(marker), encoding="utf-8")
+            return result
+
+        audit = Path(self.temp_dir.name) / "marker-race.jsonl"
+        with patch("app.maintenance.inspect_restore_lock", side_effect=inspect_then_mutate):
+            with self.assertRaisesRegex(RuntimeError, "metadata changed|changed during recovery"):
+                recover_abandoned_restore_lock(
+                    "operator@example.com", "INC-128", confirm=True, audit_path=audit,
+                )
+        self.assertTrue(lock_path.exists())
+        self.assertFalse(audit.exists())
+
     def test_restore_lock_inspection_fails_closed_for_unreadable_metadata(self):
         lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
         lock_path.write_text("not-json", encoding="utf-8")
