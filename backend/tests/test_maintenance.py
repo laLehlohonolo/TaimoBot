@@ -961,8 +961,8 @@ class DailyMaintenanceTests(unittest.TestCase):
     def test_restore_lock_is_exclusive_and_never_reclaims_an_existing_lock(self):
         first = acquire_restore_lock("f" * 32)
         try:
-            with self.assertRaises(FileExistsError):
-                acquire_restore_lock("1" * 32)
+            with self.assertRaisesRegex(RuntimeError, "another process"):
+                acquire_restore_lock("1" * 32, timeout_seconds=0.05)
             self.assertTrue(is_restore_lock_active())
         finally:
             release_restore_lock(first["lock_token"])
