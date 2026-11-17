@@ -11,6 +11,8 @@ import json
 import os
 import re
 import sqlite3
+import time
+import fcntl
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -20,6 +22,7 @@ from . import database
 
 SAST = ZoneInfo("Africa/Johannesburg")
 BACKUP_DIR = Path(__file__).resolve().parents[1] / "backups"
+_RESTORE_GUARD_FDS: dict[str, int] = {}
 
 
 def is_maintenance_window(now: datetime | None = None) -> bool:
@@ -498,10 +501,10 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
         "created_at": datetime.now(SAST).isoformat(),
     }
     descriptor = None
+    guard_fd = None
     try:
-        # Coordinate connection creation and lock acquisition within this
-        # process. Refuse to proceed while any application-managed handle is
-        # still open; this is stricter than merely checking active transactions.
+        # The marker prevents new connections; the shared/exclusive OS lock
+        # coordinates all application processes using this database path.
         with database._CONNECTION_GUARD:
             if database.open_connection_count():
                 raise RuntimeError(
@@ -518,8 +521,23 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
             lock_file.flush()
             os.fsync(lock_file.fileno())
 
-        # The lock file blocks new application DB connections. BEGIN EXCLUSIVE
-        # waits for existing SQLite readers/writers to leave their transactions.
+        guard_fd = os.open(str(database.restore_guard_path()), os.O_CREAT | os.O_RDWR, 0o600)
+        deadline = time.monotonic() + float(timeout_seconds)
+        while True:
+            try:
+                fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "Restore lock refused: database connections remain active in another process."
+                    )
+                time.sleep(0.05)
+        _RESTORE_GUARD_FDS[token] = guard_fd
+        guard_fd = None
+
+        # The exclusive process-shared lock proves all cooperating application
+        # connections across workers have closed before SQLite quiescence checks.
         with sqlite3.connect(str(database.DB_PATH), timeout=float(timeout_seconds)) as connection:
             connection.execute("BEGIN EXCLUSIVE")
             connection.commit()
@@ -539,6 +557,11 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
     except Exception:
         if descriptor is not None:
             os.close(descriptor)
+        if guard_fd is not None:
+            os.close(guard_fd)
+        held_fd = _RESTORE_GUARD_FDS.pop(token, None)
+        if held_fd is not None:
+            os.close(held_fd)
         try:
             if lock_path.is_file() and not lock_path.is_symlink():
                 current = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -562,6 +585,11 @@ def release_restore_lock(lock_token: str) -> dict:
         raise RuntimeError("Restore lock metadata is unreadable; lock remains active.") from error
     if payload.get("lock_token") != lock_token:
         raise RuntimeError("Restore lock ownership mismatch; lock remains active.")
+    guard_fd = _RESTORE_GUARD_FDS.pop(lock_token, None)
+    if guard_fd is None:
+        raise RuntimeError("Restore process-shared lock ownership is unavailable; marker remains active.")
+    # Drop the exclusive OS lock while the marker still blocks new handles.
+    os.close(guard_fd)
     lock_path.unlink()
     return {"status": "RESTORE_LOCK_RELEASED", "database_quiescent": False}
 
