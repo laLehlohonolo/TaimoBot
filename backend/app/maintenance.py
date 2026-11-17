@@ -488,11 +488,11 @@ def is_restore_lock_active() -> bool:
 
 
 def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
-    """Acquire an exclusive process-shared lock and prove SQLite is quiescent.
+    """Acquire a process-shared restore lock and prove SQLite is quiescent.
 
-    The lock is deliberately not reclaimed automatically. An abandoned lock
-    requires operator investigation; deleting it based only on age or PID
-    could permit two restore workers to operate concurrently.
+    The OS lock is acquired before publishing the marker. This avoids a crash
+    window where a marker could be mistaken for an abandoned lock while its
+    owner is still waiting to acquire the cross-process guard.
     """
     if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
         raise ValueError("A valid restore plan ID is required.")
@@ -508,44 +508,45 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
         "pid": os.getpid(),
         "created_at": datetime.now(SAST).isoformat(),
     }
-    descriptor = None
     guard_fd = None
+    descriptor = None
     try:
-        # The marker prevents new connections; the shared/exclusive OS lock
-        # coordinates all application processes using this database path.
+        # Serialize local connection creation and reject leaked local handles.
         with database._CONNECTION_GUARD:
             if database.open_connection_count():
                 raise RuntimeError(
                     "Restore lock refused: application database connections remain open."
                 )
-            descriptor = os.open(
-                str(lock_path),
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
+            guard_fd = os.open(
+                str(database.restore_guard_path()), os.O_CREAT | os.O_RDWR, 0o600
             )
-        with os.fdopen(descriptor, "w", encoding="utf-8") as lock_file:
-            descriptor = None
-            lock_file.write(json.dumps(payload, sort_keys=True))
-            lock_file.flush()
-            os.fsync(lock_file.fileno())
+            deadline = time.monotonic() + float(timeout_seconds)
+            while True:
+                try:
+                    fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "Restore lock refused: database connections remain active in another process."
+                        )
+                    time.sleep(0.05)
 
-        guard_fd = os.open(str(database.restore_guard_path()), os.O_CREAT | os.O_RDWR, 0o600)
-        deadline = time.monotonic() + float(timeout_seconds)
-        while True:
-            try:
-                fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        "Restore lock refused: database connections remain active in another process."
-                    )
-                time.sleep(0.05)
+            # With the exclusive guard held, no cooperating application
+            # connection can open or remain active in any worker process.
+            descriptor = os.open(
+                str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as lock_file:
+                descriptor = None
+                lock_file.write(json.dumps(payload, sort_keys=True))
+                lock_file.flush()
+                os.fsync(lock_file.fileno())
+
         _RESTORE_GUARD_FDS[token] = guard_fd
         guard_fd = None
 
-        # The exclusive process-shared lock proves all cooperating application
-        # connections across workers have closed before SQLite quiescence checks.
+        # Retain the explicit SQLite-level check as a second line of defence.
         with sqlite3.connect(str(database.DB_PATH), timeout=float(timeout_seconds)) as connection:
             connection.execute("BEGIN EXCLUSIVE")
             connection.commit()
