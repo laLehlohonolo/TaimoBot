@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import multiprocessing
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,6 +25,13 @@ from app.maintenance import (
 from app import database
 from app.database import init_db
 from app.safety import deactivate_emergency_stop, require_trading_enabled
+
+
+def _hold_database_connection_for_restore_test(ready, release):
+    connection = database.get_connection()
+    ready.set()
+    release.wait(5)
+    connection.close()
 
 
 class DailyMaintenanceTests(unittest.TestCase):
@@ -55,6 +63,27 @@ class DailyMaintenanceTests(unittest.TestCase):
         deactivate_emergency_stop()
         with patch("app.safety.is_maintenance_window", return_value=False):
             require_trading_enabled()
+
+    def test_restore_lock_waits_for_connections_in_another_process(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        release = context.Event()
+        worker = context.Process(
+            target=_hold_database_connection_for_restore_test,
+            args=(ready, release),
+        )
+        worker.start()
+        try:
+            self.assertTrue(ready.wait(5), "worker did not open its database connection")
+            with self.assertRaisesRegex(RuntimeError, "another process"):
+                acquire_restore_lock("5" * 32, timeout_seconds=0.15)
+        finally:
+            release.set()
+            worker.join(5)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(5)
+        self.assertEqual(worker.exitcode, 0)
 
     def test_live_backup_is_blocked_while_restore_lock_is_active(self):
         lock = acquire_restore_lock("4" * 32)
