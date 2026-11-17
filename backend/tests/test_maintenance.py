@@ -86,6 +86,49 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "RESTORE_LOCK_UNSAFE_MARKER")
         self.assertTrue(lock_path.is_symlink())
 
+    def test_restore_lock_inspection_detects_marker_changed_during_guard_probe(self):
+        import fcntl as system_fcntl
+        import json
+
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker = {
+            "plan_id": "a" * 32,
+            "pid": os.getpid(),
+            "created_at": "2026-11-17T10:00:00+02:00",
+        }
+        lock_path.write_text(json.dumps(marker), encoding="utf-8")
+        original_flock = system_fcntl.flock
+
+        def mutate_then_lock(fd, operation):
+            marker["plan_id"] = "b" * 32
+            lock_path.write_text(json.dumps(marker), encoding="utf-8")
+            return original_flock(fd, operation)
+
+        with patch("app.maintenance.fcntl.flock", side_effect=mutate_then_lock):
+            result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_CHANGED_DURING_INSPECTION")
+        self.assertTrue(lock_path.exists())
+        self.assertFalse(result["marker_removed"])
+        self.assertFalse(result["automatic_recovery_performed"])
+
+    def test_restore_lock_inspection_rejects_symlink_guard(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker = {
+            "plan_id": "c" * 32,
+            "pid": os.getpid(),
+            "created_at": "2026-11-17T10:00:00+02:00",
+        }
+        lock_path.write_text(json.dumps(marker), encoding="utf-8")
+        guard_path = database.restore_guard_path()
+        target = Path(self.temp_dir.name) / "restore-guard-target"
+        target.write_bytes(b"")
+        guard_path.unlink(missing_ok=True)
+        guard_path.symlink_to(target)
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_UNSAFE_GUARD")
+        self.assertTrue(guard_path.is_symlink())
+        self.assertTrue(lock_path.exists())
+
     def test_process_crash_leaves_restore_marker_fail_closed(self):
         context = multiprocessing.get_context("fork")
         ready = context.Event()
