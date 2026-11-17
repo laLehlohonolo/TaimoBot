@@ -70,6 +70,22 @@ class DailyMaintenanceTests(unittest.TestCase):
         with patch("app.safety.is_maintenance_window", return_value=False):
             require_trading_enabled()
 
+    def test_restore_lock_inspection_fails_closed_for_unreadable_metadata(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        lock_path.write_text("not-json", encoding="utf-8")
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertTrue(lock_path.exists())
+
+    def test_restore_lock_inspection_rejects_symlink_marker(self):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        target = Path(self.temp_dir.name) / "restore-marker-target"
+        target.write_text("{}", encoding="utf-8")
+        lock_path.symlink_to(target)
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_UNSAFE_MARKER")
+        self.assertTrue(lock_path.is_symlink())
+
     def test_process_crash_leaves_restore_marker_fail_closed(self):
         context = multiprocessing.get_context("fork")
         ready = context.Event()
