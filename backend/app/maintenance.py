@@ -499,11 +499,19 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
     }
     descriptor = None
     try:
-        descriptor = os.open(
-            str(lock_path),
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o600,
-        )
+        # Coordinate connection creation and lock acquisition within this
+        # process. Refuse to proceed while any application-managed handle is
+        # still open; this is stricter than merely checking active transactions.
+        with database._CONNECTION_GUARD:
+            if database.open_connection_count():
+                raise RuntimeError(
+                    "Restore lock refused: application database connections remain open."
+                )
+            descriptor = os.open(
+                str(lock_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
         with os.fdopen(descriptor, "w", encoding="utf-8") as lock_file:
             descriptor = None
             lock_file.write(json.dumps(payload, sort_keys=True))
