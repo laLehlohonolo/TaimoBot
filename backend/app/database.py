@@ -1,7 +1,18 @@
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
+
+
+_CONNECTION_GUARD = threading.RLock()
+_OPEN_CONNECTIONS = set()
+
+
+def open_connection_count() -> int:
+    """Return the number of live application-managed SQLite connections in this process."""
+    with _CONNECTION_GUARD:
+        return len(_OPEN_CONNECTIONS)
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "taimobot.db"
@@ -19,26 +30,36 @@ class ClosingConnection(sqlite3.Connection):
         finally:
             self.close()
 
+    def close(self):
+        try:
+            return super().close()
+        finally:
+            with _CONNECTION_GUARD:
+                _OPEN_CONNECTIONS.discard(self)
+
 
 def get_connection():
     """Create a database connection unless a process-shared restore lock is active."""
     lock_path = DB_PATH.with_name(DB_PATH.name + ".restore.lock")
-    try:
-        restore_locked = lock_path.exists() or lock_path.is_symlink()
-    except OSError:
-        restore_locked = True
-    if restore_locked:
-        raise sqlite3.OperationalError(
-            "Database access blocked: a controlled restore has quiesced the application."
+    # Serialize connection creation against restore-lock acquisition inside
+    # this process, closing the check-then-connect race.
+    with _CONNECTION_GUARD:
+        try:
+            restore_locked = lock_path.exists() or lock_path.is_symlink()
+        except OSError:
+            restore_locked = True
+        if restore_locked:
+            raise sqlite3.OperationalError(
+                "Database access blocked: a controlled restore has quiesced the application."
+            )
+
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(
+            DB_PATH,
+            timeout=30,
+            factory=ClosingConnection
         )
-
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    connection = sqlite3.connect(
-        DB_PATH,
-        timeout=30,
-        factory=ClosingConnection
-    )
+        _OPEN_CONNECTIONS.add(connection)
 
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
