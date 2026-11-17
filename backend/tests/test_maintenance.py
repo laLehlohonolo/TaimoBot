@@ -111,6 +111,10 @@ class DailyMaintenanceTests(unittest.TestCase):
                 worker.terminate()
                 worker.join(5)
         self.assertEqual(worker.exitcode, 0)
+        # A timed-out acquisition must not leave a marker or strand the guard.
+        self.assertFalse(is_restore_lock_active())
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
 
     def test_live_backup_holds_process_guard_against_restore_race(self):
         def attempt_restore_during_backup(*args, **kwargs):
