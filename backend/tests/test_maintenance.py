@@ -56,6 +56,14 @@ class DailyMaintenanceTests(unittest.TestCase):
         with patch("app.safety.is_maintenance_window", return_value=False):
             require_trading_enabled()
 
+    def test_live_backup_is_blocked_while_restore_lock_is_active(self):
+        lock = acquire_restore_lock("4" * 32)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "controlled restore"):
+                create_verified_backup()
+        finally:
+            release_restore_lock(lock["lock_token"])
+
     def test_backup_is_created_and_integrity_verified(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
