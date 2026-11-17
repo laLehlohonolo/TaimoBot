@@ -27,6 +27,11 @@ from app.database import init_db
 from app.safety import deactivate_emergency_stop, require_trading_enabled
 
 
+def _crash_after_acquiring_restore_lock(ready):
+    acquire_restore_lock("7" * 32, timeout_seconds=1.0)
+    ready.set()
+    os._exit(0)
+
 def _hold_database_connection_for_restore_test(ready, release):
     connection = database.get_connection()
     ready.set()
@@ -63,6 +68,28 @@ class DailyMaintenanceTests(unittest.TestCase):
         deactivate_emergency_stop()
         with patch("app.safety.is_maintenance_window", return_value=False):
             require_trading_enabled()
+
+    def test_process_crash_leaves_restore_marker_fail_closed(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        worker = context.Process(
+            target=_crash_after_acquiring_restore_lock,
+            args=(ready,),
+        )
+        worker.start()
+        worker.join(5)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(5)
+        self.assertEqual(worker.exitcode, 0)
+        self.assertTrue(ready.is_set())
+        self.assertTrue(is_restore_lock_active())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "controlled restore"):
+            database.get_connection()
+        # An abandoned marker is intentionally not reclaimed automatically.
+        # A human operator must inspect recovery state before removing it.
+        with self.assertRaises(FileExistsError):
+            acquire_restore_lock("8" * 32, timeout_seconds=0.1)
 
     def test_restore_lock_waits_for_connections_in_another_process(self):
         context = multiprocessing.get_context("fork")
