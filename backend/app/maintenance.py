@@ -60,7 +60,12 @@ def create_verified_backup(
     final_path = destination_dir / f"taimobot-{stamp}-{attempt_id}.sqlite3"
     temporary_path = destination_dir / f".taimobot-{stamp}-{attempt_id}.tmp"
 
+    guard_fd = None
     try:
+        # Hold a shared process-wide guard for the entire live-database backup.
+        # This closes the race between the initial marker check and sqlite3.connect.
+        if source.resolve() == Path(database.DB_PATH).resolve():
+            guard_fd = database._acquire_connection_guard_fd()
         with sqlite3.connect(str(source), timeout=30) as live:
             with sqlite3.connect(str(temporary_path), timeout=30) as backup:
                 live.backup(backup)
@@ -74,6 +79,9 @@ def create_verified_backup(
     except Exception:
         temporary_path.unlink(missing_ok=True)
         raise
+    finally:
+        if guard_fd is not None:
+            os.close(guard_fd)
 
     return {
         "status": "BACKUP_VERIFIED",
