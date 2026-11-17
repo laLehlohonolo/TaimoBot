@@ -2,11 +2,33 @@
 import os
 import sqlite3
 import threading
+import fcntl
 from pathlib import Path
 
 
 _CONNECTION_GUARD = threading.RLock()
 _OPEN_CONNECTIONS = set()
+
+
+def restore_guard_path() -> Path:
+    return DB_PATH.with_name(DB_PATH.name + ".restore.guard")
+
+
+def _acquire_connection_guard_fd() -> int:
+    """Hold a shared OS lock for the full lifetime of an app DB connection."""
+    guard_path = restore_guard_path()
+    descriptor = os.open(str(guard_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        lock_path = DB_PATH.with_name(DB_PATH.name + ".restore.lock")
+        if lock_path.exists() or lock_path.is_symlink():
+            raise sqlite3.OperationalError(
+                "Database access blocked: a controlled restore has quiesced the application."
+            )
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
 
 
 def open_connection_count() -> int:
@@ -34,6 +56,13 @@ class ClosingConnection(sqlite3.Connection):
         try:
             return super().close()
         finally:
+            guard_fd = getattr(self, "_restore_guard_fd", None)
+            if guard_fd is not None:
+                self._restore_guard_fd = None
+                try:
+                    os.close(guard_fd)
+                except OSError:
+                    pass
             with _CONNECTION_GUARD:
                 _OPEN_CONNECTIONS.discard(self)
 
@@ -54,12 +83,18 @@ def get_connection():
             )
 
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(
-            DB_PATH,
-            timeout=30,
-            factory=ClosingConnection
-        )
-        _OPEN_CONNECTIONS.add(connection)
+        guard_fd = _acquire_connection_guard_fd()
+        try:
+            connection = sqlite3.connect(
+                DB_PATH,
+                timeout=30,
+                factory=ClosingConnection
+            )
+            connection._restore_guard_fd = guard_fd
+            _OPEN_CONNECTIONS.add(connection)
+        except Exception:
+            os.close(guard_fd)
+            raise
 
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
