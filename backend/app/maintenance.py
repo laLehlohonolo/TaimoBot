@@ -688,6 +688,164 @@ def inspect_restore_lock() -> dict:
         "marker_removed": False,
     }
 
+
+def recover_abandoned_restore_lock(
+    operator_id: str,
+    incident_ref: str,
+    *,
+    confirm: bool = False,
+    audit_path: Path | None = None,
+) -> dict:
+    """Remove an abandoned restore marker only after explicit operator approval.
+
+    This is an out-of-band recovery primitive, not an HTTP endpoint. It requires
+    an operator identity, incident reference and explicit confirmation. It
+    holds the process-shared exclusive guard while rechecking the exact marker,
+    writes and fsyncs an audit STARTED event before unlinking, then records
+    COMPLETE. It never changes the database or SQLite sidecars.
+    """
+    def valid_label(value: str, label: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value.strip()) > 200
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise ValueError(f"A valid {label} is required.")
+        return value.strip()
+
+    operator = valid_label(operator_id, "operator identity")
+    incident = valid_label(incident_ref, "incident reference")
+    if confirm is not True:
+        raise ValueError("Explicit confirm=True is required for lock recovery.")
+
+    # The first read must establish that this is an abandoned marker, not an
+    # active lock. A second identity check under the exclusive guard closes the
+    # race between inspection and recovery.
+    inspection = inspect_restore_lock()
+    if inspection.get("status") != "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW":
+        raise RuntimeError("Restore marker is not confirmed abandoned; recovery refused.")
+
+    lock_path = restore_lock_path()
+    guard_path = database.restore_guard_path()
+    marker_fd = None
+    guard_fd = None
+    try:
+        marker_fd = os.open(
+            str(lock_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        marker_stat = os.fstat(marker_fd)
+        if not __import__("stat").S_ISREG(marker_stat.st_mode):
+            raise RuntimeError("Restore marker is not a regular file.")
+        marker_identity = (
+            marker_stat.st_dev, marker_stat.st_ino,
+            marker_stat.st_size, marker_stat.st_mtime_ns,
+        )
+        marker_bytes = os.read(marker_fd, 65536)
+        if os.read(marker_fd, 1):
+            raise RuntimeError("Restore marker exceeds the recovery inspection limit.")
+
+        guard_fd = os.open(
+            str(guard_path),
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        if not __import__("stat").S_ISREG(os.fstat(guard_fd).st_mode):
+            raise RuntimeError("Restore guard is not a regular file.")
+        try:
+            fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("Restore guard is active; recovery refused.") from error
+
+        current_stat = lock_path.lstat()
+        current_identity = (
+            current_stat.st_dev, current_stat.st_ino,
+            current_stat.st_size, current_stat.st_mtime_ns,
+        )
+        os.lseek(marker_fd, 0, os.SEEK_SET)
+        current_bytes = os.read(marker_fd, 65536)
+        if (
+            current_identity != marker_identity
+            or current_bytes != marker_bytes
+            or lock_path.is_symlink()
+        ):
+            raise RuntimeError("Restore marker changed during recovery; refused.")
+
+        payload = json.loads(marker_bytes.decode("utf-8"))
+        if (
+            payload.get("plan_id") != inspection.get("plan_id")
+            or payload.get("pid") != inspection.get("process_id")
+            or payload.get("created_at") != inspection.get("created_at")
+        ):
+            raise RuntimeError("Restore marker metadata changed; recovery refused.")
+
+        audit_file = Path(
+            audit_path
+            or (Path(database.DB_PATH).parent / "restore-lock-recovery.audit.jsonl")
+        )
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        audit_fd = os.open(
+            str(audit_file),
+            os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            if not __import__("stat").S_ISREG(os.fstat(audit_fd).st_mode):
+                raise RuntimeError("Recovery audit destination is not a regular file.")
+            marker_hash = hashlib.sha256(marker_bytes).hexdigest()
+
+            def write_audit(event: str) -> None:
+                record = {
+                    "event": event,
+                    "timestamp": datetime.now(SAST).isoformat(),
+                    "operator_id": operator,
+                    "incident_ref": incident,
+                    "plan_id": inspection["plan_id"],
+                    "marker_sha256": marker_hash,
+                    "marker_file": lock_path.name,
+                    "database_changed": False,
+                    "sidecars_changed": False,
+                }
+                data = (json.dumps(record, sort_keys=True) + "\\n").encode("utf-8")
+                view = memoryview(data)
+                while view:
+                    written = os.write(audit_fd, view)
+                    if written <= 0:
+                        raise OSError("Could not complete recovery audit write.")
+                    view = view[written:]
+                os.fsync(audit_fd)
+
+            write_audit("RESTORE_LOCK_RECOVERY_STARTED")
+            lock_path.unlink()
+            directory_fd = os.open(
+                str(lock_path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            write_audit("RESTORE_LOCK_RECOVERY_COMPLETE")
+        finally:
+            os.close(audit_fd)
+    finally:
+        if guard_fd is not None:
+            os.close(guard_fd)
+        if marker_fd is not None:
+            os.close(marker_fd)
+
+    return {
+        "status": "ABANDONED_RESTORE_LOCK_RECOVERED",
+        "operator_id": operator,
+        "incident_ref": incident,
+        "audit_file": str(audit_file),
+        "marker_removed": True,
+        "database_changed": False,
+        "sidecars_changed": False,
+        "live_database_replaced": False,
+        "trading_mode": "paper",
+    }
+
+
 def release_restore_lock(lock_token: str) -> dict:
     """Release only the lock owned by the supplied unpredictable token."""
     if not isinstance(lock_token, str) or not re.fullmatch(r"[a-f0-9]{32}", lock_token):
