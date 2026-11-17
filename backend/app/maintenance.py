@@ -584,21 +584,41 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
 def inspect_restore_lock() -> dict:
     """Read-only inspection of a restore marker and its process-shared guard.
 
-    A marker whose OS guard is available is classified as abandoned, but is
-    never removed here. Operator review remains mandatory before recovery.
+    Marker and guard identities are checked around the OS-lock probe. Any
+    concurrent replacement or mutation is reported as inconclusive; this
+    function never removes or rewrites a marker.
     """
     lock_path = restore_lock_path()
+    marker_fd = None
+    guard_fd = None
     try:
-        metadata = lock_path.lstat()
+        marker_fd = os.open(
+            str(lock_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        marker_stat = os.fstat(marker_fd)
+        if not __import__("stat").S_ISREG(marker_stat.st_mode):
+            return {"status": "RESTORE_LOCK_UNSAFE_MARKER", "marker_present": True}
+        marker_identity = (
+            marker_stat.st_dev, marker_stat.st_ino,
+            marker_stat.st_size, marker_stat.st_mtime_ns,
+        )
+        marker_bytes = os.read(marker_fd, 65536)
+        if os.read(marker_fd, 1):
+            raise ValueError("restore marker exceeds inspection limit")
     except FileNotFoundError:
         return {"status": "NO_RESTORE_LOCK", "marker_present": False}
-    except OSError:
-        return {"status": "RESTORE_LOCK_UNINSPECTABLE", "marker_present": True}
-    if lock_path.is_symlink() or not lock_path.is_file():
-        return {"status": "RESTORE_LOCK_UNSAFE_MARKER", "marker_present": True}
+    except OSError as error:
+        status = (
+            "RESTORE_LOCK_UNSAFE_MARKER"
+            if getattr(error, "errno", None) in (getattr(os, "ELOOP", 40),)
+            else "RESTORE_LOCK_UNINSPECTABLE"
+        )
+        return {"status": status, "marker_present": True}
+    except ValueError:
+        return {"status": "RESTORE_LOCK_METADATA_UNREADABLE", "marker_present": True}
 
     try:
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        payload = json.loads(marker_bytes.decode("utf-8"))
         plan_id = payload.get("plan_id")
         process_id = payload.get("pid")
         created_at = payload.get("created_at")
@@ -610,22 +630,52 @@ def inspect_restore_lock() -> dict:
             or not isinstance(created_at, str)
         ):
             raise ValueError("invalid restore marker metadata")
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        os.close(marker_fd)
         return {"status": "RESTORE_LOCK_METADATA_UNREADABLE", "marker_present": True}
 
-    guard_fd = None
+    guard_path = database.restore_guard_path()
     try:
-        guard_fd = os.open(str(database.restore_guard_path()), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            guard_stat = guard_path.lstat()
+            if not __import__("stat").S_ISREG(guard_stat.st_mode):
+                return {"status": "RESTORE_LOCK_UNSAFE_GUARD", "marker_present": True}
+        except FileNotFoundError:
+            pass
+        guard_fd = os.open(
+            str(guard_path),
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        if not __import__("stat").S_ISREG(os.fstat(guard_fd).st_mode):
+            return {"status": "RESTORE_LOCK_UNSAFE_GUARD", "marker_present": True}
         try:
             fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             status = "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW"
         except BlockingIOError:
             status = "RESTORE_LOCK_ACTIVE"
+
+        # Re-check both the pathname identity and bytes after the lock probe.
+        # This prevents a concurrent marker swap/edit from being labelled stale.
+        current_stat = lock_path.lstat()
+        current_identity = (
+            current_stat.st_dev, current_stat.st_ino,
+            current_stat.st_size, current_stat.st_mtime_ns,
+        )
+        os.lseek(marker_fd, 0, os.SEEK_SET)
+        current_bytes = os.read(marker_fd, 65536)
+        if os.read(marker_fd, 1):
+            current_bytes = b""
+        if current_identity != marker_identity or current_bytes != marker_bytes:
+            status = "RESTORE_LOCK_CHANGED_DURING_INSPECTION"
+    except FileNotFoundError:
+        status = "RESTORE_LOCK_CHANGED_DURING_INSPECTION"
     except OSError:
         status = "RESTORE_LOCK_GUARD_UNINSPECTABLE"
     finally:
         if guard_fd is not None:
             os.close(guard_fd)
+        os.close(marker_fd)
 
     return {
         "status": status,
@@ -633,11 +683,10 @@ def inspect_restore_lock() -> dict:
         "plan_id": plan_id,
         "process_id": process_id,
         "created_at": created_at,
-        "marker_size_bytes": metadata.st_size,
+        "marker_size_bytes": marker_stat.st_size,
         "automatic_recovery_performed": False,
         "marker_removed": False,
     }
-
 
 def release_restore_lock(lock_token: str) -> dict:
     """Release only the lock owned by the supplied unpredictable token."""
