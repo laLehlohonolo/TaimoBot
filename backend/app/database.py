@@ -68,9 +68,19 @@ def get_connection():
             locked = True
         if not locked:
             return sqlite3.SQLITE_OK
-        if action in write_actions:
-            return sqlite3.SQLITE_DENY
-        if action == sqlite3.SQLITE_PRAGMA and arg2 is not None:
+
+        # Once restore quiescence begins, pre-existing application handles
+        # must not start new reads or writes. Transaction finalization remains
+        # permitted so an already-open transaction can COMMIT/ROLLBACK and
+        # release its SQLite locks; connection close is unaffected.
+        blocked_actions = write_actions | {
+            sqlite3.SQLITE_SELECT,
+            sqlite3.SQLITE_READ,
+            sqlite3.SQLITE_FUNCTION,
+            sqlite3.SQLITE_PRAGMA,
+            sqlite3.SQLITE_RECURSIVE,
+        }
+        if action in blocked_actions:
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
 
