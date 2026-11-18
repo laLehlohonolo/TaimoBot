@@ -537,7 +537,16 @@ def reconcile_restore_execution_artifacts(
             lifecycle_issues.append(
                 f"current live database fingerprint does not match terminal {terminal_event} evidence"
             )
-    if lifecycle_issues:
+    event_evidence_review = []
+    for record in matching_records:
+        missing_evidence = _restore_event_evidence_issues(record)
+        if missing_evidence:
+            event_evidence_review.append({
+                "sequence": record.get("sequence"),
+                "event": record.get("event"),
+                "issues": missing_evidence,
+            })
+    if lifecycle_issues or event_evidence_review:
         all_verified = False
 
     return {
@@ -548,6 +557,7 @@ def reconcile_restore_execution_artifacts(
         "event_count": len(matching_records),
         "conflicting_fingerprints": sorted(conflicting),
         "lifecycle_consistency_issues": lifecycle_issues,
+        "event_evidence_review": event_evidence_review,
         "terminal_event": terminal_event,
         "artifacts": results,
         "live_database_sidecars": live_sidecars,
