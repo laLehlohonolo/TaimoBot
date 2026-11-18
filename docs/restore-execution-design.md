@@ -114,6 +114,14 @@ itself cannot prove a consistent SQLite state when WAL/SHM sidecars exist, nor
 can a hash establish that the application-level data is correct. Operator
 verification and a separately tested quiescence protocol remain mandatory.
 
+The checker opens artifact files with no-follow semantics and requires regular
+files. Conflicting fingerprints for the same artifact across events are treated
+as contradictory evidence, not resolved by choosing the latest value. If the
+live database has WAL/SHM sidecars, the checker inventories them and deliberately
+skips opening that database through SQLite; the sidecars are preserved and the
+overall result remains review-required. A symlinked or missing artifact also
+fails closed.
+
 To make this evidence useful during future execution, every execution event
 that establishes an artifact should record its SHA-256 under
 `details.artifacts` using the exact keys `live_database_sha256`,
