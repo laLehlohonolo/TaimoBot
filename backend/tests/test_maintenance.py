@@ -1768,7 +1768,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             + '","source_backup_sha256":"' + ("1" * 64) + '"',
             1,
         )
-        journal.write_text(raw + "\\n", encoding="utf-8")
+        journal.write_text(raw + chr(10), encoding="utf-8")
 
         verified = verify_restore_execution_journal(journal)
 
