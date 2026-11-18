@@ -2805,5 +2805,17 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertIn("recursion", result["reason"].lower())
 
 
+    def test_restore_journal_rejects_file_over_global_size_limit(self):
+        journal = Path(self.temp_dir.name) / "restore-oversized.audit.jsonl"
+        with journal.open("wb") as handle:
+            handle.truncate((16 * 1024 * 1024) + 1)
+
+        result = verify_restore_execution_journal(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_INVALID")
+        self.assertEqual(result["record_count"], 0)
+        self.assertIn("size limit", result.get("reason", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
