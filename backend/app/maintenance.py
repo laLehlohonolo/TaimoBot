@@ -1609,14 +1609,6 @@ def verify_restore_execution_readiness(
             "and complete operator-reviewed sidecar handling before preflight."
         )
 
-    try:
-        with sqlite3.connect(f"file:{live_path}?mode=ro", uri=True, timeout=10) as live:
-            live_integrity = live.execute("PRAGMA integrity_check").fetchone()
-    except (sqlite3.Error, OSError, ValueError) as error:
-        raise ValueError("The current live database cannot be verified.") from error
-    if not live_integrity or live_integrity[0] != "ok":
-        raise ValueError("The current live database failed its integrity check.")
-
     required_live_schema = {
         "users": {"user_id", "email", "password_hash", "created_at"},
         "paper_accounts": {"account_id", "starting_balance", "balance"},
@@ -1636,7 +1628,13 @@ def verify_restore_execution_readiness(
         "system_safety_state": {"singleton_id", "emergency_stop_active"},
     }
     try:
+        # One explicit read transaction gives integrity, schema and FK checks
+        # a consistent SQLite snapshot rather than opening the live DB twice.
         with sqlite3.connect(f"file:{live_path}?mode=ro", uri=True, timeout=10) as live:
+            live.execute("BEGIN")
+            live_integrity = live.execute("PRAGMA integrity_check").fetchone()
+            if not live_integrity or live_integrity[0] != "ok":
+                raise ValueError("The current live database failed its integrity check.")
             live_tables = {
                 row[0] for row in live.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -1648,7 +1646,7 @@ def verify_restore_execution_readiness(
                     missing_live_schema.append(table)
                     continue
                 actual_columns = {
-                    row[1] for row in live.execute(f"PRAGMA table_info({table})")
+                    row[1] for row in live.execute(f"PRAGMA table_info('{table}')")
                 }
                 missing = required_columns - actual_columns
                 if missing:
@@ -1656,8 +1654,10 @@ def verify_restore_execution_readiness(
                         f"{table}:" + ",".join(sorted(missing))
                     )
             live_fk_violations = live.execute("PRAGMA foreign_key_check").fetchall()
-    except (sqlite3.Error, OSError, ValueError) as error:
-        raise ValueError("The live database schema cannot be verified.") from error
+    except ValueError:
+        raise
+    except (sqlite3.Error, OSError) as error:
+        raise ValueError("The current live database integrity/schema cannot be verified.") from error
     if missing_live_schema:
         raise ValueError(
             "The live database is missing required TaimoBot schema: "
@@ -1665,6 +1665,7 @@ def verify_restore_execution_readiness(
         )
     if live_fk_violations:
         raise ValueError("The live database has foreign-key violations.")
+
 
     return {
         "status": "RESTORE_EXECUTION_PREFLIGHT_PASSED",
