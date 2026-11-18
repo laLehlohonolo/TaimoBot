@@ -1269,8 +1269,13 @@ def inspect_restore_lock() -> dict:
         if (
             not isinstance(plan_id, str)
             or not re.fullmatch(r"[a-f0-9]{32}", plan_id)
-            or not isinstance(lock_token, str)
-            or not re.fullmatch(r"[a-f0-9]{32}", lock_token)
+            or (
+                lock_token is not None
+                and (
+                    not isinstance(lock_token, str)
+                    or not re.fullmatch(r"[a-f0-9]{32}", lock_token)
+                )
+            )
             or isinstance(process_id, bool)
             or not isinstance(process_id, int)
             or not isinstance(created_at, str)
