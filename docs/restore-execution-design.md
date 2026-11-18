@@ -96,6 +96,31 @@ not proof that the on-disk database currently matches that event. An operator
 must independently inspect the live database, sidecars, preserved images,
 fingerprints, and restore plan before deciding what to do.
 
+## Implemented read-only artifact evidence reconciliation
+
+`reconcile_restore_execution_artifacts(...)` compares four current files against
+SHA-256 fingerprints recorded in the selected plan/execution journal:
+`live_database`, `source_backup`, `staged_candidate`, and `rollback_backup`.
+For each file it reports whether a fingerprint was recorded and whether the
+current bytes match. It also runs SQLite integrity and foreign-key checks and
+inventories live-database WAL/SHM sidecars.
+
+A missing recorded fingerprint, changed file, unsafe/missing path, failed
+integrity check, foreign-key violation, or present live sidecar keeps the result
+in review-required state. This helper is read-only: it does not repair, copy,
+replace, checkpoint, truncate, or remove files. Even a complete fingerprint
+match returns `database_state_verified: false`; a main database file hash by
+itself cannot prove a consistent SQLite state when WAL/SHM sidecars exist, nor
+can a hash establish that the application-level data is correct. Operator
+verification and a separately tested quiescence protocol remain mandatory.
+
+To make this evidence useful during future execution, every execution event
+that establishes an artifact should record its SHA-256 under
+`details.artifacts` using the exact keys `live_database_sha256`,
+`source_backup_sha256`, `staged_candidate_sha256`, and
+`rollback_backup_sha256`. Older journal entries without those fields remain
+inspectable but cannot be declared fingerprint-matched.
+
 ## Audit requirements
 
 Append-only, fsynced events should include:
