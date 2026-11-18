@@ -68,16 +68,20 @@ trading mode. Keep the system in paper mode.
 
 **Do not run this while any TaimoBot backend worker may still be active.**
 
-1. Stop the backend service and all workers using this database. Confirm the
-   process recorded in the marker is no longer running and that no maintenance
-   or restore operation is in progress.
+1. Stop the backend service and all workers using this database. Stop every
+   external SQLite client, maintenance script, and process that could open the
+   database; the process-shared guard coordinates TaimoBot-managed connections
+   only. Confirm the process recorded in the marker is no longer running and
+   that no maintenance or restore operation is in progress.
 2. Preserve a copy of the live database and any adjacent `-wal` / `-shm`
    files for investigation. Do not delete, rename, or checkpoint those files
    as part of lock recovery.
    Preserve the adjacent `.restore.guard` file as well. It is the stable OS-lock
    coordination file shared by backend processes; do not delete or replace it
    during abandoned-marker recovery. The recovery helper removes only the
-   `.restore.lock` marker after acquiring the guard exclusively.
+   `.restore.lock` marker after acquiring the guard exclusively. Restore-lock
+   acquisition inventories WAL/SHM but does not checkpoint, truncate, or remove
+   them; their handling belongs to a separately tested restore procedure.
 3. From the `backend` directory, inspect the marker:
 
    ```bash
