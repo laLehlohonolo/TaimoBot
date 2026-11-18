@@ -2467,5 +2467,38 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
 
 
+    def test_restore_execution_inspector_rejects_duplicate_started_event_read_only(self):
+        journal = Path(self.temp_dir.name) / "restore-duplicate-started.audit.jsonl"
+        details = {"artifacts": {
+            "live_database_sha256": "1" * 64,
+            "source_backup_sha256": "2" * 64,
+            "staged_candidate_sha256": "3" * 64,
+            "rollback_backup_sha256": "4" * 64,
+        }}
+        for _ in range(2):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", "3" * 32, "4" * 32,
+                "operator@example.com", "INC-DUPLICATE-STARTED",
+                details=details,
+                journal_path=journal,
+            )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertIn(
+            "invalid event transition RESTORE_EXECUTION_STARTED -> RESTORE_EXECUTION_STARTED",
+            result["semantic_errors"][0]["reason"],
+        )
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_VERIFIED",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
