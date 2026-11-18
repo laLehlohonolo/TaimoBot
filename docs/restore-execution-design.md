@@ -78,6 +78,23 @@ anchor the terminal journal digest in a separately controlled system or
 write-once store. The helper records events only: no endpoint invokes it to
 replace the live database, and no restore execution is implemented.
 
+## Implemented read-only crash-state inspection
+
+The journal foundation now includes `inspect_restore_execution_state()`. It
+verifies the journal before classifying events by plan ID and execution token.
+It distinguishes an interrupted start, a published-but-unconfirmed image, an
+incomplete rollback, a recorded recovery-required outcome, and terminal
+complete/rolled-back events that still need reconciliation against the actual
+database files.
+
+The inspector also checks event ordering and rejects semantically impossible
+transitions, even when the hash chain itself is valid. It is read-only and
+always returns `automatic_action: NONE`; it never resumes, retries, rolls back,
+changes plan status, or touches the live database. A terminal journal event is
+not proof that the on-disk database currently matches that event. An operator
+must independently inspect the live database, sidecars, preserved images,
+fingerprints, and restore plan before deciding what to do.
+
 ## Audit requirements
 
 Append-only, fsynced events should include:
