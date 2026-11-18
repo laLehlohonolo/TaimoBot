@@ -1,0 +1,103 @@
+# TaimoBot controlled restore and rollback design
+
+## Status
+
+Design only. This document does not authorize database replacement, sidecar deletion, or live trading. TaimoBot remains paper-trading only. The current implementation supports recovery inventory, isolated staging, immutable SHA-256 fingerprints, explicit approval, read-only execution preflight, process-wide restore locking, and operator-reviewed abandoned-marker recovery. It does not yet implement live database replacement or rollback.
+
+## Non-negotiable invariants
+
+1. Never execute a restore unless an administrator-approved plan is still fresh and all three artifacts (source, staged candidate, and pre-restore rollback backup) pass integrity, schema, foreign-key, path, file-type, and fingerprint checks immediately before execution.
+2. Keep the live database and its sidecars unchanged until the system has exclusive coordination and has recorded a durable execution-start audit event.
+3. Never unlink, rename, truncate, or casually checkpoint a live `-wal` or `-shm` file. Their contents may be part of the current database state.
+4. The stable `.restore.guard` file must never be removed or replaced. The `.restore.lock` marker is separate and is only removed by its token-owning controlled path or the explicit abandoned-marker recovery helper.
+5. A process-level flock coordinates only participants that use the TaimoBot guard protocol. It does not stop arbitrary SQLite clients or unrelated processes. The operator must stop all backend workers and any external process using the database before execution.
+6. No endpoint may report success merely because a file rename succeeded. The installed database must pass post-install integrity, required-schema, and foreign-key checks before the plan can be marked APPLIED.
+7. If installation or post-install verification fails, rollback must be attempted from the independently verified pre-restore artifact. If rollback cannot be verified, keep the application stopped and require operator intervention.
+8. Restore execution must not alter trading mode, enable live execution, or bypass emergency-stop state.
+
+## Required state machine
+
+`PREPARED -> APPROVED -> EXECUTING -> APPLIED`
+
+Failure paths:
+
+- `EXECUTING -> ROLLING_BACK -> ROLLED_BACK` when the source install fails but the rollback artifact is successfully installed and verified.
+- `EXECUTING -> FAILED` only when no database replacement has occurred and the live database remains verified unchanged.
+- `EXECUTING -> RECOVERY_REQUIRED` when the system cannot prove which database image is installed or cannot verify rollback.
+- `APPROVED -> EXPIRED` when the approved plan exceeds its allowed age before execution begins.
+
+Do not overload the existing FAILED status to mean both “nothing changed” and “rollback uncertain.” Those outcomes have materially different operational meanings. State transitions must be conditional updates fenced by plan ID and execution token.
+
+## Preconditions before implementation can execute
+
+- All backend workers and schedulers using the database are stopped. This is an operator-enforced prerequisite, not something flock alone can prove for arbitrary clients.
+- No external process has the database open.
+- The live database, source backup, staged candidate, and rollback backup are on the expected managed filesystem locations; all are regular non-symlink files.
+- The source, staged, and rollback SHA-256 values still match the immutable fingerprints captured at preparation.
+- Source, staged, rollback, and live database each pass integrity, required-schema, and foreign-key checks as applicable.
+- Live database sidecars have been inventoried. If WAL/SHM exist, execution must stop unless a separately tested, lossless handling procedure proves how their state is incorporated and preserved.
+- A durable audit destination is available and writable. Audit STARTED must be fsynced before any live-file mutation.
+- An exclusive restore guard is held, with no application-managed database connections remaining.
+- A second operator confirmation is recorded at execution time; approval is not a substitute for the execution confirmation.
+
+## File installation strategy to investigate and test
+
+A single `os.replace` can atomically replace one directory entry on the same filesystem. It cannot atomically replace a database plus its WAL/SHM sidecars as a group. Therefore a naïve rename of the staged database over the live database is prohibited.
+
+Implementation research must choose and test one explicit strategy:
+
+- Prefer a quiescent, checkpointed, standalone SQLite database image with no live WAL/SHM dependency, but only after a supported SQLite procedure has safely incorporated all committed WAL content and verified the result.
+- Preserve pre-operation live database and sidecar artifacts in a uniquely named, fsynced forensic/rollback directory before changing any names.
+- Build the replacement file in the same filesystem as the live database; fsync the file and parent directory before publication.
+- Use a recoverable rename sequence with a durable journal that makes every intermediate state unambiguous after process or machine crash.
+- Never delete the old live image until the new image is verified and the rollback window is explicitly closed by a later, separate operation.
+
+The final protocol must document exactly what happens if the process stops after each filesystem operation. It must not describe a multi-file sequence as atomic unless crash testing demonstrates that claim.
+
+## Audit requirements
+
+Append-only, fsynced events should include:
+
+- `RESTORE_EXECUTION_STARTED`: plan ID, execution token, operator, incident reference, timestamp, selected source fingerprint, staged fingerprint, rollback fingerprint, and live database identity.
+- `RESTORE_SOURCE_PUBLISHED`: file identities and hashes after publication.
+- `RESTORE_POSTCHECK_PASSED`: integrity/schema/foreign-key outcomes and installed hash.
+- `RESTORE_ROLLBACK_STARTED` and `RESTORE_ROLLBACK_VERIFIED` when rollback is needed.
+- `RESTORE_EXECUTION_COMPLETE`, `RESTORE_EXECUTION_ROLLED_BACK`, or `RESTORE_EXECUTION_RECOVERY_REQUIRED` as the terminal event.
+
+If a terminal audit write fails, the operation must be treated as requiring operator review, even if a database image appears valid.
+
+## Crash and fault-injection test matrix
+
+Before enabling execution, tests must inject failure after every durable boundary:
+
+1. Before execution audit.
+2. After STARTED audit but before any file mutation.
+3. After live DB/sidecar preservation.
+4. After replacement staging file fsync.
+5. After first rename.
+6. After replacement publication.
+7. During post-install integrity check.
+8. During schema and foreign-key verification.
+9. During rollback publication.
+10. During rollback verification.
+11. During terminal audit write.
+12. With disk full, permission denied, symlink substitution, path replacement, and process termination.
+13. With an active app connection in another process and with an unrelated SQLite process holding the DB.
+14. With WAL and SHM present, absent, malformed, or changing.
+
+Each test must prove either (a) the original live database remains intact, (b) the new database is fully verified and the plan is APPLIED, or (c) the service remains stopped with a RECOVERY_REQUIRED outcome and sufficient preserved artifacts for manual recovery. No ambiguous “success” is acceptable.
+
+## Operator runbook requirements
+
+- Stop all backend workers, schedulers, and external database users.
+- Preserve the live database, WAL, SHM, and stable guard file before intervention.
+- Inspect the restore marker and guard state; never auto-reclaim an abandoned marker.
+- Confirm the selected plan, operator identity, incident reference, and current paper-only mode.
+- Run preflight immediately before execution.
+- Execute only through a separately implemented, audited operator path.
+- Verify terminal audit event, installed database integrity/schema/foreign keys, plan state, and emergency-stop state before restarting any worker.
+- If any state is uncertain, keep the service stopped. Do not retry blindly or manually delete sidecars/markers.
+
+## Explicit non-goals
+
+This design does not implement or authorize restore execution, database swapping, rollback execution, WAL/SHM deletion, live trading, or automatic abandoned-lock recovery. Those require separate implementation, fault-injection tests, and operator review.
