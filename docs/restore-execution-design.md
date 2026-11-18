@@ -150,9 +150,17 @@ eliminate hostile parent-directory substitution or provide a filesystem-wide
 atomic snapshot. Managed-directory validation and operator quiescence remain
 required.
 
+The reconciler also checks lifecycle fingerprint relationships: a
+postcheck-installed hash must agree with the completion hash, a verified
+rollback hash must agree with the rolled-back terminal hash, and when a terminal
+event exists the current live database file must match that terminal fingerprint
+(provided live sidecars are clear). Disagreement is surfaced as review-required,
+never repaired or inferred away. The published-database fingerprint remains a
+separate state from the staged-candidate fingerprint.
+
 A missing recorded fingerprint, changed file, unsafe/missing path, failed
-integrity check, foreign-key violation, or present live sidecar keeps the result
-in review-required state. This helper is read-only: it does not repair, copy,
+integrity check, foreign-key violation, or present sidecar on any artifact keeps
+the result in review-required state. This helper is read-only: it does not repair, copy,
 replace, checkpoint, truncate, or remove files. Even a complete fingerprint
 match returns `database_state_verified: false`; a main database file hash by
 itself cannot prove a consistent SQLite state when WAL/SHM sidecars exist, nor
