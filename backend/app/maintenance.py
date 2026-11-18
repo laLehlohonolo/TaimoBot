@@ -45,7 +45,7 @@ def _restore_journal_digest(record: dict) -> str:
 
 
 def verify_restore_execution_journal(
-    journal_path: Path | None = None, *, include_records: bool = False
+    journal_path: Path | None = None, *, include_records: bool = False, lock_file: bool = True
 ) -> dict:
     """Verify the append-only hash chain without changing the journal."""
     path = Path(journal_path or (Path(database.DB_PATH).parent / "restore-execution.audit.jsonl"))
@@ -57,6 +57,8 @@ def verify_restore_execution_journal(
             result["records"] = []
         return result
     try:
+        if lock_file:
+            fcntl.flock(descriptor, fcntl.LOCK_SH)
         if not __import__("stat").S_ISREG(os.fstat(descriptor).st_mode):
             return {"status": "RESTORE_JOURNAL_UNSAFE", "record_count": 0}
         size = os.fstat(descriptor).st_size
@@ -277,7 +279,7 @@ def append_restore_execution_event(
         if not __import__("stat").S_ISREG(os.fstat(descriptor).st_mode):
             raise RuntimeError("Restore execution journal is not a regular file.")
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        verification = verify_restore_execution_journal(path)
+        verification = verify_restore_execution_journal(path, lock_file=False)
         if verification["status"] not in ("RESTORE_JOURNAL_EMPTY", "RESTORE_JOURNAL_VERIFIED"):
             raise RuntimeError("Restore execution journal failed integrity verification; append refused.")
         record = {
