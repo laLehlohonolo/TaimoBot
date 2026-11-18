@@ -27,6 +27,7 @@ from app.maintenance import (
     append_restore_execution_event,
     verify_restore_execution_journal,
     inspect_restore_execution_state,
+    reconcile_restore_execution_artifacts,
 )
 from app import database
 from app.database import init_db
@@ -1224,6 +1225,87 @@ class DailyMaintenanceTests(unittest.TestCase):
         result = inspect_restore_execution_state(journal)
         self.assertEqual(len(result["executions"]), 2)
         self.assertTrue(all(item["classification"].startswith("INTERRUPTED") for item in result["executions"]))
+
+    def test_restore_evidence_reconciliation_matches_all_recorded_artifacts(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live.sqlite3",
+            "source_backup": root / "source.sqlite3",
+            "staged_candidate": root / "staged.sqlite3",
+            "rollback_backup": root / "rollback.sqlite3",
+        }
+        for name, path in paths.items():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+                connection.execute("INSERT INTO evidence_probe VALUES (?)", (name,))
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        journal = root / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "8" * 32, "9" * 32,
+            "operator@example.com", "INC-EVIDENCE-001",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts(
+            "8" * 32, "9" * 32, paths, journal_path=journal,
+        )
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_MATCHED")
+        self.assertEqual(
+            [item["fingerprint_status"] for item in result["artifacts"]],
+            ["MATCH", "MATCH", "MATCH", "MATCH"],
+        )
+        self.assertTrue(all(item["integrity_check"] == "ok" for item in result["artifacts"]))
+        self.assertFalse(result["database_state_verified"])
+        self.assertEqual(result["automatic_action"], "NONE")
+
+    def test_restore_evidence_reconciliation_detects_changed_artifact(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live.sqlite3",
+            "source_backup": root / "source.sqlite3",
+            "staged_candidate": root / "staged.sqlite3",
+            "rollback_backup": root / "rollback.sqlite3",
+        }
+        for path in paths.values():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        journal = root / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-EVIDENCE-002",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        with sqlite3.connect(paths["source_backup"]) as connection:
+            connection.execute("INSERT INTO evidence_probe VALUES ('changed')")
+        result = reconcile_restore_execution_artifacts(
+            "a" * 32, "b" * 32, paths, journal_path=journal,
+        )
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        statuses = {item["artifact"]: item["fingerprint_status"] for item in result["artifacts"]}
+        self.assertEqual(statuses["source_backup"], "MISMATCH")
+        self.assertEqual(statuses["live_database"], "MATCH")
+
+    def test_restore_evidence_reconciliation_refuses_unrecorded_fingerprints(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live.sqlite3",
+            "source_backup": root / "source.sqlite3",
+            "staged_candidate": root / "staged.sqlite3",
+            "rollback_backup": root / "rollback.sqlite3",
+        }
+        for path in paths.values():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+        journal = root / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "c" * 32, "d" * 32,
+            "operator@example.com", "INC-EVIDENCE-003", journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts(
+            "c" * 32, "d" * 32, paths, journal_path=journal,
+        )
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertTrue(all(item["fingerprint_status"] == "NOT_RECORDED" for item in result["artifacts"]))
 
     def test_restore_execution_journal_appends_and_verifies_hash_chain(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
