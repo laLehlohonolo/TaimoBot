@@ -993,6 +993,21 @@ def inspect_recovery_candidates(backup_dir: Path | None = None) -> dict:
         foreign_key_violations = None
         try:
             stat = path.stat(follow_symlinks=False)
+            sidecars = inspect_sqlite_sidecars(path)
+            if sidecars["status"] != "SIDECARS_CLEAR":
+                issues.append("SQLITE_SIDECARS_PRESENT")
+                candidates.append({
+                    "file_name": path.name,
+                    "size_bytes": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, SAST).isoformat(),
+                    "integrity_check": "SKIPPED_SIDECARS_PRESENT",
+                    "missing_schema": [],
+                    "foreign_key_violations": None,
+                    "sidecars": sidecars,
+                    "restore_ready": False,
+                    "issues": issues,
+                })
+                continue
             with sqlite3.connect(
                 f"file:{path.resolve()}?mode=ro", uri=True, timeout=10
             ) as connection:
@@ -1037,6 +1052,7 @@ def inspect_recovery_candidates(backup_dir: Path | None = None) -> dict:
                 "integrity_check": integrity,
                 "missing_schema": missing_schema,
                 "foreign_key_violations": foreign_key_violations,
+                "sidecars": sidecars,
                 "restore_ready": not issues,
                 "issues": issues,
             })
