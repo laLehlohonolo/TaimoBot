@@ -1216,6 +1216,22 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
         self.assertEqual(result["automatic_action"], "NONE")
 
+    def test_restore_execution_state_rejects_operator_or_incident_identity_changes(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "9" * 32, "8" * 32,
+            "operator-one", "INC-IDENTITY-001", journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "9" * 32, "8" * 32,
+            "operator-two", "INC-IDENTITY-001", journal_path=journal,
+        )
+        result = inspect_restore_execution_state(journal)
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertIn("identity changed", result["semantic_errors"][0]["reason"])
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+
     def test_restore_execution_state_handles_multiple_independent_attempts(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         for plan, token, incident in (("4" * 32, "5" * 32, "INC-A"), ("6" * 32, "7" * 32, "INC-B")):
