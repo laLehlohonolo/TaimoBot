@@ -102,6 +102,31 @@ not proof that the on-disk database currently matches that event. An operator
 must independently inspect the live database, sidecars, preserved images,
 fingerprints, and restore plan before deciding what to do.
 
+The inspector now also reports event-specific evidence completeness. The
+minimum evidence contract is:
+
+- `RESTORE_EXECUTION_STARTED`: SHA-256 fingerprints for live database, source
+  backup, staged candidate, and rollback backup under `details.artifacts`.
+- `RESTORE_SOURCE_PUBLISHED`: staged-candidate and published live-database
+  fingerprints under `details.artifacts`.
+- `RESTORE_POSTCHECK_PASSED`: `integrity_check: "ok"`,
+  `foreign_key_violations: 0`, `schema_check: "passed"`, and the installed
+  database SHA-256.
+- `RESTORE_ROLLBACK_STARTED`: rollback-backup SHA-256.
+- `RESTORE_ROLLBACK_VERIFIED`: integrity result, zero foreign-key violations,
+  and restored-database SHA-256.
+- `RESTORE_EXECUTION_COMPLETE`: final database SHA-256.
+- `RESTORE_EXECUTION_ROLLED_BACK`: restored database SHA-256.
+- `RESTORE_EXECUTION_RECOVERY_REQUIRED`: a non-empty reason.
+
+The inspector surfaces missing or malformed evidence as
+`INCOMPLETE_REQUIRES_OPERATOR_REVIEW` per execution and lists the affected
+events and fields. Existing journal records remain readable for forensic
+continuity, but absent evidence is never inferred or upgraded to verified.
+This check is advisory/read-only; it does not prove the underlying file matches
+the recorded hash. The separate artifact reconciler must still be run, and
+database-state verification remains explicitly false.
+
 ## Implemented read-only artifact evidence reconciliation
 
 `reconcile_restore_execution_artifacts(...)` compares four current files against
