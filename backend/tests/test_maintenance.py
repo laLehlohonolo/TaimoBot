@@ -1305,6 +1305,43 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["database_state_verified"])
         self.assertEqual(result["automatic_action"], "NONE")
 
+    def test_restore_evidence_reconciliation_skips_any_artifact_with_sqlite_sidecars(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live-sidecar.sqlite3",
+            "source_backup": root / "source-sidecar.sqlite3",
+            "staged_candidate": root / "staged-sidecar.sqlite3",
+            "rollback_backup": root / "rollback-sidecar.sqlite3",
+        }
+        for name, path in paths.items():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+                connection.execute("INSERT INTO evidence_probe VALUES (?)", (name,))
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        journal = root / "restore-sidecar.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "d" * 32, "e" * 32,
+            "operator@example.com", "INC-EVIDENCE-SIDECAR",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        sidecar = Path(str(paths["source_backup"]) + "-wal")
+        sidecar.write_bytes(b"preserve-this-sidecar")
+        result = reconcile_restore_execution_artifacts(
+            "d" * 32, "e" * 32, paths, journal_path=journal,
+        )
+        source_result = next(item for item in result["artifacts"] if item["artifact"] == "source_backup")
+        self.assertEqual(source_result["fingerprint_status"], "MATCH")
+        self.assertEqual(source_result["integrity_check"], "SKIPPED_SIDECARS_PRESENT")
+        self.assertEqual(sidecar.read_bytes(), b"preserve-this-sidecar")
+        self.assertEqual(
+            result["artifact_sidecars"]["source_backup"]["status"],
+            "SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING",
+        )
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertFalse(result["recoverability_verified"])
+        self.assertFalse(result["database_state_verified"])
+        self.assertEqual(result["evidence_scope"], "FILE_FINGERPRINTS_AND_SQLITE_INTEGRITY_ONLY")
+
     def test_restore_evidence_reconciliation_detects_path_replacement_during_integrity_check(self):
         root = Path(self.temp_dir.name)
         paths = {
