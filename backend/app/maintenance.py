@@ -45,6 +45,15 @@ def _restore_journal_digest(record: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _restore_journal_object_without_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
 def verify_restore_execution_journal(
     journal_path: Path | None = None, *, include_records: bool = False, lock_file: bool = True
 ) -> dict:
@@ -90,7 +99,7 @@ def verify_restore_execution_journal(
     records = []
     try:
         for line in raw.splitlines():
-            record = json.loads(line.decode("utf-8"))
+            record = json.loads(line.decode("utf-8"), object_pairs_hook=_restore_journal_object_without_duplicate_keys)
             if (
                 not isinstance(record, dict)
                 or isinstance(record.get("sequence"), bool)
