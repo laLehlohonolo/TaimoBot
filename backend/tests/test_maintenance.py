@@ -1695,6 +1695,22 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(Path(str(paths["live_database"]) + "-wal").read_bytes(), b"preserve-me")
         self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
 
+    def test_restore_execution_journal_rejects_oversized_or_non_json_details_without_creating_file(self):
+        journal = Path(self.temp_dir.name) / "restore-invalid-details.audit.jsonl"
+        with self.assertRaisesRegex(ValueError, "JSON serializable"):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+                "operator@example.com", "INC-INVALID-DETAILS",
+                details={"unsupported": object()}, journal_path=journal,
+            )
+        with self.assertRaisesRegex(ValueError, "8 KiB limit"):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+                "operator@example.com", "INC-INVALID-DETAILS",
+                details={"payload": "x" * 8192}, journal_path=journal,
+            )
+        self.assertFalse(journal.exists())
+
     def test_restore_execution_journal_appends_and_verifies_hash_chain(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         first = append_restore_execution_event(
