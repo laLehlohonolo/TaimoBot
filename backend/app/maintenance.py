@@ -53,6 +53,9 @@ def _restore_journal_object_without_duplicate_keys(pairs):
         result[key] = value
     return result
 
+def _reject_restore_journal_json_constant(value):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
 
 def verify_restore_execution_journal(
     journal_path: Path | None = None, *, include_records: bool = False, lock_file: bool = True
@@ -99,7 +102,7 @@ def verify_restore_execution_journal(
     records = []
     try:
         for line in raw.splitlines():
-            record = json.loads(line.decode("utf-8"), object_pairs_hook=_restore_journal_object_without_duplicate_keys)
+            record = json.loads(\n                line.decode("utf-8"),\n                object_pairs_hook=_restore_journal_object_without_duplicate_keys,\n                parse_constant=_reject_restore_journal_json_constant,\n            )
             if (
                 not isinstance(record, dict)
                 or isinstance(record.get("sequence"), bool)
@@ -638,7 +641,7 @@ def append_restore_execution_event(
         raise ValueError("Journal details must be an object.")
     details = details or {}
     try:
-        details_encoded = json.dumps(details, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        details_encoded = json.dumps(details, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as error:
         raise ValueError("Journal details must be JSON serializable.") from error
     if len(details_encoded) > 8192:
