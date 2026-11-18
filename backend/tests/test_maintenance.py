@@ -24,6 +24,8 @@ from app.maintenance import (
     inspect_sqlite_sidecars,
     inspect_restore_lock,
     recover_abandoned_restore_lock,
+    append_restore_execution_event,
+    verify_restore_execution_journal,
 )
 from app import database
 from app.database import init_db
@@ -1127,6 +1129,80 @@ class DailyMaintenanceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sha256_file(artifact, chunk_size=0)
 
+
+    def test_restore_execution_journal_appends_and_verifies_hash_chain(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        first = append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-RESTORE-001",
+            details={"trading_mode": "paper", "live_database_replaced": False},
+            journal_path=journal,
+        )
+        second = append_restore_execution_event(
+            "RESTORE_POSTCHECK_PASSED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-RESTORE-001",
+            details={"integrity_check": "ok"},
+            journal_path=journal,
+        )
+        self.assertEqual(first["sequence"], 1)
+        self.assertEqual(second["sequence"], 2)
+        verified = verify_restore_execution_journal(journal)
+        self.assertEqual(verified["status"], "RESTORE_JOURNAL_VERIFIED")
+        self.assertEqual(verified["record_count"], 2)
+        self.assertEqual(verified["last_record_sha256"], second["record_sha256"])
+
+    def test_restore_execution_journal_detects_tampering_and_refuses_append(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "c" * 32, "d" * 32,
+            "operator@example.com", "INC-RESTORE-002",
+            details={"stage": "before"},
+            journal_path=journal,
+        )
+        content = journal.read_text(encoding="utf-8")
+        journal.write_text(content.replace("before", "after"), encoding="utf-8")
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_INVALID",
+        )
+        with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_COMPLETE", "c" * 32, "d" * 32,
+                "operator@example.com", "INC-RESTORE-002",
+                journal_path=journal,
+            )
+
+    def test_restore_execution_journal_rejects_symlinks_and_invalid_events(self):
+        target = Path(self.temp_dir.name) / "real-journal.jsonl"
+        link = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        target.write_text("", encoding="utf-8")
+        link.symlink_to(target)
+        with self.assertRaises(OSError):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", "e" * 32, "f" * 32,
+                "operator@example.com", "INC-RESTORE-003",
+                journal_path=link,
+            )
+        with self.assertRaisesRegex(ValueError, "Unsupported"):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_UNKNOWN", "e" * 32, "f" * 32,
+                "operator@example.com", "INC-RESTORE-003",
+                journal_path=target,
+            )
+
+    def test_restore_execution_journal_rejects_incomplete_final_record(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "1" * 32, "2" * 32,
+            "operator@example.com", "INC-RESTORE-004",
+            journal_path=journal,
+        )
+        with journal.open("ab") as stream:
+            stream.write(b'{"sequence":2')
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_INVALID",
+        )
 
     def test_restore_lock_preserves_wal_and_shm_and_does_not_claim_external_quiescence(self):
         external = sqlite3.connect(database.DB_PATH, timeout=5)
