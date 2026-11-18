@@ -2335,5 +2335,63 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(journal.read_bytes(), before)
 
 
+    def test_restore_execution_inspector_rejects_timestamp_regression_read_only(self):
+        journal = Path(self.temp_dir.name) / "restore-timestamp-regression.audit.jsonl"
+        zone = ZoneInfo("Africa/Johannesburg")
+        timestamps = iter([
+            datetime(2026, 11, 18, 12, 1, tzinfo=zone),
+            datetime(2026, 11, 18, 12, 0, tzinfo=zone),
+        ])
+
+        class ControlledDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = next(timestamps)
+                return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+        with patch("app.maintenance.datetime", ControlledDateTime):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", "c" * 32, "d" * 32,
+                "operator@example.com", "INC-TIMESTAMP-REGRESSION",
+                details={"artifacts": {
+                    "live_database_sha256": "1" * 64,
+                    "source_backup_sha256": "2" * 64,
+                    "staged_candidate_sha256": "3" * 64,
+                    "rollback_backup_sha256": "4" * 64,
+                }},
+                journal_path=journal,
+            )
+            append_restore_execution_event(
+                "RESTORE_SOURCE_PUBLISHED", "c" * 32, "d" * 32,
+                "operator@example.com", "INC-TIMESTAMP-REGRESSION",
+                details={"artifacts": {
+                    "staged_candidate_sha256": "3" * 64,
+                    "published_database_sha256": "5" * 64,
+                }},
+                journal_path=journal,
+            )
+
+        before = journal.read_bytes()
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_VERIFIED",
+        )
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertIn(
+            "invalid or non-monotonic execution timestamp",
+            result["semantic_errors"][0]["reason"],
+        )
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_VERIFIED",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
