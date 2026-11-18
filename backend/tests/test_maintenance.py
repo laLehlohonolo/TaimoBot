@@ -1307,6 +1307,94 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
         self.assertTrue(all(item["fingerprint_status"] == "NOT_RECORDED" for item in result["artifacts"]))
 
+    def test_restore_evidence_reconciliation_rejects_conflicting_journal_fingerprints(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live.sqlite3",
+            "source_backup": root / "source.sqlite3",
+            "staged_candidate": root / "staged.sqlite3",
+            "rollback_backup": root / "rollback.sqlite3",
+        }
+        for path in paths.values():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        journal = root / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "e" * 32, "f" * 32,
+            "operator@example.com", "INC-EVIDENCE-004",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        conflicting = dict(hashes)
+        conflicting["source_backup_sha256"] = "0" * 64
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "e" * 32, "f" * 32,
+            "operator@example.com", "INC-EVIDENCE-004",
+            details={"artifacts": conflicting}, journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts(
+            "e" * 32, "f" * 32, paths, journal_path=journal,
+        )
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertEqual(result["conflicting_fingerprints"], ["source_backup"])
+        source = next(item for item in result["artifacts"] if item["artifact"] == "source_backup")
+        self.assertEqual(source["fingerprint_status"], "CONFLICTING_JOURNAL_EVIDENCE")
+
+    def test_restore_evidence_reconciliation_refuses_symlinked_artifact(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live.sqlite3",
+            "source_backup": root / "source.sqlite3",
+            "staged_candidate": root / "staged.sqlite3",
+            "rollback_backup": root / "rollback.sqlite3",
+        }
+        for path in paths.values():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        journal = root / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "1" * 32, "2" * 32,
+            "operator@example.com", "INC-EVIDENCE-005",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        target = root / "source-target.sqlite3"
+        paths["source_backup"].rename(target)
+        paths["source_backup"].symlink_to(target)
+        result = reconcile_restore_execution_artifacts(
+            "1" * 32, "2" * 32, paths, journal_path=journal,
+        )
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        source = next(item for item in result["artifacts"] if item["artifact"] == "source_backup")
+        self.assertEqual(source["fingerprint_status"], "UNSAFE_OR_MISSING")
+
+    def test_restore_evidence_reconciliation_does_not_open_live_db_with_wal_sidecar(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live.sqlite3",
+            "source_backup": root / "source.sqlite3",
+            "staged_candidate": root / "staged.sqlite3",
+            "rollback_backup": root / "rollback.sqlite3",
+        }
+        for path in paths.values():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        journal = root / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "3" * 32, "4" * 32,
+            "operator@example.com", "INC-EVIDENCE-006",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        Path(str(paths["live_database"]) + "-wal").write_bytes(b"preserve-me")
+        result = reconcile_restore_execution_artifacts(
+            "3" * 32, "4" * 32, paths, journal_path=journal,
+        )
+        live = next(item for item in result["artifacts"] if item["artifact"] == "live_database")
+        self.assertEqual(live["integrity_check"], "SKIPPED_SIDECARS_PRESENT")
+        self.assertEqual(Path(str(paths["live_database"]) + "-wal").read_bytes(), b"preserve-me")
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+
     def test_restore_execution_journal_appends_and_verifies_hash_chain(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         first = append_restore_execution_event(
