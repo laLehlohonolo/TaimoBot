@@ -1716,6 +1716,26 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(verified["record_count"], 2)
         self.assertEqual(verified["last_record_sha256"], second["record_sha256"])
 
+    def test_restore_execution_journal_fsync_failure_is_treated_as_ambiguous(self):
+        journal = Path(self.temp_dir.name) / "restore-fsync-failure.audit.jsonl"
+        with patch("app.maintenance.os.fsync", side_effect=OSError("simulated journal fsync failure")):
+            with self.assertRaisesRegex(OSError, "fsync failure"):
+                append_restore_execution_event(
+                    "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+                    "operator@example.com", "INC-FSYNC-001", journal_path=journal,
+                )
+
+        # A complete record may be visible even though durable storage was not
+        # confirmed. Treat it as an interrupted execution; never auto-resume.
+        verification = verify_restore_execution_journal(journal)
+        self.assertEqual(verification["status"], "RESTORE_JOURNAL_VERIFIED")
+        state = inspect_restore_execution_state(journal)
+        self.assertEqual(state["status"], "RESTORE_EXECUTION_REVIEW_REQUIRED")
+        self.assertEqual(state["executions"][0]["classification"],
+                         "INTERRUPTED_BEFORE_PUBLISH_REQUIRES_OPERATOR_REVIEW")
+        self.assertEqual(state["automatic_action"], "NONE")
+        self.assertFalse(state["live_database_replaced"])
+
     def test_restore_execution_journal_partial_write_fails_closed(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         original_write = os.write
