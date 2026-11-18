@@ -834,6 +834,24 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertEqual(database.DB_PATH.read_bytes(), before_live_bytes)
             self.assertFalse(result["live_database_replaced"])
 
+    def test_recovery_inventory_skips_database_with_wal_sidecar_and_preserves_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid_backup = root / "taimobot-20261116-230000-sidecar.sqlite3"
+            with sqlite3.connect(database.DB_PATH) as source, sqlite3.connect(valid_backup) as target:
+                source.backup(target)
+            sidecar = Path(str(valid_backup) + "-wal")
+            sidecar.write_bytes(b"preserve-recovery-wal")
+            result = inspect_recovery_candidates(root)
+            self.assertEqual(result["candidate_count"], 1)
+            candidate = result["candidates"][0]
+            self.assertEqual(candidate["file_name"], valid_backup.name)
+            self.assertFalse(candidate["restore_ready"])
+            self.assertEqual(candidate["integrity_check"], "SKIPPED_SIDECARS_PRESENT")
+            self.assertIn("SQLITE_SIDECARS_PRESENT", candidate["issues"])
+            self.assertEqual(sidecar.read_bytes(), b"preserve-recovery-wal")
+            self.assertFalse(result["live_database_replaced"])
+
     def test_restore_verification_uses_staging_and_does_not_replace_live_db(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
