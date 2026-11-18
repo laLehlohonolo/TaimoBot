@@ -324,7 +324,7 @@ def reconcile_restore_execution_artifacts(
             except (sqlite3.Error, OSError, ValueError):
                 item["integrity_check"] = "UNREADABLE"
                 all_verified = False
-            if item["fingerprint_status"] in ("MISMATCH", "UNVERIFIED"):
+            if item["fingerprint_status"] in ("MISMATCH", "UNVERIFIED", "NOT_RECORDED"):
                 all_verified = False
         except (OSError, ValueError) as error:
             item["fingerprint_status"] = "UNSAFE_OR_MISSING"
