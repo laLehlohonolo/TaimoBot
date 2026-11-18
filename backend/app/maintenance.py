@@ -132,6 +132,59 @@ def verify_restore_execution_journal(
     return result
 
 
+def _restore_event_evidence_issues(record: dict) -> list[str]:
+    """Return missing/invalid event-specific evidence without inferring success."""
+    details = record.get("details", {})
+    if not isinstance(details, dict) or not details:
+        return ["event evidence is absent"]
+    event = record.get("event")
+    artifacts = details.get("artifacts", {})
+    requirements = {
+        "RESTORE_EXECUTION_STARTED": ("live_database_sha256", "source_backup_sha256", "staged_candidate_sha256", "rollback_backup_sha256"),
+        "RESTORE_SOURCE_PUBLISHED": ("staged_candidate_sha256", "live_database_sha256"),
+        "RESTORE_ROLLBACK_STARTED": ("rollback_backup_sha256",),
+    }
+    issues = []
+    if event in requirements:
+        if not isinstance(artifacts, dict):
+            return ["artifact fingerprints are absent"]
+        for key in requirements[event]:
+            value = artifacts.get(key)
+            if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+                issues.append(f"missing or invalid artifacts.{key}")
+    elif event == "RESTORE_POSTCHECK_PASSED":
+        if details.get("integrity_check") != "ok":
+            issues.append("integrity_check must be 'ok'")
+        if details.get("foreign_key_violations") != 0 or isinstance(details.get("foreign_key_violations"), bool):
+            issues.append("foreign_key_violations must be integer zero")
+        if details.get("schema_check") != "passed":
+            issues.append("schema_check must be 'passed'")
+        value = details.get("installed_database_sha256")
+        if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+            issues.append("missing or invalid installed_database_sha256")
+    elif event == "RESTORE_ROLLBACK_VERIFIED":
+        if details.get("integrity_check") != "ok":
+            issues.append("integrity_check must be 'ok'")
+        if details.get("foreign_key_violations") != 0 or isinstance(details.get("foreign_key_violations"), bool):
+            issues.append("foreign_key_violations must be integer zero")
+        value = details.get("restored_database_sha256")
+        if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+            issues.append("missing or invalid restored_database_sha256")
+    elif event == "RESTORE_EXECUTION_COMPLETE":
+        value = details.get("final_database_sha256")
+        if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+            issues.append("missing or invalid final_database_sha256")
+    elif event == "RESTORE_EXECUTION_ROLLED_BACK":
+        value = details.get("restored_database_sha256")
+        if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+            issues.append("missing or invalid restored_database_sha256")
+    elif event == "RESTORE_EXECUTION_RECOVERY_REQUIRED":
+        reason = details.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            issues.append("recovery-required event needs a non-empty reason")
+    return issues
+
+
 def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
     """Read-only crash-state classification; never resumes or mutates a restore."""
     verification = verify_restore_execution_journal(journal_path, include_records=True)
@@ -161,6 +214,7 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
         grouped.setdefault(key, []).append(record)
 
     executions = []
+    evidence_review = []
     terminal_events = {
         "RESTORE_EXECUTION_COMPLETE",
         "RESTORE_EXECUTION_ROLLED_BACK",
@@ -225,6 +279,14 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
                     })
                     break
 
+        event_evidence = []
+        for item in items:
+            issues = _restore_event_evidence_issues(item)
+            if issues:
+                event_evidence.append({"event": item["event"], "sequence": item["sequence"], "issues": issues})
+        if event_evidence:
+            evidence_review.append({"plan_id": plan_id, "events": event_evidence})
+
         last = items[-1]
         last_event = last["event"]
         if last_event == "RESTORE_EXECUTION_COMPLETE":
@@ -249,6 +311,8 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
             "event_count": len(items),
             "classification": classification,
             "terminal": last_event in terminal_events,
+            "evidence_status": "INCOMPLETE_REQUIRES_OPERATOR_REVIEW" if event_evidence else "EVENT_EVIDENCE_PRESENT",
+            "events_missing_evidence": len(event_evidence),
         })
 
     if semantic_errors:
@@ -271,6 +335,7 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
         "journal_status": verification["status"],
         "record_count": len(records),
         "executions": executions,
+        "evidence_review": evidence_review,
         "automatic_action": "NONE",
         "live_database_replaced": False,
     }
