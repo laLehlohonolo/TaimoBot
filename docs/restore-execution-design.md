@@ -34,7 +34,7 @@ Do not overload the existing FAILED status to mean both “nothing changed” an
 - No external process has the database open.
 - The live database, source backup, staged candidate, and rollback backup are on the expected managed filesystem locations; all are regular non-symlink files.
 - The source, staged, and rollback SHA-256 values still match the immutable fingerprints captured at preparation.
-- Source, staged, rollback, and live database each pass integrity, required-schema, and foreign-key checks as applicable.
+- Source, staged, and rollback artifacts pass integrity, required-schema, and foreign-key checks through the recovery inventory. The live database independently passes integrity, the required TaimoBot table/column contract, and foreign-key checks during preflight.
 - Recovery inventory checks WAL/SHM sidecars before opening a backup. Any present or unsafe sidecar marks that candidate not restore-ready and skips SQLite integrity/schema reads until operator-reviewed handling. The live database preflight likewise refuses to open the live database while sidecars exist.
 - Live database sidecars have been inventoried. If WAL/SHM exist, execution must stop unless a separately tested, lossless handling procedure proves how their state is incorporated and preserved.
 - A durable audit destination is available and writable. Audit STARTED must be fsynced before any live-file mutation.
