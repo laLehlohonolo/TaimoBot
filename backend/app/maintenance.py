@@ -233,6 +233,126 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
     }
 
 
+
+def reconcile_restore_execution_artifacts(
+    plan_id: str,
+    execution_token: str,
+    artifact_paths: dict[str, Path],
+    *,
+    journal_path: Path | None = None,
+) -> dict:
+    """Read-only comparison of recorded artifact hashes with current files.
+
+    artifact_paths keys are live_database, source_backup, staged_candidate, and
+    rollback_backup. Expected hashes are read from journal event details under
+    details.artifacts using the corresponding '<key>_sha256' field.
+    """
+    if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+        raise ValueError("A valid restore plan ID is required.")
+    if not isinstance(execution_token, str) or not re.fullmatch(r"[a-f0-9]{32}", execution_token):
+        raise ValueError("A valid execution token is required.")
+    allowed = {"live_database", "source_backup", "staged_candidate", "rollback_backup"}
+    if not isinstance(artifact_paths, dict) or set(artifact_paths) != allowed:
+        raise ValueError("Exactly four named restore artifact paths are required.")
+
+    verification = verify_restore_execution_journal(journal_path, include_records=True)
+    if verification["status"] not in ("RESTORE_JOURNAL_EMPTY", "RESTORE_JOURNAL_VERIFIED"):
+        return {
+            "status": "RESTORE_EVIDENCE_RECONCILIATION_BLOCKED",
+            "journal_status": verification["status"],
+            "artifacts": [],
+            "database_state_verified": False,
+            "automatic_action": "NONE",
+            "live_database_replaced": False,
+        }
+
+    matching_records = [
+        record for record in verification.get("records", [])
+        if record.get("plan_id") == plan_id and record.get("execution_token") == execution_token
+    ]
+    if not matching_records:
+        return {
+            "status": "RESTORE_EVIDENCE_NOT_FOUND",
+            "journal_status": verification["status"],
+            "artifacts": [],
+            "database_state_verified": False,
+            "automatic_action": "NONE",
+            "live_database_replaced": False,
+        }
+
+    expected = {}
+    for record in matching_records:
+        artifacts = record.get("details", {}).get("artifacts", {})
+        if isinstance(artifacts, dict):
+            for key in allowed:
+                value = artifacts.get(f"{key}_sha256")
+                if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value):
+                    expected[key] = value
+
+    results = []
+    all_verified = True
+    for key in ("live_database", "source_backup", "staged_candidate", "rollback_backup"):
+        path = Path(artifact_paths[key])
+        item = {
+            "artifact": key,
+            "file_name": path.name,
+            "expected_sha256": expected.get(key),
+            "current_sha256": None,
+            "fingerprint_status": "NOT_RECORDED" if key not in expected else "UNVERIFIED",
+            "integrity_check": "NOT_CHECKED",
+            "foreign_key_violations": None,
+        }
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("artifact missing or not a regular file")
+            current_hash = sha256_file(path)
+            item["current_sha256"] = current_hash
+            if key in expected:
+                item["fingerprint_status"] = (
+                    "MATCH" if current_hash == expected[key] else "MISMATCH"
+                )
+            try:
+                uri = path.resolve().as_uri() + "?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=10) as connection:
+                    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                item["integrity_check"] = integrity[0] if integrity else "NO_RESULT"
+                item["foreign_key_violations"] = len(violations)
+                if item["integrity_check"] != "ok" or violations:
+                    all_verified = False
+            except (sqlite3.Error, OSError, ValueError):
+                item["integrity_check"] = "UNREADABLE"
+                all_verified = False
+            if item["fingerprint_status"] in ("MISMATCH", "UNVERIFIED"):
+                all_verified = False
+        except (OSError, ValueError) as error:
+            item["fingerprint_status"] = "UNSAFE_OR_MISSING"
+            item["error"] = str(error)[:160]
+            all_verified = False
+        results.append(item)
+
+    live_sidecars = None
+    try:
+        live_sidecars = inspect_sqlite_sidecars(Path(artifact_paths["live_database"]))
+        if live_sidecars["status"] != "SIDECARS_CLEAR":
+            all_verified = False
+    except (OSError, ValueError):
+        all_verified = False
+
+    return {
+        "status": "RESTORE_EVIDENCE_MATCHED" if all_verified else "RESTORE_EVIDENCE_REVIEW_REQUIRED",
+        "journal_status": verification["status"],
+        "plan_id": plan_id,
+        "execution_token": execution_token,
+        "event_count": len(matching_records),
+        "artifacts": results,
+        "live_database_sidecars": live_sidecars,
+        "database_state_verified": False,
+        "automatic_action": "NONE",
+        "live_database_replaced": False,
+    }
+
+
 def append_restore_execution_event(
     event: str,
     plan_id: str,
