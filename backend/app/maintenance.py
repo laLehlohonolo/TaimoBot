@@ -421,32 +421,54 @@ def reconcile_restore_execution_artifacts(
                 metadata = os.fstat(descriptor)
                 if not __import__("stat").S_ISREG(metadata.st_mode):
                     raise ValueError("artifact is not a regular file")
-                digest = hashlib.sha256()
-                while True:
-                    chunk = os.read(descriptor, 1024 * 1024)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                current_hash = digest.hexdigest()
+                identity = (metadata.st_dev, metadata.st_ino)
+                def hash_open_descriptor() -> str:
+                    digest = hashlib.sha256()
+                    offset = 0
+                    while True:
+                        chunk = os.pread(descriptor, 1024 * 1024, offset)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        offset += len(chunk)
+                    return digest.hexdigest()
+
+                current_hash = hash_open_descriptor()
+                item["current_sha256"] = current_hash
+                if key not in conflicting and key in expected:
+                    item["fingerprint_status"] = "MATCH" if current_hash == expected[key] else "MISMATCH"
+
+                # Never open the live DB through SQLite while WAL/SHM sidecars exist.
+                if key == "live_database" and live_sidecars["status"] != "SIDECARS_CLEAR":
+                    item["integrity_check"] = "SKIPPED_SIDECARS_PRESENT"
+                    all_verified = False
+                else:
+                    # SQLite opens by pathname, not our already-open descriptor.
+                    # Check pathname identity before and after its read-only checks,
+                    # then re-hash the original descriptor to detect replacement or
+                    # in-place mutation during the inspection window.
+                    before_path = os.stat(path, follow_symlinks=False)
+                    if (before_path.st_dev, before_path.st_ino) != identity or not __import__("stat").S_ISREG(before_path.st_mode):
+                        raise ValueError("artifact path changed after fingerprinting")
+                    uri = path.absolute().as_uri() + "?mode=ro"
+                    with closing(sqlite3.connect(uri, uri=True, timeout=10)) as connection:
+                        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                    after_path = os.stat(path, follow_symlinks=False)
+                    after_fd = os.fstat(descriptor)
+                    if (
+                        (after_path.st_dev, after_path.st_ino) != identity
+                        or (after_fd.st_dev, after_fd.st_ino) != identity
+                        or not __import__("stat").S_ISREG(after_path.st_mode)
+                        or hash_open_descriptor() != current_hash
+                    ):
+                        raise ValueError("artifact changed during read-only integrity inspection")
+                    item["integrity_check"] = integrity[0] if integrity else "NO_RESULT"
+                    item["foreign_key_violations"] = len(violations)
+                    if item["integrity_check"] != "ok" or violations:
+                        all_verified = False
             finally:
                 os.close(descriptor)
-            item["current_sha256"] = current_hash
-            if key not in conflicting and key in expected:
-                item["fingerprint_status"] = "MATCH" if current_hash == expected[key] else "MISMATCH"
-
-            # Never open the live DB through SQLite while WAL/SHM sidecars exist.
-            if key == "live_database" and live_sidecars["status"] != "SIDECARS_CLEAR":
-                item["integrity_check"] = "SKIPPED_SIDECARS_PRESENT"
-                all_verified = False
-            else:
-                uri = path.resolve().as_uri() + "?mode=ro"
-                with closing(sqlite3.connect(uri, uri=True, timeout=10)) as connection:
-                    integrity = connection.execute("PRAGMA integrity_check").fetchone()
-                    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
-                item["integrity_check"] = integrity[0] if integrity else "NO_RESULT"
-                item["foreign_key_violations"] = len(violations)
-                if item["integrity_check"] != "ok" or violations:
-                    all_verified = False
             if item["fingerprint_status"] in (
                 "MISMATCH", "UNVERIFIED", "NOT_RECORDED", "CONFLICTING_JOURNAL_EVIDENCE"
             ):
