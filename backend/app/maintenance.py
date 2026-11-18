@@ -146,7 +146,7 @@ def verify_restore_execution_journal(
                 raise ValueError("unknown restore journal event")
             previous = digest
             records.append(record)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError) as error:
         return {"status": "RESTORE_JOURNAL_INVALID", "reason": str(error)[:200], "record_count": len(records)}
     result = {
         "status": "RESTORE_JOURNAL_VERIFIED",
