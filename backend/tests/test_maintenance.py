@@ -2801,7 +2801,8 @@ class DailyMaintenanceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "RESTORE_JOURNAL_INVALID")
         self.assertEqual(result["record_count"], 0)
-        self.assertIn("nesting", result.get("reason", "").lower())
+        self.assertTrue(result.get("reason"))
+        self.assertIn("recursion", result["reason"].lower())
 
 
 if __name__ == "__main__":
