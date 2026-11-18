@@ -26,6 +26,7 @@ from app.maintenance import (
     recover_abandoned_restore_lock,
     append_restore_execution_event,
     verify_restore_execution_journal,
+    inspect_restore_execution_state,
 )
 from app import database
 from app.database import init_db
@@ -1129,6 +1130,100 @@ class DailyMaintenanceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sha256_file(artifact, chunk_size=0)
 
+
+    def test_restore_execution_state_flags_interrupted_start_without_auto_resume(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-STATE-001",
+            details={"live_database_replaced": False}, journal_path=journal,
+        )
+        before = journal.read_bytes()
+        result = inspect_restore_execution_state(journal)
+        self.assertEqual(result["status"], "RESTORE_EXECUTION_REVIEW_REQUIRED")
+        self.assertEqual(result["executions"][0]["classification"],
+                         "INTERRUPTED_BEFORE_PUBLISH_REQUIRES_OPERATOR_REVIEW")
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+
+    def test_restore_execution_state_flags_published_but_unconfirmed_database(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "b" * 32, "c" * 32,
+            "operator@example.com", "INC-STATE-002", journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "b" * 32, "c" * 32,
+            "operator@example.com", "INC-STATE-002", journal_path=journal,
+        )
+        result = inspect_restore_execution_state(journal)
+        self.assertEqual(result["executions"][0]["classification"],
+                         "PUBLISHED_STATE_UNCONFIRMED_REQUIRES_OPERATOR_REVIEW")
+        self.assertEqual(result["status"], "RESTORE_EXECUTION_REVIEW_REQUIRED")
+
+    def test_restore_execution_state_flags_incomplete_rollback(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "d" * 32, "e" * 32,
+            "operator@example.com", "INC-STATE-003", journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_ROLLBACK_STARTED", "d" * 32, "e" * 32,
+            "operator@example.com", "INC-STATE-003", journal_path=journal,
+        )
+        result = inspect_restore_execution_state(journal)
+        self.assertEqual(result["executions"][0]["classification"],
+                         "ROLLBACK_INCOMPLETE_REQUIRES_OPERATOR_REVIEW")
+
+    def test_restore_execution_state_requires_database_reconciliation_after_terminal_event(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "f" * 32, "1" * 32,
+            "operator@example.com", "INC-STATE-004", journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "f" * 32, "1" * 32,
+            "operator@example.com", "INC-STATE-004", journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_POSTCHECK_PASSED", "f" * 32, "1" * 32,
+            "operator@example.com", "INC-STATE-004", journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_COMPLETE", "f" * 32, "1" * 32,
+            "operator@example.com", "INC-STATE-004", journal_path=journal,
+        )
+        result = inspect_restore_execution_state(journal)
+        self.assertEqual(result["executions"][0]["classification"],
+                         "COMPLETED_REQUIRES_DATABASE_RECONCILIATION")
+        self.assertEqual(result["status"], "RESTORE_EXECUTION_REVIEW_REQUIRED")
+        self.assertEqual(result["automatic_action"], "NONE")
+
+    def test_restore_execution_state_detects_semantically_invalid_event_order(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "2" * 32, "3" * 32,
+            "operator@example.com", "INC-STATE-005", journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_ROLLBACK_VERIFIED", "2" * 32, "3" * 32,
+            "operator@example.com", "INC-STATE-005", journal_path=journal,
+        )
+        result = inspect_restore_execution_state(journal)
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertEqual(result["automatic_action"], "NONE")
+
+    def test_restore_execution_state_handles_multiple_independent_attempts(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        for plan, token, incident in (("4" * 32, "5" * 32, "INC-A"), ("6" * 32, "7" * 32, "INC-B")):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", plan, token,
+                "operator@example.com", incident, journal_path=journal,
+            )
+        result = inspect_restore_execution_state(journal)
+        self.assertEqual(len(result["executions"]), 2)
+        self.assertTrue(all(item["classification"].startswith("INTERRUPTED") for item in result["executions"]))
 
     def test_restore_execution_journal_appends_and_verifies_hash_chain(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
