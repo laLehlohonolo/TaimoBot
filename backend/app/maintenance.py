@@ -102,7 +102,11 @@ def verify_restore_execution_journal(
     records = []
     try:
         for line in raw.splitlines():
-            record = json.loads(\n                line.decode("utf-8"),\n                object_pairs_hook=_restore_journal_object_without_duplicate_keys,\n                parse_constant=_reject_restore_journal_json_constant,\n            )
+            record = json.loads(
+                line.decode("utf-8"),
+                object_pairs_hook=_restore_journal_object_without_duplicate_keys,
+                parse_constant=_reject_restore_journal_json_constant,
+            )
             if (
                 not isinstance(record, dict)
                 or isinstance(record.get("sequence"), bool)
