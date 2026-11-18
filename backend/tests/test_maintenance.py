@@ -1711,6 +1711,28 @@ class DailyMaintenanceTests(unittest.TestCase):
             )
         self.assertFalse(journal.exists())
 
+    def test_restore_execution_journal_verifier_rejects_invalid_operator_and_incident_fields(self):
+        for field, invalid_value in (
+            ("operator_id", "o" * 201),
+            ("operator_id", "operator\nforged"),
+            ("incident_ref", "i" * 201),
+            ("incident_ref", "INC-1\x00forged"),
+        ):
+            with self.subTest(field=field, invalid_value=repr(invalid_value)):
+                journal = Path(self.temp_dir.name) / f"invalid-{field}-{len(invalid_value)}.audit.jsonl"
+                append_restore_execution_event(
+                    "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+                    "operator@example.com", "INC-VALID",
+                    journal_path=journal,
+                )
+                record = json.loads(journal.read_text(encoding="utf-8"))
+                record[field] = invalid_value
+                record["record_sha256"] = _restore_journal_digest(record)
+                journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+                verified = verify_restore_execution_journal(journal)
+                self.assertEqual(verified["status"], "RESTORE_JOURNAL_INVALID")
+                self.assertEqual(verified["reason"], "invalid restore journal record schema")
+
     def test_restore_execution_journal_appends_and_verifies_hash_chain(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         first = append_restore_execution_event(
