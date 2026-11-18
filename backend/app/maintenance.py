@@ -488,11 +488,13 @@ def is_restore_lock_active() -> bool:
 
 
 def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
-    """Acquire a process-shared restore lock and prove SQLite is quiescent.
+    """Block cooperating app clients without mutating SQLite or its sidecars.
 
-    The OS lock is acquired before publishing the marker. This avoids a crash
-    window where a marker could be mistaken for an abandoned lock while its
-    owner is still waiting to acquire the cross-process guard.
+    The exclusive OS guard coordinates only TaimoBot clients using the guard
+    protocol. It cannot prove that arbitrary external SQLite processes have
+    stopped, so callers must not treat this lock as full database quiescence.
+    The OS lock is acquired before publishing the marker to avoid exposing an
+    abandoned-looking marker while its owner is still waiting for the guard.
     """
     if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
         raise ValueError("A valid restore plan ID is required.")
@@ -511,7 +513,6 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
     guard_fd = None
     descriptor = None
     try:
-        # Serialize local connection creation and reject leaked local handles.
         with database._CONNECTION_GUARD:
             if database.open_connection_count():
                 raise RuntimeError(
@@ -532,8 +533,6 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
                         )
                     time.sleep(0.05)
 
-            # With the exclusive guard held, no cooperating application
-            # connection can open or remain active in any worker process.
             descriptor = os.open(
                 str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
             )
@@ -546,21 +545,18 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
         _RESTORE_GUARD_FDS[token] = guard_fd
         guard_fd = None
 
-        # Retain the explicit SQLite-level check as a second line of defence.
-        with sqlite3.connect(str(database.DB_PATH), timeout=float(timeout_seconds)) as connection:
-            connection.execute("BEGIN EXCLUSIVE")
-            connection.commit()
-            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0].lower()
-            if journal_mode == "wal":
-                checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-                if checkpoint and checkpoint[0] != 0:
-                    raise RuntimeError("SQLite WAL checkpoint is busy; active readers remain.")
-
+        # Inventory sidecars only. In particular, do not run WAL checkpoint:
+        # sidecar preservation/handling belongs to a separately tested restore
+        # protocol and must never be an implicit side effect of lock acquisition.
+        sidecars = inspect_sqlite_sidecars(database.DB_PATH)
         return {
             "status": "RESTORE_LOCK_ACQUIRED",
             "plan_id": plan_id,
             "lock_token": token,
-            "database_quiescent": True,
+            "application_connections_quiescent": True,
+            "external_process_quiescence_verified": False,
+            "database_quiescent": False,
+            "sqlite_sidecars": sidecars,
             "lock_file": str(lock_path),
         }
     except Exception:
