@@ -679,6 +679,9 @@ def append_restore_execution_event(
         }
         record["record_sha256"] = _restore_journal_digest(record)
         encoded = (json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        current_size = os.fstat(descriptor).st_size
+        if current_size + len(encoded) > _RESTORE_JOURNAL_MAX_BYTES:
+            raise ValueError("Restore execution journal would exceed the size limit.")
         written_total = 0
         while written_total < len(encoded):
             written = os.write(descriptor, encoded[written_total:])
