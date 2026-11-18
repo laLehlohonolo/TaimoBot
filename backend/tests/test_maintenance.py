@@ -2793,5 +2793,16 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
 
 
+    def test_restore_journal_rejects_excessive_json_nesting_without_raising(self):
+        journal = Path(self.temp_dir.name) / "restore-deep-json.audit.jsonl"
+        journal.write_text("{" + "[" * 3000 + "0" + "]" * 3000 + "}\\n", encoding="utf-8")
+
+        result = verify_restore_execution_journal(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_INVALID")
+        self.assertEqual(result["record_count"], 0)
+        self.assertIn("nesting", result.get("reason", "").lower())
+
+
 if __name__ == "__main__":
     unittest.main()
