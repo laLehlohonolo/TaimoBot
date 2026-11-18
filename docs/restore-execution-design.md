@@ -63,8 +63,9 @@ The current code now provides an independent JSONL restore execution journal in
   sequence number, SAST timestamp, plan ID, execution token, operator, incident
   reference, and bounded JSON details.
 - Each record includes the previous record hash and its own SHA-256 digest.
-  Appends use an exclusive file lock, complete-write loop, and `fsync`; creation
-  also fsyncs the containing directory.
+  Appends use an exclusive file lock, complete-write loop, and `fsync`; readers
+  take a shared file lock so inspection cannot mistake an in-progress append for
+  corruption. Creation also fsyncs the containing directory.
 - `verify_restore_execution_journal(...)` checks sequence continuity, event
   allow-list, previous-hash links, record digests, and complete newline-terminated
   records. Appending is refused if existing history fails verification.
