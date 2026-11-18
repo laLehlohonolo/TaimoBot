@@ -2049,6 +2049,35 @@ class DailyMaintenanceTests(unittest.TestCase):
                 inspect_sqlite_sidecars(live)
             self.assertEqual(target.read_bytes(), b"outside-data")
 
+    def test_restore_execution_preflight_rejects_incomplete_live_taimobot_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-staged.sqlite3"
+            live_path = root / "live.sqlite3"
+            for target in (source, rollback, staged, live_path):
+                with sqlite3.connect(database.DB_PATH) as original, sqlite3.connect(target) as copy:
+                    original.backup(copy)
+            with sqlite3.connect(live_path) as live:
+                live.execute("DROP TABLE trades")
+            with self.assertRaisesRegex(ValueError, "missing required TaimoBot schema.*trades"):
+                verify_restore_execution_readiness(
+                    source, staged, rollback,
+                    backup_dir=backup_dir,
+                    live_database_path=live_path,
+                )
+            with sqlite3.connect(live_path) as live:
+                tables = {
+                    row[0] for row in live.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+            self.assertNotIn("trades", tables)
+
     def test_restore_execution_preflight_reports_sidecars_for_locked_handling(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
