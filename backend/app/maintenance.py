@@ -1265,9 +1265,12 @@ def inspect_restore_lock() -> dict:
         plan_id = payload.get("plan_id")
         process_id = payload.get("pid")
         created_at = payload.get("created_at")
+        lock_token = payload.get("lock_token")
         if (
             not isinstance(plan_id, str)
             or not re.fullmatch(r"[a-f0-9]{32}", plan_id)
+            or not isinstance(lock_token, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", lock_token)
             or isinstance(process_id, bool)
             or not isinstance(process_id, int)
             or not isinstance(created_at, str)
@@ -1324,6 +1327,7 @@ def inspect_restore_lock() -> dict:
         "status": status,
         "marker_present": True,
         "plan_id": plan_id,
+        "lock_token": lock_token,
         "process_id": process_id,
         "created_at": created_at,
         "marker_size_bytes": marker_stat.st_size,
@@ -1665,6 +1669,57 @@ def verify_restore_execution_readiness(
         "live_database_verified": True,
         "sqlite_sidecars": sidecar_inventory,
         "sidecar_handling_required_after_lock": sidecar_inventory["status"] != "SIDECARS_CLEAR",
+        "execution_authorized": False,
+        "live_database_replaced": False,
+    }
+
+
+def verify_restore_execution_readiness_under_lock(
+    source_backup: Path,
+    staged_candidate: Path,
+    rollback_backup: Path,
+    *,
+    plan_id: str,
+    lock_token: str,
+    external_processes_stopped: bool = False,
+    backup_dir: Path | None = None,
+    live_database_path: Path | None = None,
+) -> dict:
+    """Repeat read-only restore checks while the matching app restore lock is held.
+
+    The explicit external-process acknowledgement is an operator assertion, not
+    something the application can independently prove. This function does not
+    publish a database, remove sidecars, or authorize execution.
+    """
+    if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+        raise ValueError("A valid restore plan ID is required.")
+    if not isinstance(lock_token, str) or not re.fullmatch(r"[a-f0-9]{32}", lock_token):
+        raise ValueError("A valid restore lock token is required.")
+    if external_processes_stopped is not True:
+        raise ValueError(
+            "Operator must explicitly confirm all external SQLite processes are stopped."
+        )
+
+    lock_state = inspect_restore_lock()
+    if (
+        lock_state.get("status") != "RESTORE_LOCK_ACTIVE"
+        or lock_state.get("plan_id") != plan_id
+        or lock_state.get("lock_token") != lock_token
+    ):
+        raise RuntimeError("The matching active restore lock could not be verified.")
+
+    result = verify_restore_execution_readiness(
+        source_backup,
+        staged_candidate,
+        rollback_backup,
+        backup_dir=backup_dir,
+        live_database_path=live_database_path,
+    )
+    return {
+        **result,
+        "status": "RESTORE_EXECUTION_LOCKED_PREFLIGHT_PASSED",
+        "restore_lock_verified": True,
+        "external_processes_stopped_operator_confirmed": True,
         "execution_authorized": False,
         "live_database_replaced": False,
     }
