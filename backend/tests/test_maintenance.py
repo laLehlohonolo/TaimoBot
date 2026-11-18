@@ -2805,6 +2805,33 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertIn("recursion", result["reason"].lower())
 
 
+    def test_restore_journal_append_refuses_to_cross_size_limit(self):
+        journal = Path(self.temp_dir.name) / "restore-append-limit.audit.jsonl"
+        artifacts = {
+            "live_database_sha256": "1" * 64,
+            "source_backup_sha256": "2" * 64,
+            "staged_candidate_sha256": "3" * 64,
+            "rollback_backup_sha256": "4" * 64,
+        }
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-APPEND-LIMIT",
+            details={"artifacts": artifacts}, journal_path=journal,
+        )
+        before = journal.read_bytes()
+        with patch("app.maintenance._RESTORE_JOURNAL_MAX_BYTES", len(before)):
+            with self.assertRaisesRegex(ValueError, "exceed the size limit"):
+                append_restore_execution_event(
+                    "RESTORE_EXECUTION_RECOVERY_REQUIRED", "a" * 32, "b" * 32,
+                    "operator@example.com", "INC-APPEND-LIMIT",
+                    details={"reason": "test"}, journal_path=journal,
+                )
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_VERIFIED",
+        )
+
     def test_restore_journal_rejects_file_over_global_size_limit(self):
         journal = Path(self.temp_dir.name) / "restore-oversized.audit.jsonl"
         with journal.open("wb") as handle:
