@@ -1594,6 +1594,11 @@ def verify_restore_execution_readiness(
         raise ValueError("The staged restore candidate is not restore-ready.")
 
     sidecar_inventory = inspect_sqlite_sidecars(live_path)
+    if sidecar_inventory["status"] != "SIDECARS_CLEAR":
+        raise ValueError(
+            "The live database has WAL/SHM sidecars; stop external SQLite clients "
+            "and complete operator-reviewed sidecar handling before preflight."
+        )
 
     try:
         with sqlite3.connect(f"file:{live_path}?mode=ro", uri=True, timeout=10) as live:
