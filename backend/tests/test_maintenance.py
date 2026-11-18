@@ -2064,17 +2064,14 @@ class DailyMaintenanceTests(unittest.TestCase):
             wal = Path(str(database.DB_PATH) + "-wal")
             wal.write_bytes(b"")
             try:
-                result = verify_restore_execution_readiness(
-                    source, staged, rollback,
-                    backup_dir=backup_dir,
-                    live_database_path=database.DB_PATH,
-                )
-                self.assertTrue(result["sidecar_handling_required_after_lock"])
-                self.assertEqual(
-                    result["sqlite_sidecars"]["status"],
-                    "SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING",
-                )
+                with self.assertRaisesRegex(ValueError, "WAL/SHM sidecars"):
+                    verify_restore_execution_readiness(
+                        source, staged, rollback,
+                        backup_dir=backup_dir,
+                        live_database_path=database.DB_PATH,
+                    )
                 self.assertTrue(wal.exists())
+                self.assertEqual(wal.read_bytes(), b"")
             finally:
                 wal.unlink(missing_ok=True)
 
