@@ -1342,6 +1342,53 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["database_state_verified"])
         self.assertEqual(result["evidence_scope"], "FILE_FINGERPRINTS_AND_SQLITE_INTEGRITY_ONLY")
 
+    def test_restore_evidence_reconciliation_flags_terminal_live_fingerprint_disagreement(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live-terminal.sqlite3",
+            "source_backup": root / "source-terminal.sqlite3",
+            "staged_candidate": root / "staged-terminal.sqlite3",
+            "rollback_backup": root / "rollback-terminal.sqlite3",
+        }
+        for name, path in paths.items():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+                connection.execute("INSERT INTO evidence_probe VALUES (?)", (name,))
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        live_hash = hashes["live_database_sha256"]
+        journal = root / "restore-terminal.audit.jsonl"
+        plan_id, token = "f" * 32, "e" * 32
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", plan_id, token,
+            "operator@example.com", "INC-EVIDENCE-TERMINAL",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_POSTCHECK_PASSED", plan_id, token,
+            "operator@example.com", "INC-EVIDENCE-TERMINAL",
+            details={
+                "integrity_check": "ok",
+                "foreign_key_violations": 0,
+                "schema_check": "passed",
+                "installed_database_sha256": live_hash,
+            }, journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_COMPLETE", plan_id, token,
+            "operator@example.com", "INC-EVIDENCE-TERMINAL",
+            details={"final_database_sha256": "0" * 64}, journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts(
+            plan_id, token, paths, journal_path=journal,
+        )
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertEqual(result["terminal_event"], "RESTORE_EXECUTION_COMPLETE")
+        self.assertTrue(any("postcheck and completion" in issue for issue in result["lifecycle_consistency_issues"]))
+        self.assertTrue(any("current live database fingerprint" in issue for issue in result["lifecycle_consistency_issues"]))
+        self.assertFalse(result["recoverability_verified"])
+        self.assertFalse(result["database_state_verified"])
+        self.assertEqual(result["automatic_action"], "NONE")
+
     def test_restore_evidence_reconciliation_detects_path_replacement_during_integrity_check(self):
         root = Path(self.temp_dir.name)
         paths = {
