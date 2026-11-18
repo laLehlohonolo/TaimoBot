@@ -2547,5 +2547,59 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(journal.read_bytes(), before)
 
 
+    def test_restore_execution_inspector_accepts_complete_success_lifecycle_read_only(self):
+        journal = Path(self.temp_dir.name) / "restore-valid-success.audit.jsonl"
+        plan_id, token = "7" * 32, "8" * 32
+        operator, incident = "operator@example.com", "INC-VALID-SUCCESS"
+        installed_hash = "9" * 64
+        events = [
+            ("RESTORE_EXECUTION_STARTED", {"artifacts": {
+                "live_database_sha256": "1" * 64,
+                "source_backup_sha256": "2" * 64,
+                "staged_candidate_sha256": "3" * 64,
+                "rollback_backup_sha256": "4" * 64,
+            }}),
+            ("RESTORE_SOURCE_PUBLISHED", {"artifacts": {
+                "staged_candidate_sha256": "3" * 64,
+                "published_database_sha256": "5" * 64,
+            }}),
+            ("RESTORE_POSTCHECK_PASSED", {
+                "integrity_check": "ok",
+                "foreign_key_violations": 0,
+                "schema_check": "passed",
+                "installed_database_sha256": installed_hash,
+            }),
+            ("RESTORE_EXECUTION_COMPLETE", {
+                "final_database_sha256": installed_hash,
+            }),
+        ]
+        for event, details in events:
+            append_restore_execution_event(
+                event, plan_id, token, operator, incident,
+                details=details, journal_path=journal,
+            )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(
+            result["status"],
+            "RESTORE_EXECUTION_REVIEW_REQUIRED",
+        )
+        self.assertEqual(result["executions"][0]["last_event"], "RESTORE_EXECUTION_COMPLETE")
+        self.assertEqual(
+            result["executions"][0]["classification"],
+            "COMPLETED_REQUIRES_DATABASE_RECONCILIATION",
+        )
+        self.assertEqual(result["executions"][0]["evidence_status"], "EVENT_EVIDENCE_PRESENT")
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_VERIFIED",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
