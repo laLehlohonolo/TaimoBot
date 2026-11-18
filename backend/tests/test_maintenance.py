@@ -1703,6 +1703,12 @@ class DailyMaintenanceTests(unittest.TestCase):
                 "operator@example.com", "INC-INVALID-DETAILS",
                 details={"unsupported": object()}, journal_path=journal,
             )
+        with self.assertRaisesRegex(ValueError, "JSON serializable"):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+                "operator@example.com", "INC-INVALID-DETAILS",
+                details={"non_finite": float("nan")}, journal_path=journal,
+            )
         with self.assertRaisesRegex(ValueError, "8 KiB limit"):
             append_restore_execution_event(
                 "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
@@ -1710,6 +1716,19 @@ class DailyMaintenanceTests(unittest.TestCase):
                 details={"payload": "x" * 8192}, journal_path=journal,
             )
         self.assertFalse(journal.exists())
+
+    def test_restore_execution_journal_rejects_nonstandard_json_constants(self):
+        journal = Path(self.temp_dir.name) / "restore-nonstandard-constant.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-NONSTANDARD-JSON",
+            details={"note": "safe"}, journal_path=journal,
+        )
+        raw = journal.read_bytes().replace(b'"safe"', b'NaN')
+        journal.write_bytes(raw)
+        verified = verify_restore_execution_journal(journal)
+        self.assertEqual(verified["status"], "RESTORE_JOURNAL_INVALID")
+        self.assertIn("non-standard JSON constant", verified["reason"])
 
     def test_restore_execution_journal_verifier_rejects_invalid_operator_and_incident_fields(self):
         for field, invalid_value in (
