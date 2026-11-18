@@ -241,6 +241,30 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
         },
     }
     semantic_errors = []
+    previous_journal_timestamp = None
+    for record in records:
+        try:
+            journal_timestamp = datetime.fromisoformat(record["timestamp"])
+            if (
+                journal_timestamp.tzinfo is None
+                or journal_timestamp.utcoffset() is None
+            ):
+                raise ValueError("timestamp must include a timezone offset")
+            if (
+                previous_journal_timestamp is not None
+                and journal_timestamp < previous_journal_timestamp
+            ):
+                semantic_errors.append({
+                    "plan_id": record["plan_id"],
+                    "reason": "journal timestamp moved backwards across executions",
+                })
+                break
+            previous_journal_timestamp = journal_timestamp
+        except (KeyError, TypeError, ValueError, OverflowError):
+            # Per-execution validation below reports malformed timestamps with
+            # the established, more specific diagnostic.
+            break
+
     token_plan_owners = {}
     plan_execution_tokens = {}
     for (plan_id, execution_token), _items in grouped.items():
