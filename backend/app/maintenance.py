@@ -192,14 +192,38 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
         if events[0] != "RESTORE_EXECUTION_STARTED":
             semantic_errors.append({"plan_id": plan_id, "reason": "execution does not begin with STARTED"})
             continue
-        for index, event in enumerate(events[1:], start=1):
-            previous_event = events[index - 1]
-            if previous_event in terminal_events or event not in allowed_after.get(previous_event, set()):
+
+        identity = (items[0].get("operator_id"), items[0].get("incident_ref"))
+        previous_timestamp = None
+        for index, item in enumerate(items):
+            if (item.get("operator_id"), item.get("incident_ref")) != identity:
                 semantic_errors.append({
                     "plan_id": plan_id,
-                    "reason": f"invalid event transition {previous_event} -> {event}",
+                    "reason": "operator or incident identity changed within one execution",
                 })
                 break
+            try:
+                event_timestamp = datetime.fromisoformat(item["timestamp"])
+                if event_timestamp.tzinfo is None or event_timestamp.utcoffset() is None:
+                    raise ValueError("timestamp must include a timezone offset")
+                if previous_timestamp is not None and event_timestamp < previous_timestamp:
+                    raise ValueError("event timestamp moved backwards")
+                previous_timestamp = event_timestamp
+            except (TypeError, ValueError, OverflowError):
+                semantic_errors.append({
+                    "plan_id": plan_id,
+                    "reason": "invalid or non-monotonic execution timestamp",
+                })
+                break
+            if index:
+                previous_event = events[index - 1]
+                event = item["event"]
+                if previous_event in terminal_events or event not in allowed_after.get(previous_event, set()):
+                    semantic_errors.append({
+                        "plan_id": plan_id,
+                        "reason": f"invalid event transition {previous_event} -> {event}",
+                    })
+                    break
 
         last = items[-1]
         last_event = last["event"]
