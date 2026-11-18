@@ -1305,6 +1305,49 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["database_state_verified"])
         self.assertEqual(result["automatic_action"], "NONE")
 
+    def test_restore_evidence_reconciliation_detects_path_replacement_during_integrity_check(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live-race.sqlite3",
+            "source_backup": root / "source-race.sqlite3",
+            "staged_candidate": root / "staged-race.sqlite3",
+            "rollback_backup": root / "rollback-race.sqlite3",
+        }
+        for name, path in paths.items():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+                connection.execute("INSERT INTO evidence_probe VALUES (?)", (name,))
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        journal = root / "restore-race.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-EVIDENCE-RACE",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        replacement = root / "replacement.sqlite3"
+        with sqlite3.connect(replacement) as connection:
+            connection.execute("CREATE TABLE replacement_probe (value TEXT)")
+        real_connect = sqlite3.connect
+        replaced = {"done": False}
+
+        def replace_before_sqlite_open(database_uri, *args, **kwargs):
+            if str(paths["source_backup"].absolute()) in str(database_uri) and not replaced["done"]:
+                os.replace(replacement, paths["source_backup"])
+                replaced["done"] = True
+            return real_connect(database_uri, *args, **kwargs)
+
+        with patch("app.maintenance.sqlite3.connect", side_effect=replace_before_sqlite_open):
+            result = reconcile_restore_execution_artifacts(
+                "a" * 32, "b" * 32, paths, journal_path=journal,
+            )
+        self.assertTrue(replaced["done"])
+        source_result = next(item for item in result["artifacts"] if item["artifact"] == "source_backup")
+        self.assertEqual(source_result["fingerprint_status"], "UNSAFE_OR_MISSING")
+        self.assertIn("changed", source_result["error"])
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertFalse(result["database_state_verified"])
+        self.assertEqual(result["automatic_action"], "NONE")
+
     def test_restore_evidence_reconciliation_detects_changed_artifact(self):
         root = Path(self.temp_dir.name)
         paths = {
