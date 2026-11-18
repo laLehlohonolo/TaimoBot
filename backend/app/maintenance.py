@@ -91,8 +91,26 @@ def verify_restore_execution_journal(
     try:
         for line in raw.splitlines():
             record = json.loads(line.decode("utf-8"))
-            if not isinstance(record, dict) or record.get("sequence") != len(records) + 1:
+            if (
+                not isinstance(record, dict)
+                or isinstance(record.get("sequence"), bool)
+                or not isinstance(record.get("sequence"), int)
+                or record.get("sequence") != len(records) + 1
+            ):
                 raise ValueError("invalid journal sequence")
+            if (
+                not isinstance(record.get("plan_id"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", record["plan_id"])
+                or not isinstance(record.get("execution_token"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", record["execution_token"])
+                or not isinstance(record.get("operator_id"), str)
+                or not record["operator_id"].strip()
+                or not isinstance(record.get("incident_ref"), str)
+                or not record["incident_ref"].strip()
+                or not isinstance(record.get("timestamp"), str)
+                or not isinstance(record.get("details"), dict)
+            ):
+                raise ValueError("invalid restore journal record schema")
             if record.get("previous_record_sha256") != previous:
                 raise ValueError("journal hash-chain link mismatch")
             digest = _restore_journal_digest(record)
