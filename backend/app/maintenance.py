@@ -13,6 +13,7 @@ import re
 import sqlite3
 import time
 import fcntl
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -313,7 +314,7 @@ def reconcile_restore_execution_artifacts(
                 )
             try:
                 uri = path.resolve().as_uri() + "?mode=ro"
-                with sqlite3.connect(uri, uri=True, timeout=10) as connection:
+                with closing(sqlite3.connect(uri, uri=True, timeout=10)) as connection:
                     integrity = connection.execute("PRAGMA integrity_check").fetchone()
                     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
                 item["integrity_check"] = integrity[0] if integrity else "NO_RESULT"
