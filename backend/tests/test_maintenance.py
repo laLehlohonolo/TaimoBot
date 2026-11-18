@@ -1469,7 +1469,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             "previous_record_sha256": "0" * 64,
         }
         record["record_sha256"] = _restore_journal_digest(record)
-        journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+        journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         result = verify_restore_execution_journal(journal)
         self.assertEqual(result["status"], "RESTORE_JOURNAL_INVALID")
         self.assertIn("schema", result["reason"])
@@ -1488,7 +1488,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             "previous_record_sha256": "0" * 64,
         }
         record["record_sha256"] = _restore_journal_digest(record)
-        journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+        journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         result = verify_restore_execution_journal(journal)
         self.assertEqual(result["status"], "RESTORE_JOURNAL_INVALID")
         self.assertIn("sequence", result["reason"])
