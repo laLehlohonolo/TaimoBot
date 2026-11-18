@@ -137,7 +137,15 @@ SHA-256 fingerprints recorded in the selected plan/execution journal:
 `live_database`, `source_backup`, `staged_candidate`, and `rollback_backup`.
 For each file it reports whether a fingerprint was recorded and whether the
 current bytes match. It also runs SQLite integrity and foreign-key checks and
-inventories live-database WAL/SHM sidecars.
+inventories live-database WAL/SHM sidecars. During each SQLite check it
+keeps the original no-follow file descriptor open, verifies the pathname still
+resolves to the same regular-file identity before and after SQLite opens the
+path read-only, and re-hashes the original descriptor after the check. A path
+replacement or in-place mutation during this inspection window is surfaced as
+unsafe and review-required. This narrows a pathname/file race; it does not
+eliminate hostile parent-directory substitution or provide a filesystem-wide
+atomic snapshot. Managed-directory validation and operator quiescence remain
+required.
 
 A missing recorded fingerprint, changed file, unsafe/missing path, failed
 integrity check, foreign-key violation, or present live sidecar keeps the result
