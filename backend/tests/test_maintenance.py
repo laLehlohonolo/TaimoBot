@@ -1342,6 +1342,43 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["database_state_verified"])
         self.assertEqual(result["evidence_scope"], "FILE_FINGERPRINTS_AND_SQLITE_INTEGRITY_ONLY")
 
+    def test_restore_evidence_reconciliation_surfaces_incomplete_event_evidence(self):
+        root = Path(self.temp_dir.name)
+        paths = {
+            "live_database": root / "live-incomplete.sqlite3",
+            "source_backup": root / "source-incomplete.sqlite3",
+            "staged_candidate": root / "staged-incomplete.sqlite3",
+            "rollback_backup": root / "rollback-incomplete.sqlite3",
+        }
+        for name, path in paths.items():
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+                connection.execute("INSERT INTO evidence_probe VALUES (?)", (name,))
+        hashes = {f"{name}_sha256": sha256_file(path) for name, path in paths.items()}
+        journal = root / "restore-incomplete.audit.jsonl"
+        plan_id, token = "3" * 32, "4" * 32
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", plan_id, token,
+            "operator@example.com", "INC-EVIDENCE-INCOMPLETE",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_POSTCHECK_PASSED", plan_id, token,
+            "operator@example.com", "INC-EVIDENCE-INCOMPLETE",
+            details={"integrity_check": "ok", "foreign_key_violations": 0},
+            journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts(
+            plan_id, token, paths, journal_path=journal,
+        )
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertEqual(len(result["event_evidence_review"]), 1)
+        self.assertEqual(result["event_evidence_review"][0]["event"], "RESTORE_POSTCHECK_PASSED")
+        self.assertTrue(any("schema_check" in issue for issue in result["event_evidence_review"][0]["issues"]))
+        self.assertTrue(any("installed_database_sha256" in issue for issue in result["event_evidence_review"][0]["issues"]))
+        self.assertFalse(result["recoverability_verified"])
+        self.assertEqual(result["automatic_action"], "NONE")
+
     def test_restore_evidence_reconciliation_accepts_consistent_terminal_fingerprints(self):
         root = Path(self.temp_dir.name)
         paths = {
