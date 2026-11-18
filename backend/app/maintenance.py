@@ -491,6 +491,55 @@ def reconcile_restore_execution_artifacts(
             all_verified = False
         results.append(item)
 
+    # Compare fingerprints that describe the same lifecycle state. The
+    # published database hash is intentionally distinct from the staged file
+    # hash; only postcheck/terminal hashes may describe the installed live DB.
+    lifecycle_issues = []
+    postchecks = [
+        record.get("details", {}).get("installed_database_sha256")
+        for record in matching_records
+        if record.get("event") == "RESTORE_POSTCHECK_PASSED"
+    ]
+    completions = [
+        record.get("details", {}).get("final_database_sha256")
+        for record in matching_records
+        if record.get("event") == "RESTORE_EXECUTION_COMPLETE"
+    ]
+    rollback_checks = [
+        record.get("details", {}).get("restored_database_sha256")
+        for record in matching_records
+        if record.get("event") == "RESTORE_ROLLBACK_VERIFIED"
+    ]
+    rollback_completions = [
+        record.get("details", {}).get("restored_database_sha256")
+        for record in matching_records
+        if record.get("event") == "RESTORE_EXECUTION_ROLLED_BACK"
+    ]
+    if postchecks and completions and postchecks[-1] != completions[-1]:
+        lifecycle_issues.append("postcheck and completion fingerprints describe different installed database bytes")
+    if rollback_checks and rollback_completions and rollback_checks[-1] != rollback_completions[-1]:
+        lifecycle_issues.append("rollback verification and rollback completion fingerprints disagree")
+
+    terminal_hash = None
+    terminal_event = None
+    for record in reversed(matching_records):
+        event = record.get("event")
+        details = record.get("details", {})
+        if event == "RESTORE_EXECUTION_COMPLETE":
+            terminal_hash, terminal_event = details.get("final_database_sha256"), event
+            break
+        if event == "RESTORE_EXECUTION_ROLLED_BACK":
+            terminal_hash, terminal_event = details.get("restored_database_sha256"), event
+            break
+    live_result = next((item for item in results if item["artifact"] == "live_database"), None)
+    if terminal_hash and live_result and live_sidecars["status"] == "SIDECARS_CLEAR":
+        if live_result.get("current_sha256") != terminal_hash:
+            lifecycle_issues.append(
+                f"current live database fingerprint does not match terminal {terminal_event} evidence"
+            )
+    if lifecycle_issues:
+        all_verified = False
+
     return {
         "status": "RESTORE_EVIDENCE_MATCHED" if all_verified else "RESTORE_EVIDENCE_REVIEW_REQUIRED",
         "journal_status": verification["status"],
@@ -498,6 +547,8 @@ def reconcile_restore_execution_artifacts(
         "execution_token": execution_token,
         "event_count": len(matching_records),
         "conflicting_fingerprints": sorted(conflicting),
+        "lifecycle_consistency_issues": lifecycle_issues,
+        "terminal_event": terminal_event,
         "artifacts": results,
         "live_database_sidecars": live_sidecars,
         "artifact_sidecars": artifact_sidecars,
