@@ -25,6 +25,167 @@ BACKUP_DIR = Path(__file__).resolve().parents[1] / "backups"
 _RESTORE_GUARD_FDS: dict[str, int] = {}
 
 
+_RESTORE_JOURNAL_EVENTS = {
+    "RESTORE_EXECUTION_STARTED",
+    "RESTORE_SOURCE_PUBLISHED",
+    "RESTORE_POSTCHECK_PASSED",
+    "RESTORE_ROLLBACK_STARTED",
+    "RESTORE_ROLLBACK_VERIFIED",
+    "RESTORE_EXECUTION_COMPLETE",
+    "RESTORE_EXECUTION_ROLLED_BACK",
+    "RESTORE_EXECUTION_RECOVERY_REQUIRED",
+}
+_RESTORE_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _restore_journal_digest(record: dict) -> str:
+    payload = {key: value for key, value in record.items() if key != "record_sha256"}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def verify_restore_execution_journal(journal_path: Path | None = None) -> dict:
+    """Verify the append-only hash chain without changing the journal."""
+    path = Path(journal_path or (Path(database.DB_PATH).parent / "restore-execution.audit.jsonl"))
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return {"status": "RESTORE_JOURNAL_EMPTY", "record_count": 0, "last_record_sha256": None}
+    try:
+        if not __import__("stat").S_ISREG(os.fstat(descriptor).st_mode):
+            return {"status": "RESTORE_JOURNAL_UNSAFE", "record_count": 0}
+        size = os.fstat(descriptor).st_size
+        if size > _RESTORE_JOURNAL_MAX_BYTES:
+            return {"status": "RESTORE_JOURNAL_INVALID", "reason": "journal exceeds size limit", "record_count": 0}
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                return {"status": "RESTORE_JOURNAL_INVALID", "reason": "journal truncated while reading", "record_count": 0}
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError as error:
+        return {"status": "RESTORE_JOURNAL_UNREADABLE", "reason": str(error)[:200], "record_count": 0}
+    finally:
+        os.close(descriptor)
+
+    if not raw:
+        return {"status": "RESTORE_JOURNAL_EMPTY", "record_count": 0, "last_record_sha256": None}
+    if not raw.endswith(b"\n"):
+        return {"status": "RESTORE_JOURNAL_INVALID", "reason": "incomplete final record", "record_count": 0}
+    previous = "0" * 64
+    count = 0
+    try:
+        for line in raw.splitlines():
+            record = json.loads(line.decode("utf-8"))
+            if not isinstance(record, dict) or record.get("sequence") != count + 1:
+                raise ValueError("invalid journal sequence")
+            if record.get("previous_record_sha256") != previous:
+                raise ValueError("journal hash-chain link mismatch")
+            digest = _restore_journal_digest(record)
+            if record.get("record_sha256") != digest:
+                raise ValueError("journal record fingerprint mismatch")
+            if record.get("event") not in _RESTORE_JOURNAL_EVENTS:
+                raise ValueError("unknown restore journal event")
+            previous = digest
+            count += 1
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as error:
+        return {"status": "RESTORE_JOURNAL_INVALID", "reason": str(error)[:200], "record_count": count}
+    return {
+        "status": "RESTORE_JOURNAL_VERIFIED",
+        "record_count": count,
+        "last_record_sha256": previous,
+    }
+
+
+def append_restore_execution_event(
+    event: str,
+    plan_id: str,
+    execution_token: str,
+    operator_id: str,
+    incident_ref: str,
+    *,
+    details: dict | None = None,
+    journal_path: Path | None = None,
+) -> dict:
+    """Append one fsynced, hash-chained restore event to an independent journal.
+
+    This journal deliberately lives outside SQLite so it remains writable while
+    the application database is quiesced. It records events only; it does not
+    perform or authorize a restore.
+    """
+    if event not in _RESTORE_JOURNAL_EVENTS:
+        raise ValueError("Unsupported restore execution event.")
+    for value, label in ((plan_id, "plan_id"), (execution_token, "execution_token")):
+        if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value):
+            raise ValueError(f"A valid {label} is required.")
+    for value, label in ((operator_id, "operator_id"), (incident_ref, "incident_ref")):
+        if not isinstance(value, str) or not value.strip() or len(value) > 200 or any(ord(char) < 32 for char in value):
+            raise ValueError(f"A valid {label} is required.")
+    if details is not None and not isinstance(details, dict):
+        raise ValueError("Journal details must be an object.")
+    details = details or {}
+    try:
+        details_encoded = json.dumps(details, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValueError("Journal details must be JSON serializable.") from error
+    if len(details_encoded) > 8192:
+        raise ValueError("Journal details exceed the 8 KiB limit.")
+
+    path = Path(journal_path or (Path(database.DB_PATH).parent / "restore-execution.audit.jsonl"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
+    descriptor = os.open(
+        str(path),
+        os.O_CREAT | os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        if not __import__("stat").S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError("Restore execution journal is not a regular file.")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        verification = verify_restore_execution_journal(path)
+        if verification["status"] not in ("RESTORE_JOURNAL_EMPTY", "RESTORE_JOURNAL_VERIFIED"):
+            raise RuntimeError("Restore execution journal failed integrity verification; append refused.")
+        record = {
+            "sequence": verification["record_count"] + 1,
+            "timestamp": datetime.now(SAST).isoformat(),
+            "event": event,
+            "plan_id": plan_id,
+            "execution_token": execution_token,
+            "operator_id": operator_id.strip(),
+            "incident_ref": incident_ref.strip(),
+            "details": details,
+            "previous_record_sha256": verification["last_record_sha256"] or ("0" * 64),
+        }
+        record["record_sha256"] = _restore_journal_digest(record)
+        encoded = (json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        written_total = 0
+        while written_total < len(encoded):
+            written = os.write(descriptor, encoded[written_total:])
+            if written <= 0:
+                raise OSError("Could not complete restore journal append.")
+            written_total += written
+        os.fsync(descriptor)
+        if not existed:
+            directory_fd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        return {
+            "status": "RESTORE_JOURNAL_EVENT_RECORDED",
+            "event": event,
+            "sequence": record["sequence"],
+            "record_sha256": record["record_sha256"],
+            "journal_file": path.name,
+        }
+    finally:
+        os.close(descriptor)
+
+
 def is_maintenance_window(now: datetime | None = None) -> bool:
     """Return True during the configured SAST maintenance window [23:00, 00:00)."""
     local_now = (now or datetime.now(SAST)).astimezone(SAST)
