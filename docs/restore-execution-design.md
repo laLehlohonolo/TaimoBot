@@ -137,7 +137,10 @@ SHA-256 fingerprints recorded in the selected plan/execution journal:
 `live_database`, `source_backup`, `staged_candidate`, and `rollback_backup`.
 For each file it reports whether a fingerprint was recorded and whether the
 current bytes match. It also runs SQLite integrity and foreign-key checks and
-inventories live-database WAL/SHM sidecars. During each SQLite check it
+inventories WAL/SHM sidecars for all four artifacts, not just the live
+database. Any artifact with a sidecar is fingerprinted but is not opened through
+SQLite for integrity checks; the sidecar is preserved and the overall result
+remains review-required. During each SQLite check it
 keeps the original no-follow file descriptor open, verifies the pathname still
 resolves to the same regular-file identity before and after SQLite opens the
 path read-only, and re-hashes the original descriptor after the check. A path
