@@ -1728,7 +1728,7 @@ class DailyMaintenanceTests(unittest.TestCase):
                 record = json.loads(journal.read_text(encoding="utf-8"))
                 record[field] = invalid_value
                 record["record_sha256"] = _restore_journal_digest(record)
-                journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+                journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
                 verified = verify_restore_execution_journal(journal)
                 self.assertEqual(verified["status"], "RESTORE_JOURNAL_INVALID")
                 self.assertEqual(verified["reason"], "invalid restore journal record schema")
