@@ -1747,7 +1747,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             '"event":"RESTORE_EXECUTION_STARTED","event":"RESTORE_EXECUTION_STARTED"',
             1,
         )
-        journal.write_text(raw + "\n", encoding="utf-8")
+        journal.write_text(raw + chr(10), encoding="utf-8")
         verified = verify_restore_execution_journal(journal)
         self.assertEqual(verified["status"], "RESTORE_JOURNAL_INVALID")
         self.assertIn("duplicate JSON object key", verified["reason"])
