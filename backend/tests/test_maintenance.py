@@ -2421,5 +2421,51 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(journal.read_bytes(), before)
 
 
+    def test_restore_execution_inspector_rejects_events_after_terminal_state_read_only(self):
+        journal = Path(self.temp_dir.name) / "restore-after-terminal.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "1" * 32, "2" * 32,
+            "operator@example.com", "INC-AFTER-TERMINAL",
+            details={"artifacts": {
+                "live_database_sha256": "1" * 64,
+                "source_backup_sha256": "2" * 64,
+                "staged_candidate_sha256": "3" * 64,
+                "rollback_backup_sha256": "4" * 64,
+            }},
+            journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_RECOVERY_REQUIRED", "1" * 32, "2" * 32,
+            "operator@example.com", "INC-AFTER-TERMINAL",
+            details={"reason": "Operator review required."},
+            journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "1" * 32, "2" * 32,
+            "operator@example.com", "INC-AFTER-TERMINAL",
+            details={"artifacts": {
+                "staged_candidate_sha256": "3" * 64,
+                "published_database_sha256": "5" * 64,
+            }},
+            journal_path=journal,
+        )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertIn(
+            "invalid event transition RESTORE_EXECUTION_RECOVERY_REQUIRED -> RESTORE_SOURCE_PUBLISHED",
+            result["semantic_errors"][0]["reason"],
+        )
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_VERIFIED",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
