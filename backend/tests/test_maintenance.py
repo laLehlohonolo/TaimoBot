@@ -1234,6 +1234,35 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["automatic_action"], "NONE")
         self.assertFalse(result["live_database_replaced"])
 
+    def test_restore_event_evidence_keeps_pre_and_post_publish_hashes_distinct(self):
+        journal = Path(self.temp_dir.name) / "restore-evidence-states.audit.jsonl"
+        initial = {
+            "live_database_sha256": "1" * 64,
+            "source_backup_sha256": "2" * 64,
+            "staged_candidate_sha256": "3" * 64,
+            "rollback_backup_sha256": "4" * 64,
+        }
+        published = {
+            "staged_candidate_sha256": "3" * 64,
+            "published_database_sha256": "5" * 64,
+        }
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "7" * 32, "6" * 32,
+            "operator@example.com", "INC-EVIDENCE-STATES",
+            details={"artifacts": initial}, journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "7" * 32, "6" * 32,
+            "operator@example.com", "INC-EVIDENCE-STATES",
+            details={"artifacts": published}, journal_path=journal,
+        )
+        result = inspect_restore_execution_state(journal)
+        self.assertEqual(result["executions"][0]["evidence_status"], "EVENT_EVIDENCE_PRESENT")
+        self.assertEqual(result["executions"][0]["events_missing_evidence"], 0)
+        self.assertEqual(result["evidence_review"], [])
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(result["automatic_action"], "NONE")
+
     def test_restore_execution_state_handles_multiple_independent_attempts(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         for plan, token, incident in (("4" * 32, "5" * 32, "INC-A"), ("6" * 32, "7" * 32, "INC-B")):
