@@ -105,8 +105,12 @@ def verify_restore_execution_journal(
                 or not re.fullmatch(r"[a-f0-9]{32}", record["execution_token"])
                 or not isinstance(record.get("operator_id"), str)
                 or not record["operator_id"].strip()
+                or len(record["operator_id"]) > 200
+                or any(ord(char) < 32 for char in record["operator_id"])
                 or not isinstance(record.get("incident_ref"), str)
                 or not record["incident_ref"].strip()
+                or len(record["incident_ref"]) > 200
+                or any(ord(char) < 32 for char in record["incident_ref"])
                 or not isinstance(record.get("timestamp"), str)
                 or not isinstance(record.get("details"), dict)
             ):
