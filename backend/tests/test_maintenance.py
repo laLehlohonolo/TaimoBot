@@ -1693,6 +1693,36 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(verified["record_count"], 2)
         self.assertEqual(verified["last_record_sha256"], second["record_sha256"])
 
+    def test_restore_execution_journal_partial_write_fails_closed(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        original_write = os.write
+        interrupted = {"done": False}
+
+        def partial_then_fail(descriptor, payload):
+            if not interrupted["done"]:
+                interrupted["done"] = True
+                original_write(descriptor, payload[:24])
+                raise OSError("simulated process interruption during journal append")
+            return original_write(descriptor, payload)
+
+        with patch("app.maintenance.os.write", side_effect=partial_then_fail):
+            with self.assertRaisesRegex(OSError, "simulated process interruption"):
+                append_restore_execution_event(
+                    "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+                    "operator@example.com", "INC-PARTIAL-WRITE",
+                    journal_path=journal,
+                )
+
+        verification = verify_restore_execution_journal(journal)
+        self.assertEqual(verification["status"], "RESTORE_JOURNAL_INVALID")
+        self.assertEqual(verification["reason"], "incomplete final record")
+        with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_COMPLETE", "a" * 32, "b" * 32,
+                "operator@example.com", "INC-PARTIAL-WRITE",
+                journal_path=journal,
+            )
+
     def test_restore_execution_journal_detects_tampering_and_refuses_append(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         append_restore_execution_event(
