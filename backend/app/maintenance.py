@@ -141,7 +141,7 @@ def _restore_event_evidence_issues(record: dict) -> list[str]:
     artifacts = details.get("artifacts", {})
     requirements = {
         "RESTORE_EXECUTION_STARTED": ("live_database_sha256", "source_backup_sha256", "staged_candidate_sha256", "rollback_backup_sha256"),
-        "RESTORE_SOURCE_PUBLISHED": ("staged_candidate_sha256", "live_database_sha256"),
+        "RESTORE_SOURCE_PUBLISHED": ("staged_candidate_sha256", "published_database_sha256"),
         "RESTORE_ROLLBACK_STARTED": ("rollback_backup_sha256",),
     }
     issues = []
