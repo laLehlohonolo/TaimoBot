@@ -1733,7 +1733,14 @@ class DailyMaintenanceTests(unittest.TestCase):
                 journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
                 verified = verify_restore_execution_journal(journal)
                 self.assertEqual(verified["status"], "RESTORE_JOURNAL_INVALID")
-                self.assertEqual(verified["reason"], "invalid restore journal record schema")
+                expected_reason = (
+                    "invalid restore journal timestamp"
+                    if field == "timestamp" and invalid_value == "not-a-timestamp"
+                    else "restore journal timestamp must include a timezone offset"
+                    if field == "timestamp"
+                    else "invalid restore journal record schema"
+                )
+                self.assertEqual(verified["reason"], expected_reason)
 
     def test_restore_execution_journal_rejects_duplicate_json_keys(self):
         journal = Path(self.temp_dir.name) / "restore-duplicate-key.audit.jsonl"
