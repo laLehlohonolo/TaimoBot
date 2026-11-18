@@ -81,7 +81,7 @@ def verify_restore_execution_journal(
         if include_records:
             result["records"] = []
         return result
-    if not raw.endswith(b"\\n"):
+    if not raw.endswith(b"\n"):
         return {"status": "RESTORE_JOURNAL_INVALID", "reason": "incomplete final record", "record_count": 0}
     previous = "0" * 64
     records = []
