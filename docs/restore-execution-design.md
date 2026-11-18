@@ -88,6 +88,12 @@ incomplete rollback, a recorded recovery-required outcome, and terminal
 complete/rolled-back events that still need reconciliation against the actual
 database files.
 
+The inspector also enforces execution identity and chronology: all events
+under one plan/execution token must retain the same operator and incident
+reference, and timestamps must be timezone-aware ISO-8601 values in
+non-decreasing order. Contradictory identity or time ordering invalidates the
+execution history and requires operator review.
+
 The inspector also checks event ordering and rejects semantically impossible
 transitions, even when the hash chain itself is valid. It is read-only and
 always returns `automatic_action: NONE`; it never resumes, retries, rolls back,
