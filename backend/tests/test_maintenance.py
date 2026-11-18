@@ -2605,26 +2605,35 @@ class DailyMaintenanceTests(unittest.TestCase):
         journal = Path(self.temp_dir.name) / "restore-after-success.audit.jsonl"
         plan_id, token = "9" * 32, "a" * 32
         operator, incident = "operator@example.com", "INC-AFTER-SUCCESS"
-        append_restore_execution_event(
-            "RESTORE_EXECUTION_STARTED", plan_id, token, operator, incident,
-            details={"artifacts": {
+        events = [
+            ("RESTORE_EXECUTION_STARTED", {"artifacts": {
                 "live_database_sha256": "1" * 64,
                 "source_backup_sha256": "2" * 64,
                 "staged_candidate_sha256": "3" * 64,
                 "rollback_backup_sha256": "4" * 64,
-            }},
-            journal_path=journal,
-        )
-        append_restore_execution_event(
-            "RESTORE_EXECUTION_COMPLETE", plan_id, token, operator, incident,
-            details={"final_database_sha256": "5" * 64},
-            journal_path=journal,
-        )
-        append_restore_execution_event(
-            "RESTORE_ROLLBACK_STARTED", plan_id, token, operator, incident,
-            details={"artifacts": {"rollback_backup_sha256": "4" * 64}},
-            journal_path=journal,
-        )
+            }}),
+            ("RESTORE_SOURCE_PUBLISHED", {"artifacts": {
+                "staged_candidate_sha256": "3" * 64,
+                "published_database_sha256": "5" * 64,
+            }}),
+            ("RESTORE_POSTCHECK_PASSED", {
+                "integrity_check": "ok",
+                "foreign_key_violations": 0,
+                "schema_check": "passed",
+                "installed_database_sha256": "6" * 64,
+            }),
+            ("RESTORE_EXECUTION_COMPLETE", {
+                "final_database_sha256": "6" * 64,
+            }),
+            ("RESTORE_ROLLBACK_STARTED", {"artifacts": {
+                "rollback_backup_sha256": "4" * 64,
+            }}),
+        ]
+        for event, details in events:
+            append_restore_execution_event(
+                event, plan_id, token, operator, incident,
+                details=details, journal_path=journal,
+            )
         before = journal.read_bytes()
 
         result = inspect_restore_execution_state(journal)
