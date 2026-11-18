@@ -2652,6 +2652,47 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
 
 
+    def test_restore_execution_inspector_rejects_global_timestamp_regression_across_plans(self):
+        journal = Path(self.temp_dir.name) / "restore-global-timestamp-regression.audit.jsonl"
+        zone = ZoneInfo("Africa/Johannesburg")
+        timestamps = iter([
+            datetime(2026, 11, 18, 12, 1, tzinfo=zone),
+            datetime(2026, 11, 18, 12, 0, tzinfo=zone),
+        ])
+
+        class ControlledDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = next(timestamps)
+                return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+        with patch("app.maintenance.datetime", ControlledDateTime):
+            for plan_id, token in (("1" * 32, "2" * 32), ("3" * 32, "4" * 32)):
+                append_restore_execution_event(
+                    "RESTORE_EXECUTION_STARTED", plan_id, token,
+                    "operator@example.com", "INC-GLOBAL-TIMESTAMP",
+                    details={"artifacts": {
+                        "live_database_sha256": "1" * 64,
+                        "source_backup_sha256": "2" * 64,
+                        "staged_candidate_sha256": "3" * 64,
+                        "rollback_backup_sha256": "4" * 64,
+                    }},
+                    journal_path=journal,
+                )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertTrue(any(
+            "journal timestamp moved backwards across executions" in item["reason"]
+            for item in result["semantic_errors"]
+        ))
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+
+
     def test_restore_execution_inspector_rejects_reusing_plan_with_new_execution_token(self):
         journal = Path(self.temp_dir.name) / "restore-plan-reuse.audit.jsonl"
         plan_id = "b" * 32
