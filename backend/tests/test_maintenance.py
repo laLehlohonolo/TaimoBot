@@ -1128,13 +1128,43 @@ class DailyMaintenanceTests(unittest.TestCase):
                 sha256_file(artifact, chunk_size=0)
 
 
+    def test_restore_lock_preserves_wal_and_shm_and_does_not_claim_external_quiescence(self):
+        external = sqlite3.connect(database.DB_PATH, timeout=5)
+        try:
+            external.execute("PRAGMA journal_mode=WAL")
+            external.execute("PRAGMA wal_autocheckpoint=0")
+            external.execute("CREATE TABLE IF NOT EXISTS external_writer_probe (value TEXT)")
+            external.execute("INSERT INTO external_writer_probe VALUES ('keep-wal')")
+            external.commit()
+            wal_path = Path(str(database.DB_PATH) + "-wal")
+            shm_path = Path(str(database.DB_PATH) + "-shm")
+            self.assertTrue(wal_path.exists())
+            self.assertTrue(shm_path.exists())
+            wal_before = wal_path.read_bytes()
+
+            lock = acquire_restore_lock("9" * 32)
+            try:
+                self.assertFalse(lock["database_quiescent"])
+                self.assertTrue(lock["application_connections_quiescent"])
+                self.assertFalse(lock["external_process_quiescence_verified"])
+                self.assertEqual(lock["sqlite_sidecars"]["status"], "SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING")
+                self.assertTrue(wal_path.exists())
+                self.assertTrue(shm_path.exists())
+                self.assertEqual(wal_path.read_bytes(), wal_before)
+            finally:
+                release_restore_lock(lock["lock_token"])
+        finally:
+            external.close()
+
     def test_restore_lock_quiesces_application_connections_and_requires_owner_token(self):
         from app.database import get_connection
 
         plan_id = "d" * 32
         lock = acquire_restore_lock(plan_id)
         self.assertEqual(lock["status"], "RESTORE_LOCK_ACQUIRED")
-        self.assertTrue(lock["database_quiescent"])
+        self.assertTrue(lock["application_connections_quiescent"])
+        self.assertFalse(lock["external_process_quiescence_verified"])
+        self.assertFalse(lock["database_quiescent"])
         self.assertTrue(is_restore_lock_active())
         self.assertTrue(Path(lock["lock_file"]).is_file())
 
