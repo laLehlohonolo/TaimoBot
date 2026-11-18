@@ -150,6 +150,11 @@ eliminate hostile parent-directory substitution or provide a filesystem-wide
 atomic snapshot. Managed-directory validation and operator quiescence remain
 required.
 
+The reconciler independently re-applies the event-specific evidence contract
+to every matching journal record. Missing postcheck schema/hash evidence,
+rollback verification fields, or a recovery-required reason is explicitly listed
+for operator review and prevents a matched result.
+
 The reconciler also checks lifecycle fingerprint relationships: a
 postcheck-installed hash must agree with the completion hash, a verified
 rollback hash must agree with the rolled-back terminal hash, and when a terminal
