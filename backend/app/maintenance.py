@@ -242,12 +242,7 @@ def reconcile_restore_execution_artifacts(
     *,
     journal_path: Path | None = None,
 ) -> dict:
-    """Read-only comparison of recorded artifact hashes with current files.
-
-    artifact_paths keys are live_database, source_backup, staged_candidate, and
-    rollback_backup. Expected hashes are read from journal event details under
-    details.artifacts using the corresponding '<key>_sha256' field.
-    """
+    """Read-only comparison of recorded artifact hashes with current files."""
     if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
         raise ValueError("A valid restore plan ID is required.")
     if not isinstance(execution_token, str) or not re.fullmatch(r"[a-f0-9]{32}", execution_token):
@@ -266,7 +261,6 @@ def reconcile_restore_execution_artifacts(
             "automatic_action": "NONE",
             "live_database_replaced": False,
         }
-
     matching_records = [
         record for record in verification.get("records", [])
         if record.get("plan_id") == plan_id and record.get("execution_token") == execution_token
@@ -282,16 +276,25 @@ def reconcile_restore_execution_artifacts(
         }
 
     expected = {}
+    conflicting = set()
     for record in matching_records:
         artifacts = record.get("details", {}).get("artifacts", {})
         if isinstance(artifacts, dict):
             for key in allowed:
                 value = artifacts.get(f"{key}_sha256")
                 if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value):
+                    if key in expected and expected[key] != value:
+                        conflicting.add(key)
                     expected[key] = value
 
+    live_path = Path(artifact_paths["live_database"])
+    try:
+        live_sidecars = inspect_sqlite_sidecars(live_path)
+    except (OSError, ValueError):
+        live_sidecars = {"status": "SIDECARS_UNSAFE_OR_UNREADABLE", "sidecars": []}
+
     results = []
-    all_verified = True
+    all_verified = not conflicting and live_sidecars["status"] == "SIDECARS_CLEAR"
     for key in ("live_database", "source_backup", "staged_candidate", "rollback_backup"):
         path = Path(artifact_paths[key])
         item = {
@@ -299,20 +302,36 @@ def reconcile_restore_execution_artifacts(
             "file_name": path.name,
             "expected_sha256": expected.get(key),
             "current_sha256": None,
-            "fingerprint_status": "NOT_RECORDED" if key not in expected else "UNVERIFIED",
+            "fingerprint_status": "CONFLICTING_JOURNAL_EVIDENCE" if key in conflicting else (
+                "NOT_RECORDED" if key not in expected else "UNVERIFIED"
+            ),
             "integrity_check": "NOT_CHECKED",
             "foreign_key_violations": None,
         }
         try:
-            if path.is_symlink() or not path.is_file():
-                raise ValueError("artifact missing or not a regular file")
-            current_hash = sha256_file(path)
-            item["current_sha256"] = current_hash
-            if key in expected:
-                item["fingerprint_status"] = (
-                    "MATCH" if current_hash == expected[key] else "MISMATCH"
-                )
+            descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             try:
+                metadata = os.fstat(descriptor)
+                if not __import__("stat").S_ISREG(metadata.st_mode):
+                    raise ValueError("artifact is not a regular file")
+                digest = hashlib.sha256()
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                current_hash = digest.hexdigest()
+            finally:
+                os.close(descriptor)
+            item["current_sha256"] = current_hash
+            if key not in conflicting and key in expected:
+                item["fingerprint_status"] = "MATCH" if current_hash == expected[key] else "MISMATCH"
+
+            # Never open the live DB through SQLite while WAL/SHM sidecars exist.
+            if key == "live_database" and live_sidecars["status"] != "SIDECARS_CLEAR":
+                item["integrity_check"] = "SKIPPED_SIDECARS_PRESENT"
+                all_verified = False
+            else:
                 uri = path.resolve().as_uri() + "?mode=ro"
                 with closing(sqlite3.connect(uri, uri=True, timeout=10)) as connection:
                     integrity = connection.execute("PRAGMA integrity_check").fetchone()
@@ -321,24 +340,15 @@ def reconcile_restore_execution_artifacts(
                 item["foreign_key_violations"] = len(violations)
                 if item["integrity_check"] != "ok" or violations:
                     all_verified = False
-            except (sqlite3.Error, OSError, ValueError):
-                item["integrity_check"] = "UNREADABLE"
+            if item["fingerprint_status"] in (
+                "MISMATCH", "UNVERIFIED", "NOT_RECORDED", "CONFLICTING_JOURNAL_EVIDENCE"
+            ):
                 all_verified = False
-            if item["fingerprint_status"] in ("MISMATCH", "UNVERIFIED", "NOT_RECORDED"):
-                all_verified = False
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, sqlite3.Error) as error:
             item["fingerprint_status"] = "UNSAFE_OR_MISSING"
             item["error"] = str(error)[:160]
             all_verified = False
         results.append(item)
-
-    live_sidecars = None
-    try:
-        live_sidecars = inspect_sqlite_sidecars(Path(artifact_paths["live_database"]))
-        if live_sidecars["status"] != "SIDECARS_CLEAR":
-            all_verified = False
-    except (OSError, ValueError):
-        all_verified = False
 
     return {
         "status": "RESTORE_EVIDENCE_MATCHED" if all_verified else "RESTORE_EVIDENCE_REVIEW_REQUIRED",
@@ -346,6 +356,7 @@ def reconcile_restore_execution_artifacts(
         "plan_id": plan_id,
         "execution_token": execution_token,
         "event_count": len(matching_records),
+        "conflicting_fingerprints": sorted(conflicting),
         "artifacts": results,
         "live_database_sidecars": live_sidecars,
         "database_state_verified": False,
