@@ -2301,5 +2301,39 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
 
 
+    def test_restore_execution_inspector_rejects_operator_identity_change_read_only(self):
+        journal = Path(self.temp_dir.name) / "restore-identity-change.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-IDENTITY-CHANGE",
+            details={"artifacts": {
+                "live_database_sha256": "1" * 64,
+                "source_backup_sha256": "2" * 64,
+                "staged_candidate_sha256": "3" * 64,
+                "rollback_backup_sha256": "4" * 64,
+            }},
+            journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "a" * 32, "b" * 32,
+            "different-operator@example.com", "INC-IDENTITY-CHANGE",
+            details={"artifacts": {
+                "staged_candidate_sha256": "3" * 64,
+                "published_database_sha256": "5" * 64,
+            }},
+            journal_path=journal,
+        )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertIn("operator or incident identity changed",
+                      result["semantic_errors"][0]["reason"])
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
