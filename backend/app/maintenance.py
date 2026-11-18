@@ -44,13 +44,18 @@ def _restore_journal_digest(record: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def verify_restore_execution_journal(journal_path: Path | None = None) -> dict:
+def verify_restore_execution_journal(
+    journal_path: Path | None = None, *, include_records: bool = False
+) -> dict:
     """Verify the append-only hash chain without changing the journal."""
     path = Path(journal_path or (Path(database.DB_PATH).parent / "restore-execution.audit.jsonl"))
     try:
         descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
-        return {"status": "RESTORE_JOURNAL_EMPTY", "record_count": 0, "last_record_sha256": None}
+        result = {"status": "RESTORE_JOURNAL_EMPTY", "record_count": 0, "last_record_sha256": None}
+        if include_records:
+            result["records"] = []
+        return result
     try:
         if not __import__("stat").S_ISREG(os.fstat(descriptor).st_mode):
             return {"status": "RESTORE_JOURNAL_UNSAFE", "record_count": 0}
@@ -72,15 +77,18 @@ def verify_restore_execution_journal(journal_path: Path | None = None) -> dict:
         os.close(descriptor)
 
     if not raw:
-        return {"status": "RESTORE_JOURNAL_EMPTY", "record_count": 0, "last_record_sha256": None}
-    if not raw.endswith(b"\n"):
+        result = {"status": "RESTORE_JOURNAL_EMPTY", "record_count": 0, "last_record_sha256": None}
+        if include_records:
+            result["records"] = []
+        return result
+    if not raw.endswith(b"\\n"):
         return {"status": "RESTORE_JOURNAL_INVALID", "reason": "incomplete final record", "record_count": 0}
     previous = "0" * 64
-    count = 0
+    records = []
     try:
         for line in raw.splitlines():
             record = json.loads(line.decode("utf-8"))
-            if not isinstance(record, dict) or record.get("sequence") != count + 1:
+            if not isinstance(record, dict) or record.get("sequence") != len(records) + 1:
                 raise ValueError("invalid journal sequence")
             if record.get("previous_record_sha256") != previous:
                 raise ValueError("journal hash-chain link mismatch")
@@ -90,13 +98,136 @@ def verify_restore_execution_journal(journal_path: Path | None = None) -> dict:
             if record.get("event") not in _RESTORE_JOURNAL_EVENTS:
                 raise ValueError("unknown restore journal event")
             previous = digest
-            count += 1
+            records.append(record)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as error:
-        return {"status": "RESTORE_JOURNAL_INVALID", "reason": str(error)[:200], "record_count": count}
-    return {
+        return {"status": "RESTORE_JOURNAL_INVALID", "reason": str(error)[:200], "record_count": len(records)}
+    result = {
         "status": "RESTORE_JOURNAL_VERIFIED",
-        "record_count": count,
+        "record_count": len(records),
         "last_record_sha256": previous,
+    }
+    if include_records:
+        result["records"] = records
+    return result
+
+
+def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
+    """Read-only crash-state classification; never resumes or mutates a restore."""
+    verification = verify_restore_execution_journal(journal_path, include_records=True)
+    if verification["status"] not in ("RESTORE_JOURNAL_EMPTY", "RESTORE_JOURNAL_VERIFIED"):
+        return {
+            "status": "RESTORE_EXECUTION_INSPECTION_BLOCKED",
+            "journal_status": verification["status"],
+            "reason": verification.get("reason", "Journal cannot be safely inspected."),
+            "executions": [],
+            "automatic_action": "NONE",
+            "live_database_replaced": False,
+        }
+    records = verification.get("records", [])
+    if not records:
+        return {
+            "status": "NO_RECORDED_RESTORE_EXECUTION",
+            "journal_status": verification["status"],
+            "record_count": 0,
+            "executions": [],
+            "automatic_action": "NONE",
+            "live_database_replaced": False,
+        }
+
+    grouped = {}
+    for record in records:
+        key = (record["plan_id"], record["execution_token"])
+        grouped.setdefault(key, []).append(record)
+
+    executions = []
+    terminal_events = {
+        "RESTORE_EXECUTION_COMPLETE",
+        "RESTORE_EXECUTION_ROLLED_BACK",
+        "RESTORE_EXECUTION_RECOVERY_REQUIRED",
+    }
+    allowed_after = {
+        "RESTORE_EXECUTION_STARTED": {
+            "RESTORE_SOURCE_PUBLISHED", "RESTORE_ROLLBACK_STARTED",
+            "RESTORE_EXECUTION_RECOVERY_REQUIRED",
+        },
+        "RESTORE_SOURCE_PUBLISHED": {
+            "RESTORE_POSTCHECK_PASSED", "RESTORE_ROLLBACK_STARTED",
+            "RESTORE_EXECUTION_RECOVERY_REQUIRED",
+        },
+        "RESTORE_POSTCHECK_PASSED": {
+            "RESTORE_EXECUTION_COMPLETE", "RESTORE_ROLLBACK_STARTED",
+            "RESTORE_EXECUTION_RECOVERY_REQUIRED",
+        },
+        "RESTORE_ROLLBACK_STARTED": {
+            "RESTORE_ROLLBACK_VERIFIED", "RESTORE_EXECUTION_RECOVERY_REQUIRED",
+        },
+        "RESTORE_ROLLBACK_VERIFIED": {
+            "RESTORE_EXECUTION_ROLLED_BACK", "RESTORE_EXECUTION_RECOVERY_REQUIRED",
+        },
+    }
+    semantic_errors = []
+    for (plan_id, _execution_token), items in grouped.items():
+        events = [item["event"] for item in items]
+        if events[0] != "RESTORE_EXECUTION_STARTED":
+            semantic_errors.append({"plan_id": plan_id, "reason": "execution does not begin with STARTED"})
+            continue
+        for index, event in enumerate(events[1:], start=1):
+            previous_event = events[index - 1]
+            if previous_event in terminal_events or event not in allowed_after.get(previous_event, set()):
+                semantic_errors.append({
+                    "plan_id": plan_id,
+                    "reason": f"invalid event transition {previous_event} -> {event}",
+                })
+                break
+
+        last = items[-1]
+        last_event = last["event"]
+        if last_event == "RESTORE_EXECUTION_COMPLETE":
+            classification = "COMPLETED_REQUIRES_DATABASE_RECONCILIATION"
+        elif last_event == "RESTORE_EXECUTION_ROLLED_BACK":
+            classification = "ROLLED_BACK_REQUIRES_DATABASE_RECONCILIATION"
+        elif last_event == "RESTORE_EXECUTION_RECOVERY_REQUIRED":
+            classification = "OPERATOR_RECOVERY_REQUIRED"
+        elif last_event == "RESTORE_ROLLBACK_STARTED":
+            classification = "ROLLBACK_INCOMPLETE_REQUIRES_OPERATOR_REVIEW"
+        elif last_event in ("RESTORE_SOURCE_PUBLISHED", "RESTORE_POSTCHECK_PASSED"):
+            classification = "PUBLISHED_STATE_UNCONFIRMED_REQUIRES_OPERATOR_REVIEW"
+        else:
+            classification = "INTERRUPTED_BEFORE_PUBLISH_REQUIRES_OPERATOR_REVIEW"
+        executions.append({
+            "plan_id": plan_id,
+            "operator_id": last.get("operator_id"),
+            "incident_ref": last.get("incident_ref"),
+            "started_at": items[0].get("timestamp"),
+            "last_event_at": last.get("timestamp"),
+            "last_event": last_event,
+            "event_count": len(items),
+            "classification": classification,
+            "terminal": last_event in terminal_events,
+        })
+
+    if semantic_errors:
+        return {
+            "status": "RESTORE_JOURNAL_SEMANTIC_INVALID",
+            "journal_status": verification["status"],
+            "record_count": len(records),
+            "executions": executions,
+            "semantic_errors": semantic_errors,
+            "automatic_action": "NONE",
+            "live_database_replaced": False,
+        }
+    needs_review = any(not item["terminal"] or item["classification"] in (
+        "OPERATOR_RECOVERY_REQUIRED",
+        "COMPLETED_REQUIRES_DATABASE_RECONCILIATION",
+        "ROLLED_BACK_REQUIRES_DATABASE_RECONCILIATION",
+    ) for item in executions)
+    return {
+        "status": "RESTORE_EXECUTION_REVIEW_REQUIRED" if needs_review else "RESTORE_EXECUTION_TERMINAL_EVENTS_RECORDED",
+        "journal_status": verification["status"],
+        "record_count": len(records),
+        "executions": executions,
+        "automatic_action": "NONE",
+        "live_database_replaced": False,
     }
 
 
