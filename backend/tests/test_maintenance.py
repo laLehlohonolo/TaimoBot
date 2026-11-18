@@ -2652,5 +2652,38 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
 
 
+    def test_restore_execution_inspector_rejects_reusing_plan_with_new_execution_token(self):
+        journal = Path(self.temp_dir.name) / "restore-plan-reuse.audit.jsonl"
+        plan_id = "b" * 32
+        operator, incident = "operator@example.com", "INC-PLAN-REUSE"
+        artifacts = {
+            "live_database_sha256": "1" * 64,
+            "source_backup_sha256": "2" * 64,
+            "staged_candidate_sha256": "3" * 64,
+            "rollback_backup_sha256": "4" * 64,
+        }
+        for token in ("c" * 32, "d" * 32):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", plan_id, token, operator, incident,
+                details={"artifacts": artifacts}, journal_path=journal,
+            )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertTrue(any(
+            "restore plan reused with multiple execution tokens" in item["reason"]
+            for item in result["semantic_errors"]
+        ))
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(
+            verify_restore_execution_journal(journal)["status"],
+            "RESTORE_JOURNAL_VERIFIED",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
