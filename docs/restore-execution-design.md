@@ -54,6 +54,30 @@ Implementation research must choose and test one explicit strategy:
 
 The final protocol must document exactly what happens if the process stops after each filesystem operation. It must not describe a multi-file sequence as atomic unless crash testing demonstrates that claim.
 
+## Implemented journal foundation
+
+The current code now provides an independent JSONL restore execution journal in
+`backend/app/maintenance.py`:
+
+- `append_restore_execution_event(...)` appends an allow-listed event with
+  sequence number, SAST timestamp, plan ID, execution token, operator, incident
+  reference, and bounded JSON details.
+- Each record includes the previous record hash and its own SHA-256 digest.
+  Appends use an exclusive file lock, complete-write loop, and `fsync`; creation
+  also fsyncs the containing directory.
+- `verify_restore_execution_journal(...)` checks sequence continuity, event
+  allow-list, previous-hash links, record digests, and complete newline-terminated
+  records. Appending is refused if existing history fails verification.
+- The journal is independent of SQLite and can therefore be written while the
+  application database is locked.
+
+This is an integrity check against accidental corruption and partial writes,
+not a cryptographic signature or protection against an attacker who can rewrite
+the entire journal and recompute every hash. A future execution design should
+anchor the terminal journal digest in a separately controlled system or
+write-once store. The helper records events only: no endpoint invokes it to
+replace the live database, and no restore execution is implemented.
+
 ## Audit requirements
 
 Append-only, fsynced events should include:
