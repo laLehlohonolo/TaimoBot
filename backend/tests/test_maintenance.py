@@ -1717,6 +1717,8 @@ class DailyMaintenanceTests(unittest.TestCase):
             ("operator_id", "operator\nforged"),
             ("incident_ref", "i" * 201),
             ("incident_ref", "INC-1\x00forged"),
+            ("timestamp", "not-a-timestamp"),
+            ("timestamp", "2026-11-18T12:00:00"),
         ):
             with self.subTest(field=field, invalid_value=repr(invalid_value)):
                 journal = Path(self.temp_dir.name) / f"invalid-{field}-{len(invalid_value)}.audit.jsonl"
