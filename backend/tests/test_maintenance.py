@@ -28,6 +28,7 @@ from app.maintenance import (
     verify_restore_execution_journal,
     inspect_restore_execution_state,
     reconcile_restore_execution_artifacts,
+    _restore_journal_digest,
 )
 from app import database
 from app.database import init_db
@@ -1454,6 +1455,43 @@ class DailyMaintenanceTests(unittest.TestCase):
                 "operator@example.com", "INC-RESTORE-003",
                 journal_path=target,
             )
+
+    def test_restore_execution_journal_rejects_hash_valid_record_with_invalid_schema(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        record = {
+            "sequence": 1,
+            "timestamp": "2026-11-18T09:00:00+02:00",
+            "event": "RESTORE_EXECUTION_STARTED",
+            "execution_token": "a" * 32,
+            "operator_id": "operator@example.com",
+            "incident_ref": "INC-SCHEMA-001",
+            "details": {},
+            "previous_record_sha256": "0" * 64,
+        }
+        record["record_sha256"] = _restore_journal_digest(record)
+        journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+        result = verify_restore_execution_journal(journal)
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_INVALID")
+        self.assertIn("schema", result["reason"])
+
+    def test_restore_execution_journal_rejects_boolean_sequence(self):
+        journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
+        record = {
+            "sequence": True,
+            "timestamp": "2026-11-18T09:00:00+02:00",
+            "event": "RESTORE_EXECUTION_STARTED",
+            "plan_id": "b" * 32,
+            "execution_token": "c" * 32,
+            "operator_id": "operator@example.com",
+            "incident_ref": "INC-SCHEMA-002",
+            "details": {},
+            "previous_record_sha256": "0" * 64,
+        }
+        record["record_sha256"] = _restore_journal_digest(record)
+        journal.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+        result = verify_restore_execution_journal(journal)
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_INVALID")
+        self.assertIn("sequence", result["reason"])
 
     def test_restore_execution_journal_rejects_incomplete_final_record(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
