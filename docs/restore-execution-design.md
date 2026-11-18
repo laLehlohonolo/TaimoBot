@@ -107,8 +107,11 @@ minimum evidence contract is:
 
 - `RESTORE_EXECUTION_STARTED`: SHA-256 fingerprints for live database, source
   backup, staged candidate, and rollback backup under `details.artifacts`.
-- `RESTORE_SOURCE_PUBLISHED`: staged-candidate and published live-database
-  fingerprints under `details.artifacts`.
+- `RESTORE_SOURCE_PUBLISHED`: staged-candidate fingerprint and a distinct
+  `published_database_sha256` under `details.artifacts`. This is deliberately
+  separate from the pre-restore `live_database_sha256` recorded at STARTED;
+  the two fingerprints describe different database states and must not be
+  treated as conflicting versions of one artifact.
 - `RESTORE_POSTCHECK_PASSED`: `integrity_check: "ok"`,
   `foreign_key_violations: 0`, `schema_check: "passed"`, and the installed
   database SHA-256.
