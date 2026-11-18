@@ -2832,6 +2832,42 @@ class DailyMaintenanceTests(unittest.TestCase):
             "RESTORE_JOURNAL_VERIFIED",
         )
 
+    def test_restore_journal_partial_write_fails_closed_and_refuses_future_appends(self):
+        journal = Path(self.temp_dir.name) / "restore-partial-write.audit.jsonl"
+        real_write = __import__("os").write
+        calls = {"count": 0}
+
+        def interrupted_write(descriptor, data):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return real_write(descriptor, data[: max(1, len(data) // 2)])
+            raise OSError("simulated disk write failure")
+
+        with patch("app.maintenance.os.write", side_effect=interrupted_write):
+            with self.assertRaisesRegex(OSError, "simulated disk write failure"):
+                append_restore_execution_event(
+                    "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+                    "operator@example.com", "INC-PARTIAL-WRITE",
+                    details={"artifacts": {
+                        "live_database_sha256": "1" * 64,
+                        "source_backup_sha256": "2" * 64,
+                        "staged_candidate_sha256": "3" * 64,
+                        "rollback_backup_sha256": "4" * 64,
+                    }},
+                    journal_path=journal,
+                )
+
+        result = verify_restore_execution_journal(journal)
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_INVALID")
+        before = journal.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_RECOVERY_REQUIRED", "a" * 32, "b" * 32,
+                "operator@example.com", "INC-PARTIAL-WRITE",
+                details={"reason": "manual review required"}, journal_path=journal,
+            )
+        self.assertEqual(journal.read_bytes(), before)
+
     def test_restore_journal_rejects_file_over_global_size_limit(self):
         journal = Path(self.temp_dir.name) / "restore-oversized.audit.jsonl"
         with journal.open("wb") as handle:
