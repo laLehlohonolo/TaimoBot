@@ -1147,6 +1147,8 @@ class DailyMaintenanceTests(unittest.TestCase):
                          "INTERRUPTED_BEFORE_PUBLISH_REQUIRES_OPERATOR_REVIEW")
         self.assertEqual(result["automatic_action"], "NONE")
         self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(result["executions"][0]["evidence_status"], "INCOMPLETE_REQUIRES_OPERATOR_REVIEW")
+        self.assertTrue(result["evidence_review"][0]["events"][0]["issues"])
         self.assertEqual(journal.read_bytes(), before)
 
     def test_restore_execution_state_flags_published_but_unconfirmed_database(self):
