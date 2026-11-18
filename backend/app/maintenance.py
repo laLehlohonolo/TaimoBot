@@ -1608,6 +1608,55 @@ def verify_restore_execution_readiness(
     if not live_integrity or live_integrity[0] != "ok":
         raise ValueError("The current live database failed its integrity check.")
 
+    required_live_schema = {
+        "users": {"user_id", "email", "password_hash", "created_at"},
+        "paper_accounts": {"account_id", "starting_balance", "balance"},
+        "trades": {
+            "trade_id", "account_id", "client_order_id", "symbol", "side",
+            "quantity", "entry_price", "stop_loss", "status", "risk_amount",
+            "realized_pnl",
+        },
+        "position_groups": {"group_id", "account_id", "symbol", "side", "status"},
+        "copy_relationships": {
+            "relationship_id", "source_account_id", "follower_account_id", "status",
+        },
+        "copy_executions": {
+            "copy_execution_id", "relationship_id", "source_trade_id", "status",
+        },
+        "participant_milestones": {"user_id", "joined_at", "first_trade_at"},
+        "system_safety_state": {"singleton_id", "emergency_stop_active"},
+    }
+    try:
+        with sqlite3.connect(f"file:{live_path}?mode=ro", uri=True, timeout=10) as live:
+            live_tables = {
+                row[0] for row in live.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            missing_live_schema = []
+            for table, required_columns in required_live_schema.items():
+                if table not in live_tables:
+                    missing_live_schema.append(table)
+                    continue
+                actual_columns = {
+                    row[1] for row in live.execute(f"PRAGMA table_info({table})")
+                }
+                missing = required_columns - actual_columns
+                if missing:
+                    missing_live_schema.append(
+                        f"{table}:" + ",".join(sorted(missing))
+                    )
+            live_fk_violations = live.execute("PRAGMA foreign_key_check").fetchall()
+    except (sqlite3.Error, OSError, ValueError) as error:
+        raise ValueError("The live database schema cannot be verified.") from error
+    if missing_live_schema:
+        raise ValueError(
+            "The live database is missing required TaimoBot schema: "
+            + "; ".join(missing_live_schema)
+        )
+    if live_fk_violations:
+        raise ValueError("The live database has foreign-key violations.")
+
     return {
         "status": "RESTORE_EXECUTION_PREFLIGHT_PASSED",
         "source_backup_verified": True,
