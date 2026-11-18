@@ -1170,6 +1170,29 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertTrue(result["evidence_review"][0]["events"][0]["issues"])
         self.assertEqual(journal.read_bytes(), before)
 
+    def test_restore_execution_state_keeps_recovery_required_terminal_for_operator_review(self):
+        journal = Path(self.temp_dir.name) / "restore-recovery-required.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "c" * 32,
+            "operator@example.com", "INC-RECOVERY-001", journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_RECOVERY_REQUIRED", "a" * 32, "c" * 32,
+            "operator@example.com", "INC-RECOVERY-001",
+            details={"reason": "rollback evidence could not be verified"},
+            journal_path=journal,
+        )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(result["status"], "RESTORE_EXECUTION_REVIEW_REQUIRED")
+        self.assertEqual(result["executions"][0]["classification"], "OPERATOR_RECOVERY_REQUIRED")
+        self.assertTrue(result["executions"][0]["terminal"])
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+
     def test_restore_execution_state_flags_published_but_unconfirmed_database(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         append_restore_execution_event(
