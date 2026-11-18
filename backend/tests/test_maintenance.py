@@ -1752,6 +1752,29 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(verified["status"], "RESTORE_JOURNAL_INVALID")
         self.assertIn("duplicate JSON object key", verified["reason"])
 
+    def test_restore_execution_journal_rejects_duplicate_nested_json_keys(self):
+        journal = Path(self.temp_dir.name) / "restore-duplicate-nested-key.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "b" * 32,
+            "operator@example.com", "INC-DUPLICATE-NESTED-KEY",
+            details={"artifacts": {"source_backup_sha256": "1" * 64}},
+            journal_path=journal,
+        )
+        record = json.loads(journal.read_text(encoding="utf-8"))
+        canonical = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        raw = canonical.replace(
+            '"source_backup_sha256":"' + ("1" * 64) + '"',
+            '"source_backup_sha256":"' + ("1" * 64)
+            + '","source_backup_sha256":"' + ("1" * 64) + '"',
+            1,
+        )
+        journal.write_text(raw + "\\n", encoding="utf-8")
+
+        verified = verify_restore_execution_journal(journal)
+
+        self.assertEqual(verified["status"], "RESTORE_JOURNAL_INVALID")
+        self.assertIn("duplicate JSON object key", verified["reason"])
+
     def test_restore_execution_journal_appends_and_verifies_hash_chain(self):
         journal = Path(self.temp_dir.name) / "restore-execution.audit.jsonl"
         first = append_restore_execution_event(
