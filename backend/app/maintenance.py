@@ -242,6 +242,7 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
     }
     semantic_errors = []
     token_plan_owners = {}
+    plan_execution_tokens = {}
     for (plan_id, execution_token), _items in grouped.items():
         previous_plan = token_plan_owners.get(execution_token)
         if previous_plan is not None and previous_plan != plan_id:
@@ -251,6 +252,15 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
             })
         else:
             token_plan_owners[execution_token] = plan_id
+
+        previous_token = plan_execution_tokens.get(plan_id)
+        if previous_token is not None and previous_token != execution_token:
+            semantic_errors.append({
+                "plan_id": plan_id,
+                "reason": "restore plan reused with multiple execution tokens",
+            })
+        else:
+            plan_execution_tokens[plan_id] = execution_token
 
     for (plan_id, _execution_token), items in grouped.items():
         events = [item["event"] for item in items]
