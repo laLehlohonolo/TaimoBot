@@ -394,14 +394,24 @@ def reconcile_restore_execution_artifacts(
                         conflicting.add(key)
                     expected[key] = value
 
-    live_path = Path(artifact_paths["live_database"])
-    try:
-        live_sidecars = inspect_sqlite_sidecars(live_path)
-    except (OSError, ValueError):
-        live_sidecars = {"status": "SIDECARS_UNSAFE_OR_UNREADABLE", "sidecars": []}
+    artifact_sidecars = {}
+    for artifact_key in allowed:
+        artifact_path = Path(artifact_paths[artifact_key])
+        try:
+            artifact_sidecars[artifact_key] = inspect_sqlite_sidecars(artifact_path)
+        except (OSError, ValueError):
+            artifact_sidecars[artifact_key] = {
+                "status": "SIDECARS_UNSAFE_OR_UNREADABLE",
+                "sidecars": [],
+                "mutation_performed": False,
+            }
+    live_sidecars = artifact_sidecars["live_database"]
 
     results = []
-    all_verified = not conflicting and live_sidecars["status"] == "SIDECARS_CLEAR"
+    all_verified = not conflicting and all(
+        inventory["status"] == "SIDECARS_CLEAR"
+        for inventory in artifact_sidecars.values()
+    )
     for key in ("live_database", "source_backup", "staged_candidate", "rollback_backup"):
         path = Path(artifact_paths[key])
         item = {
@@ -438,9 +448,11 @@ def reconcile_restore_execution_artifacts(
                 if key not in conflicting and key in expected:
                     item["fingerprint_status"] = "MATCH" if current_hash == expected[key] else "MISMATCH"
 
-                # Never open the live DB through SQLite while WAL/SHM sidecars exist.
-                if key == "live_database" and live_sidecars["status"] != "SIDECARS_CLEAR":
+                # Never open any SQLite artifact through SQLite while adjacent
+                # WAL/SHM sidecars exist; the main file alone may be stale.
+                if artifact_sidecars[key]["status"] != "SIDECARS_CLEAR":
                     item["integrity_check"] = "SKIPPED_SIDECARS_PRESENT"
+                    item["sidecars"] = artifact_sidecars[key]
                     all_verified = False
                 else:
                     # SQLite opens by pathname, not our already-open descriptor.
@@ -488,6 +500,9 @@ def reconcile_restore_execution_artifacts(
         "conflicting_fingerprints": sorted(conflicting),
         "artifacts": results,
         "live_database_sidecars": live_sidecars,
+        "artifact_sidecars": artifact_sidecars,
+        "evidence_scope": "FILE_FINGERPRINTS_AND_SQLITE_INTEGRITY_ONLY",
+        "recoverability_verified": False,
         "database_state_verified": False,
         "automatic_action": "NONE",
         "live_database_replaced": False,
