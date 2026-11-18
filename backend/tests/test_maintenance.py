@@ -16,6 +16,7 @@ from app.maintenance import (
     inspect_recovery_candidates,
     verify_restore_candidate,
     verify_restore_execution_readiness,
+    verify_restore_execution_readiness_under_lock,
     sha256_file,
     acquire_restore_lock,
     release_restore_lock,
@@ -2077,6 +2078,91 @@ class DailyMaintenanceTests(unittest.TestCase):
                     )
                 }
             self.assertNotIn("trades", tables)
+
+    def test_locked_restore_preflight_requires_external_process_acknowledgement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-staged.sqlite3"
+            for target in (source, rollback, staged):
+                with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                    live.backup(copy)
+            plan_id = "a" * 32
+            lock = acquire_restore_lock(plan_id)
+            try:
+                with self.assertRaisesRegex(ValueError, "external SQLite processes"):
+                    verify_restore_execution_readiness_under_lock(
+                        source, staged, rollback,
+                        plan_id=plan_id,
+                        lock_token=lock["lock_token"],
+                        external_processes_stopped=False,
+                        backup_dir=backup_dir,
+                        live_database_path=database.DB_PATH,
+                    )
+            finally:
+                release_restore_lock(lock["lock_token"])
+
+    def test_locked_restore_preflight_rechecks_artifacts_under_matching_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-staged.sqlite3"
+            for target in (source, rollback, staged):
+                with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                    live.backup(copy)
+            plan_id = "b" * 32
+            lock = acquire_restore_lock(plan_id)
+            try:
+                result = verify_restore_execution_readiness_under_lock(
+                    source, staged, rollback,
+                    plan_id=plan_id,
+                    lock_token=lock["lock_token"],
+                    external_processes_stopped=True,
+                    backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+                self.assertEqual(result["status"], "RESTORE_EXECUTION_LOCKED_PREFLIGHT_PASSED")
+                self.assertTrue(result["restore_lock_verified"])
+                self.assertTrue(result["external_processes_stopped_operator_confirmed"])
+                self.assertFalse(result["execution_authorized"])
+                self.assertFalse(result["live_database_replaced"])
+            finally:
+                release_restore_lock(lock["lock_token"])
+
+    def test_locked_restore_preflight_rejects_wrong_lock_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-staged.sqlite3"
+            for target in (source, rollback, staged):
+                with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                    live.backup(copy)
+            plan_id = "c" * 32
+            lock = acquire_restore_lock(plan_id)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "matching active restore lock"):
+                    verify_restore_execution_readiness_under_lock(
+                        source, staged, rollback,
+                        plan_id=plan_id,
+                        lock_token="d" * 32,
+                        external_processes_stopped=True,
+                        backup_dir=backup_dir,
+                        live_database_path=database.DB_PATH,
+                    )
+            finally:
+                release_restore_lock(lock["lock_token"])
 
     def test_restore_execution_preflight_reports_sidecars_for_locked_handling(self):
         with tempfile.TemporaryDirectory() as directory:
