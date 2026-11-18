@@ -241,6 +241,17 @@ def inspect_restore_execution_state(journal_path: Path | None = None) -> dict:
         },
     }
     semantic_errors = []
+    token_plan_owners = {}
+    for (plan_id, execution_token), _items in grouped.items():
+        previous_plan = token_plan_owners.get(execution_token)
+        if previous_plan is not None and previous_plan != plan_id:
+            semantic_errors.append({
+                "plan_id": plan_id,
+                "reason": "execution token reused across different restore plans",
+            })
+        else:
+            token_plan_owners[execution_token] = plan_id
+
     for (plan_id, _execution_token), items in grouped.items():
         events = [item["event"] for item in items]
         if events[0] != "RESTORE_EXECUTION_STARTED":
