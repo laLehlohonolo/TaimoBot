@@ -2393,5 +2393,33 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
 
 
+    def test_restore_execution_inspector_rejects_reused_token_across_plans_read_only(self):
+        journal = Path(self.temp_dir.name) / "restore-reused-token.audit.jsonl"
+        for plan_id, digest_start in (("e" * 32, "1"), ("f" * 32, "5")):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", plan_id, "a" * 32,
+                "operator@example.com", "INC-REUSED-TOKEN",
+                details={"artifacts": {
+                    "live_database_sha256": digest_start * 64,
+                    "source_backup_sha256": "2" * 64,
+                    "staged_candidate_sha256": "3" * 64,
+                    "rollback_backup_sha256": "4" * 64,
+                }},
+                journal_path=journal,
+            )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(result["status"], "RESTORE_JOURNAL_SEMANTIC_INVALID")
+        self.assertTrue(any(
+            "execution token reused across different restore plans" in item["reason"]
+            for item in result["semantic_errors"]
+        ))
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
