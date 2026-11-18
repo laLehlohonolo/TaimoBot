@@ -124,6 +124,12 @@ def verify_restore_execution_journal(
                 or not isinstance(record.get("details"), dict)
             ):
                 raise ValueError("invalid restore journal record schema")
+            try:
+                parsed_timestamp = datetime.fromisoformat(record["timestamp"])
+            except ValueError as error:
+                raise ValueError("invalid restore journal timestamp") from error
+            if parsed_timestamp.tzinfo is None or parsed_timestamp.utcoffset() is None:
+                raise ValueError("restore journal timestamp must include a timezone offset")
             if record.get("previous_record_sha256") != previous:
                 raise ValueError("journal hash-chain link mismatch")
             digest = _restore_journal_digest(record)
