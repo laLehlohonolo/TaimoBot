@@ -2500,5 +2500,52 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
 
 
+    def test_restore_execution_inspector_accepts_complete_rollback_lifecycle_read_only(self):
+        journal = Path(self.temp_dir.name) / "restore-valid-rollback.audit.jsonl"
+        plan_id, token = "5" * 32, "6" * 32
+        operator, incident = "operator@example.com", "INC-VALID-ROLLBACK"
+        events = [
+            ("RESTORE_EXECUTION_STARTED", {"artifacts": {
+                "live_database_sha256": "1" * 64,
+                "source_backup_sha256": "2" * 64,
+                "staged_candidate_sha256": "3" * 64,
+                "rollback_backup_sha256": "4" * 64,
+            }}),
+            ("RESTORE_ROLLBACK_STARTED", {"artifacts": {
+                "rollback_backup_sha256": "4" * 64,
+            }}),
+            ("RESTORE_ROLLBACK_VERIFIED", {
+                "integrity_check": "ok",
+                "foreign_key_violations": 0,
+                "restored_database_sha256": "7" * 64,
+            }),
+            ("RESTORE_EXECUTION_ROLLED_BACK", {
+                "restored_database_sha256": "7" * 64,
+            }),
+        ]
+        for event, details in events:
+            append_restore_execution_event(
+                event, plan_id, token, operator, incident,
+                details=details, journal_path=journal,
+            )
+        before = journal.read_bytes()
+
+        result = inspect_restore_execution_state(journal)
+
+        self.assertEqual(
+            result["status"],
+            "RESTORE_EXECUTION_REVIEW_REQUIRED",
+        )
+        self.assertEqual(result["executions"][0]["last_event"], "RESTORE_EXECUTION_ROLLED_BACK")
+        self.assertEqual(
+            result["executions"][0]["classification"],
+            "ROLLED_BACK_REQUIRES_DATABASE_RECONCILIATION",
+        )
+        self.assertEqual(result["executions"][0]["evidence_status"], "EVENT_EVIDENCE_PRESENT")
+        self.assertEqual(result["automatic_action"], "NONE")
+        self.assertFalse(result["live_database_replaced"])
+        self.assertEqual(journal.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
