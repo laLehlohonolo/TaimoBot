@@ -97,6 +97,67 @@ class CopyTradeClosingTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(execution["status"], "CLOSED")
 
+    def test_source_close_assigns_costs_once_and_never_duplicates_them_to_copy(self):
+        source, copied_id = self.create_copied_trade()
+
+        response = self.client.post(
+            f"/trades/{source['trade_id']}/close",
+            json={
+                "exit_price": 4010,
+                "spread_cost": 0.12,
+                "commission_cost": 0.23,
+                "swap_cost": 0.34,
+                "other_costs": 0.45,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_id, realized_pnl, gross_realized_pnl,
+                       spread_cost, commission_cost, swap_cost, other_costs
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                ORDER BY trade_id
+                """,
+                (source["trade_id"], copied_id),
+            ).fetchall()
+        by_id = {row["trade_id"]: row for row in rows}
+        source_row = by_id[source["trade_id"]]
+        copy_row = by_id[copied_id]
+
+        self.assertAlmostEqual(source_row["spread_cost"], 0.12)
+        self.assertAlmostEqual(source_row["commission_cost"], 0.23)
+        self.assertAlmostEqual(source_row["swap_cost"], 0.34)
+        self.assertAlmostEqual(source_row["other_costs"], 0.45)
+        self.assertEqual(
+            (
+                copy_row["spread_cost"],
+                copy_row["commission_cost"],
+                copy_row["swap_cost"],
+                copy_row["other_costs"],
+            ),
+            (0, 0, 0, 0),
+        )
+        self.assertAlmostEqual(
+            source_row["realized_pnl"],
+            source_row["gross_realized_pnl"] - 1.14,
+        )
+        self.assertAlmostEqual(
+            copy_row["realized_pnl"],
+            copy_row["gross_realized_pnl"],
+        )
+        self.assertAlmostEqual(
+            self.account_balance("SOURCE"),
+            10000 + source_row["realized_pnl"],
+        )
+        self.assertAlmostEqual(
+            self.account_balance("FOLLOWER"),
+            5000 + copy_row["realized_pnl"],
+        )
+
+
     def test_manually_closing_copy_does_not_close_source(self):
         source, copied_id = self.create_copied_trade()
 
