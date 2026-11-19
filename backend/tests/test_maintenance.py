@@ -2091,7 +2091,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             return result
 
         with patch("app.maintenance.os.close", side_effect=fail_marker_close):
-            with self.assertRaisesRegex(OSError, "marker descriptor close failure"):
+            with self.assertRaisesRegex(RuntimeError, "inspection descriptors safely"):
                 release_restore_lock(lock["lock_token"])
 
         self.assertIsNotNone(failed_fd["value"])
