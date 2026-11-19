@@ -2039,6 +2039,24 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(Path(lock["lock_file"]).exists())
 
 
+    def test_restore_lock_directory_sync_failure_keeps_process_guard_held(self):
+        import app.maintenance as maintenance_module
+
+        lock = acquire_restore_lock("e" * 32)
+        with patch("app.maintenance.os.fsync", side_effect=OSError("simulated directory sync failure")):
+            with self.assertRaisesRegex(RuntimeError, "marker removal was not confirmed durable"):
+                release_restore_lock(lock["lock_token"])
+
+        self.assertFalse(Path(lock["lock_file"]).exists())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
+            database.get_connection()
+
+        # Test-only cleanup: emulate process teardown after the fail-closed
+        # condition has been verified. Production recovery remains operator-led.
+        guard_fd = maintenance_module._RESTORE_GUARD_FDS.pop(lock["lock_token"])
+        os.close(guard_fd)
+
+
     def test_restore_lock_refuses_to_start_while_application_connection_is_open(self):
         from app.database import get_connection, open_connection_count
 
