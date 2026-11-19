@@ -173,6 +173,38 @@ def migrate_trade_columns(connection):
             )
 
 
+
+def migrate_trade_cost_ledger(connection):
+    """Add auditable close-cost fields without changing historical balances."""
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(trades)").fetchall()
+    }
+    new_columns = {
+        "gross_realized_pnl": "REAL",
+        "spread_cost": "REAL NOT NULL DEFAULT 0",
+        "commission_cost": "REAL NOT NULL DEFAULT 0",
+        "swap_cost": "REAL NOT NULL DEFAULT 0",
+        "other_costs": "REAL NOT NULL DEFAULT 0",
+    }
+    for column_name, column_type in new_columns.items():
+        if column_name not in existing_columns:
+            connection.execute(
+                f"ALTER TABLE trades ADD COLUMN {column_name} {column_type}"
+            )
+
+    # Legacy realized_pnl remains authoritative net P&L for old rows.
+    # With no historical cost records, preserve it as both gross and net.
+    connection.execute(
+        """
+        UPDATE trades
+        SET gross_realized_pnl = realized_pnl
+        WHERE status = 'CLOSED'
+          AND gross_realized_pnl IS NULL
+        """
+    )
+
+
 def migrate_account_ownership(connection):
     """Add nullable ownership without assigning legacy accounts to strangers."""
     existing_columns = {
@@ -510,6 +542,7 @@ def init_db():
         seed_strategy_knowledge(connection)
 
         migrate_trade_columns(connection)
+        migrate_trade_cost_ledger(connection)
         migrate_account_ownership(connection)
         migrate_participant_milestones(connection)
         migrate_account_risk_profiles(connection)
