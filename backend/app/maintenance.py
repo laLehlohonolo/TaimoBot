@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import time
 import fcntl
 from contextlib import closing
@@ -1170,7 +1171,7 @@ def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     descriptor = os.open(str(artifact_path), flags)
     try:
         metadata = os.fstat(descriptor)
-        if not os.path.isfile(artifact_path) or not __import__("stat").S_ISREG(metadata.st_mode):
+        if not stat.S_ISREG(metadata.st_mode):
             raise OSError("Recovery artifact is not a regular file.")
         with os.fdopen(descriptor, "rb", closefd=False) as artifact:
             for chunk in iter(lambda: artifact.read(chunk_size), b""):
