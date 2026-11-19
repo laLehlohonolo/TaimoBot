@@ -372,7 +372,11 @@ export default function App() {
           side: orderSide
         })
       });
-      setOrderPreview({ ...result, assignedRisk });
+      const projectedRisk = Number(risk.current_open_risk) + Number(result.risk_amount);
+      if (projectedRisk > Number(risk.maximum_risk_amount) + 1e-9) {
+        throw new Error("This position would exceed the remaining combined account risk budget. Reduce the position risk or close an existing position first.");
+      }
+      setOrderPreview({ ...result, assignedRisk, projectedRisk });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Risk preview failed.");
     } finally {
