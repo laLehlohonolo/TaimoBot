@@ -1,4 +1,5 @@
 """Run ten copy lifecycle and source-close race checks sequentially."""
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -6,7 +7,10 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from tests import test_copy_replication as MODULE
+TEST_FILE = BACKEND_ROOT / "tests" / "test_copy_replication.py"
+SPEC = importlib.util.spec_from_file_location("copy_lifecycle_close_race_tests", TEST_FILE)
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
 
 CASES = [
     "test_api_trade_creation_triggers_copy",
