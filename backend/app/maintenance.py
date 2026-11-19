@@ -1455,7 +1455,7 @@ def _verify_restore_lock_recovery_audit_fd(descriptor: int) -> dict:
         raise RuntimeError("Restore lock recovery audit changed or was truncated during verification.")
     if not raw:
         return {"record_count": 0, "last_record_sha256": "0" * 64}
-    if not raw.endswith(b"\\n"):
+    if not raw.endswith(b"\n"):
         raise RuntimeError("Restore lock recovery audit has an incomplete final record.")
     previous = "0" * 64
     count = 0
@@ -1614,7 +1614,7 @@ def recover_abandoned_restore_lock(
                     "sidecars_changed": False,
                 }
                 record["record_sha256"] = _restore_lock_recovery_record_digest(record)
-                data = (json.dumps(record, sort_keys=True) + "\\n").encode("utf-8")
+                data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
                 view = memoryview(data)
                 while view:
                     written = os.write(audit_fd, view)
