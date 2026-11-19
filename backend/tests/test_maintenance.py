@@ -2080,18 +2080,24 @@ class DailyMaintenanceTests(unittest.TestCase):
         lock = acquire_restore_lock("a" * 32)
         real_close = os.close
         failed_fd = {"value": None}
+        successfully_closed = []
 
         def fail_marker_close(descriptor):
             if descriptor != maintenance_module._RESTORE_GUARD_FDS[lock["lock_token"]] and failed_fd["value"] is None:
                 failed_fd["value"] = descriptor
                 raise OSError("simulated marker descriptor close failure")
-            return real_close(descriptor)
+            result = real_close(descriptor)
+            successfully_closed.append(descriptor)
+            return result
 
         with patch("app.maintenance.os.close", side_effect=fail_marker_close):
             with self.assertRaisesRegex(OSError, "marker descriptor close failure"):
                 release_restore_lock(lock["lock_token"])
 
         self.assertIsNotNone(failed_fd["value"])
+        self.assertEqual(len(successfully_closed), 1)  # directory descriptor still closes
+        with self.assertRaises(OSError):
+            os.fstat(successfully_closed[0])
         self.assertFalse(Path(lock["lock_file"]).exists())
         self.assertIn(lock["lock_token"], maintenance_module._RESTORE_GUARD_FDS)
         with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
