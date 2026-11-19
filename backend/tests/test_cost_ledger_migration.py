@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 
-from backend.app.database import migrate_trade_cost_ledger
+from app.database import migrate_trade_cost_ledger
 
 
 class TradeCostLedgerMigrationTests(unittest.TestCase):
