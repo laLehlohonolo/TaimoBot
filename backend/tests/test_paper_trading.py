@@ -985,6 +985,40 @@ class PaperTradingTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
 
+    def test_small_risk_reservations_keep_precision_and_enforce_one_percent_cap(self):
+        create_paper_account("SMALL-BALANCE", 1.00)
+
+        for index in range(4):
+            result = open_paper_trade(
+                account_id="SMALL-BALANCE",
+                client_order_id=f"SMALL-RISK-{index}",
+                side="BUY",
+                entry_price=4000,
+                stop_loss=3990,
+                symbol="XAUUSD",
+            )
+            self.assertAlmostEqual(result["risk_amount"], 0.0025, places=10)
+
+        with database.get_connection() as connection:
+            reserved = connection.execute(
+                """
+                SELECT SUM(risk_amount) AS total
+                FROM trades
+                WHERE account_id = 'SMALL-BALANCE' AND status = 'OPEN'
+                """
+            ).fetchone()["total"]
+
+        self.assertAlmostEqual(reserved, 0.01, places=10)
+        with self.assertRaises(RiskError):
+            open_paper_trade(
+                account_id="SMALL-BALANCE",
+                client_order_id="SMALL-RISK-OVER-CAP",
+                side="BUY",
+                entry_price=4000,
+                stop_loss=3990,
+                symbol="XAUUSD",
+            )
+
     def test_concurrent_orders_cannot_exceed_combined_one_percent_risk(self):
         # A PREMIUM account risks 1% per order, so two simultaneous
         # requests must not both consume the same 1% account allowance.
