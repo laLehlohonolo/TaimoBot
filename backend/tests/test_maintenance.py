@@ -3710,14 +3710,14 @@ class DailyMaintenanceTests(unittest.TestCase):
         from fastapi import HTTPException
         plan_id = "3" * 32
         self._create_restore_approval_fixture(plan_id, status="PREPARED")
-        with patch("app.main.require_admin"), patch("app.main.verify_approved_restore_plan") as verify:
+        with patch("app.main.require_admin"):
             with self.assertRaises(HTTPException) as rejected:
                 preflight_maintenance_restore(
                     MaintenanceRestorePreflightRequest(plan_id=plan_id),
                     {"email": "approver@example.com"},
                 )
         self.assertEqual(rejected.exception.status_code, 409)
-        verify.assert_called_once()
+        self.assertIn("APPROVED", rejected.exception.detail)
         with database.get_connection() as connection:
             self.assertEqual(connection.execute(
                 "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
