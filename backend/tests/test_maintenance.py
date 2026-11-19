@@ -2057,6 +2057,23 @@ class DailyMaintenanceTests(unittest.TestCase):
         os.close(guard_fd)
 
 
+    def test_restore_lock_unlink_failure_keeps_guard_and_allows_safe_retry(self):
+        lock = acquire_restore_lock("f" * 32)
+        with patch("app.maintenance.os.unlink", side_effect=OSError("simulated marker unlink failure")):
+            with self.assertRaisesRegex(RuntimeError, "marker remains active"):
+                release_restore_lock(lock["lock_token"])
+
+        self.assertTrue(Path(lock["lock_file"]).is_file())
+        self.assertTrue(is_restore_lock_active())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "controlled restore"):
+            database.get_connection()
+
+        released = release_restore_lock(lock["lock_token"])
+        self.assertEqual(released["status"], "RESTORE_LOCK_RELEASED")
+        self.assertFalse(Path(lock["lock_file"]).exists())
+        self.assertFalse(is_restore_lock_active())
+
+
     def test_restore_lock_refuses_to_start_while_application_connection_is_open(self):
         from app.database import get_connection, open_connection_count
 
