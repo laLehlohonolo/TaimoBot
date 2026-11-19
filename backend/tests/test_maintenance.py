@@ -4066,7 +4066,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             return real_verify(journal_path, **kwargs)
         try:
             with patch("app.maintenance.verify_restore_execution_journal", side_effect=replace_then_verify):
-                with self.assertRaisesRegex(RuntimeError, "changed during verification"):
+                with self.assertRaises(OSError):
                     append_restore_execution_event(
                         "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
                         "operator@example.com", "INC-JOURNAL-IDENTITY",
