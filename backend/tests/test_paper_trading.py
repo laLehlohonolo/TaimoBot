@@ -1272,14 +1272,13 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(group_response.status_code, 200)
         group_id = group_response.json()["group_id"]
 
-        first = self.open_trade(
-            "GROUP-PREVIEW-CLOSE-PARITY-1",
-            position_group_id=group_id,
-        )
-        second = self.open_trade(
-            "GROUP-PREVIEW-CLOSE-PARITY-2",
-            position_group_id=group_id,
-        )
+        first = self.open_trade("GROUP-PREVIEW-CLOSE-PARITY-1")
+        second = self.open_trade("GROUP-PREVIEW-CLOSE-PARITY-2")
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE trades SET position_group_id = ? WHERE trade_id IN (?, ?)",
+                (group_id, first["trade_id"], second["trade_id"]),
+            )
         costs = {
             "spread_cost": 0.20,
             "commission_cost": 0.10,
