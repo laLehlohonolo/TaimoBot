@@ -1326,5 +1326,34 @@ class PaperTradingTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
+    def test_close_api_rejects_boolean_exit_price_and_costs(self):
+        trade = self.open_trade("ORDER-CLOSE-STRICT-NUMBERS")
+
+        invalid_exit = self.client.post(
+            f"/trades/{trade['trade_id']}/close",
+            json={"exit_price": True},
+        )
+        invalid_cost = self.client.post(
+            f"/trades/{trade['trade_id']}/close",
+            json={"exit_price": 4010, "commission_cost": True},
+        )
+
+        self.assertEqual(invalid_exit.status_code, 422)
+        self.assertEqual(invalid_cost.status_code, 422)
+
+        with database.get_connection() as connection:
+            stored = connection.execute(
+                "SELECT status, realized_pnl FROM trades WHERE trade_id = ?",
+                (trade["trade_id"],)
+            ).fetchone()
+            balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()["balance"]
+
+        self.assertEqual(stored["status"], "OPEN")
+        self.assertEqual(stored["realized_pnl"], 0)
+        self.assertEqual(balance, 10000)
+
+
 if __name__ == "__main__":
     unittest.main()
