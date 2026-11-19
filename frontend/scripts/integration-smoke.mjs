@@ -108,6 +108,106 @@ const risk = await request("/accounts/" + encodeURIComponent(accountId) + "/risk
 assert(risk.response.status === 200 && risk.payload.maximum_risk_percent === 1, "Risk endpoint did not report the enforced 1% cap.");
 console.log("PASS: Account risk endpoint reports the 1% maximum.");
 
+const firstOrderId = "INT-ORDER-1-" + unique;
+const secondOrderId = "INT-ORDER-2-" + unique;
+let firstTrade;
+let secondTrade;
+
+const sequentialOrderChecks = [
+  ["01 valid risk preview", async () => {
+    const preview = await request("/risk/preview", {
+      method: "POST",
+      body: { account_balance: 10000, entry_price: 2000, stop_loss: 1990, risk_percent: 0.5, side: "BUY" }
+    });
+    assert(preview.response.status === 200 && preview.payload.approved === true, "Valid risk preview failed.");
+    assert(Math.abs(preview.payload.risk_amount - 50) < 1e-8, "Risk preview did not calculate the expected R50 reservation.");
+  }],
+  ["02 open first paper order", async () => {
+    const opened = await request("/trades", {
+      method: "POST",
+      token,
+      body: { account_id: accountId, client_order_id: firstOrderId, symbol: "XAUUSD", side: "BUY", entry_price: 2000, stop_loss: 1990, risk_percent: 0.5 }
+    });
+    assert(opened.response.status === 200 && opened.payload.trade_id, "First paper order failed: " + JSON.stringify(opened.payload));
+    firstTrade = opened.payload;
+  }],
+  ["03 reject duplicate order ID", async () => {
+    const duplicate = await request("/trades", {
+      method: "POST",
+      token,
+      body: { account_id: accountId, client_order_id: firstOrderId, symbol: "XAUUSD", side: "BUY", entry_price: 2000, stop_loss: 1990, risk_percent: 0.5 }
+    });
+    assert(duplicate.response.status === 400, "Duplicate client order ID was not rejected.");
+  }],
+  ["04 reject invalid BUY stop loss", async () => {
+    const invalid = await request("/trades", {
+      method: "POST",
+      token,
+      body: { account_id: accountId, client_order_id: "INT-BAD-" + unique, symbol: "XAUUSD", side: "BUY", entry_price: 2000, stop_loss: 2005, risk_percent: 0.5 }
+    });
+    assert(invalid.response.status === 400, "Invalid BUY stop loss was not rejected.");
+  }],
+  ["05 reserve first position risk", async () => {
+    const current = await request("/accounts/" + encodeURIComponent(accountId) + "/risk", { token });
+    assert(current.response.status === 200 && Math.abs(current.payload.current_open_risk - 50) < 1e-8, "First position risk reservation was not recorded.");
+  }],
+  ["06 open second paper order within remaining risk", async () => {
+    const opened = await request("/trades", {
+      method: "POST",
+      token,
+      body: { account_id: accountId, client_order_id: secondOrderId, symbol: "XAUUSD", side: "BUY", entry_price: 2000, stop_loss: 1990, risk_percent: 0.5 }
+    });
+    assert(opened.response.status === 200 && opened.payload.trade_id, "Second position within the 1% cap was rejected.");
+    secondTrade = opened.payload;
+  }],
+  ["07 reject order beyond combined 1% cap", async () => {
+    const excess = await request("/trades", {
+      method: "POST",
+      token,
+      body: { account_id: accountId, client_order_id: "INT-OVER-" + unique, symbol: "XAUUSD", side: "BUY", entry_price: 2000, stop_loss: 1990, risk_percent: 0.5 }
+    });
+    assert(excess.response.status === 400, "Order exceeding the combined 1% risk cap was not rejected.");
+  }],
+  ["08 close first paper position", async () => {
+    const closed = await request("/trades/" + encodeURIComponent(firstTrade.trade_id) + "/close", {
+      method: "POST",
+      token,
+      body: { exit_price: 2010 }
+    });
+    assert(closed.response.status === 200 && closed.payload.status === "CLOSED", "First paper position did not close.");
+  }],
+  ["09 reconcile balance and remaining open risk", async () => {
+    const [overview, current] = await Promise.all([
+      request("/accounts/" + encodeURIComponent(accountId), { token }),
+      request("/accounts/" + encodeURIComponent(accountId) + "/risk", { token })
+    ]);
+    assert(overview.response.status === 200 && Math.abs(overview.payload.current_balance - 10050) < 1e-8, "Realized P&L was not reconciled into account balance.");
+    assert(current.response.status === 200 && Math.abs(current.payload.current_open_risk - 50) < 1e-8, "Closing first position did not release its risk reservation.");
+  }],
+  ["10 close final position and verify ledger", async () => {
+    const closed = await request("/trades/" + encodeURIComponent(secondTrade.trade_id) + "/close", {
+      method: "POST",
+      token,
+      body: { exit_price: 2010 }
+    });
+    assert(closed.response.status === 200 && closed.payload.status === "CLOSED", "Second paper position did not close.");
+    const [overview, current, history] = await Promise.all([
+      request("/accounts/" + encodeURIComponent(accountId), { token }),
+      request("/accounts/" + encodeURIComponent(accountId) + "/risk", { token }),
+      request("/accounts/" + encodeURIComponent(accountId) + "/trades", { token })
+    ]);
+    assert(overview.response.status === 200 && Math.abs(overview.payload.current_balance - 10100) < 1e-8, "Final balance does not reconcile with both realized closes.");
+    assert(current.response.status === 200 && Math.abs(current.payload.current_open_risk) < 1e-8, "Open risk was not fully released.");
+    assert(history.response.status === 200 && history.payload.trades.filter(item => item.status === "CLOSED").length === 2, "Closed trade ledger does not contain both positions.");
+  }]
+];
+
+for (const [name, check] of sequentialOrderChecks) {
+  await check();
+  console.log("PASS: Sequential order check " + name + ".");
+}
+console.log("TAIMOBOT PAPER ORDER CHECKS: 10/10 PASSED SEQUENTIALLY.");
+
 const trades = await request("/accounts/" + encodeURIComponent(accountId) + "/trades", { token });
 assert(trades.response.status === 200 && Array.isArray(trades.payload.trades), "Trade history endpoint failed.");
 console.log("PASS: Trade history endpoint returns a list.");
