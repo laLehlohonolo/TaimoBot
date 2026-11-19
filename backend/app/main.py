@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictFloat
 
 from .database import init_db, get_connection
 from .maintenance_scheduler import (
@@ -140,19 +140,19 @@ class TradeRequest(BaseModel):
 
 
 class CloseTradeRequest(BaseModel):
-    exit_price: float = Field(gt=0)
-    spread_cost: float = Field(default=0, ge=0)
-    commission_cost: float = Field(default=0, ge=0)
-    swap_cost: float = Field(default=0, ge=0)
-    other_costs: float = Field(default=0, ge=0)
+    exit_price: StrictFloat = Field(gt=0)
+    spread_cost: StrictFloat = Field(default=0, ge=0)
+    commission_cost: StrictFloat = Field(default=0, ge=0)
+    swap_cost: StrictFloat = Field(default=0, ge=0)
+    other_costs: StrictFloat = Field(default=0, ge=0)
 
 
 class CloseGroupRequest(BaseModel):
-    exit_price: float = Field(gt=0)
-    spread_cost: float = Field(default=0, ge=0)
-    commission_cost: float = Field(default=0, ge=0)
-    swap_cost: float = Field(default=0, ge=0)
-    other_costs: float = Field(default=0, ge=0)
+    exit_price: StrictFloat = Field(gt=0)
+    spread_cost: StrictFloat = Field(default=0, ge=0)
+    commission_cost: StrictFloat = Field(default=0, ge=0)
+    swap_cost: StrictFloat = Field(default=0, ge=0)
+    other_costs: StrictFloat = Field(default=0, ge=0)
 
 
 class ProfitPreviewRequest(BaseModel):
