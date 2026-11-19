@@ -208,6 +208,104 @@ for (const [name, check] of sequentialOrderChecks) {
 }
 console.log("TAIMOBOT PAPER ORDER CHECKS: 10/10 PASSED SEQUENTIALLY.");
 
+const followerAccountId = "COPY-FOLLOWER-" + unique;
+let copyRelationshipId;
+let copiedSourceTrade;
+let copiedFollowerTrade;
+
+const sequentialCopyChecks = [
+  ["01 create follower paper account", async () => {
+    const createdFollower = await request("/accounts", {
+      method: "POST",
+      token,
+      body: { account_id: followerAccountId, starting_balance: 5000 }
+    });
+    assert(createdFollower.response.status === 200, "Follower paper account creation failed: " + JSON.stringify(createdFollower.payload));
+  }],
+  ["02 create source-to-follower relationship", async () => {
+    const createdRelationship = await request("/accounts/" + encodeURIComponent(followerAccountId) + "/copy-relationships", {
+      method: "POST",
+      token,
+      body: { source_account_id: accountId }
+    });
+    assert(createdRelationship.response.status === 200 && createdRelationship.payload.status === "ACTIVE", "Copy relationship creation failed.");
+    copyRelationshipId = createdRelationship.payload.relationship_id;
+  }],
+  ["03 persist and list relationship", async () => {
+    const listed = await request("/accounts/" + encodeURIComponent(followerAccountId) + "/copy-relationships", { token });
+    assert(listed.response.status === 200 && listed.payload.count === 1, "Follower relationship was not persisted.");
+    assert(listed.payload.relationships[0].relationship_id === copyRelationshipId, "Listed relationship ID did not match.");
+  }],
+  ["04 pause copy relationship", async () => {
+    const paused = await request("/copy-relationships/" + encodeURIComponent(copyRelationshipId) + "/pause", { method: "POST", token });
+    assert(paused.response.status === 200 && paused.payload.status === "PAUSED", "Copy relationship did not pause.");
+  }],
+  ["05 source trade while paused remains source-only", async () => {
+    const sourceOnly = await request("/trades", {
+      method: "POST",
+      token,
+      body: { account_id: accountId, client_order_id: "COPY-PAUSED-" + unique, symbol: "XAUUSD", side: "BUY", entry_price: 4000, stop_loss: 3990, risk_percent: 0.5 }
+    });
+    assert(sourceOnly.response.status === 200, "Source trade failed while follower was paused.");
+    assert(sourceOnly.payload.copy_summary && sourceOnly.payload.copy_summary.eligible_followers === 0, "Paused follower was incorrectly eligible for a copy.");
+  }],
+  ["06 verify paused follower received no position", async () => {
+    const history = await request("/accounts/" + encodeURIComponent(followerAccountId) + "/trades", { token });
+    assert(history.response.status === 200 && history.payload.trades.length === 0, "Paused follower unexpectedly received a trade.");
+  }],
+  ["07 resume copy relationship", async () => {
+    const resumed = await request("/copy-relationships/" + encodeURIComponent(copyRelationshipId) + "/resume", { method: "POST", token });
+    assert(resumed.response.status === 200 && resumed.payload.status === "ACTIVE", "Copy relationship did not resume.");
+  }],
+  ["08 replicate a new source position", async () => {
+    const source = await request("/trades", {
+      method: "POST",
+      token,
+      body: { account_id: accountId, client_order_id: "COPY-ACTIVE-" + unique, symbol: "XAUUSD", side: "BUY", entry_price: 4000, stop_loss: 3990, risk_percent: 0.5 }
+    });
+    assert(source.response.status === 200 && source.payload.copy_summary && source.payload.copy_summary.successful_copies === 1, "Active follower did not receive exactly one copy.");
+    copiedSourceTrade = source.payload;
+  }],
+  ["09 verify follower trade linkage and independent risk", async () => {
+    const [history, followerRisk] = await Promise.all([
+      request("/accounts/" + encodeURIComponent(followerAccountId) + "/trades", { token }),
+      request("/accounts/" + encodeURIComponent(followerAccountId) + "/risk", { token })
+    ]);
+    assert(history.response.status === 200 && history.payload.trades.length === 1, "Follower trade ledger does not contain exactly one copied position.");
+    copiedFollowerTrade = history.payload.trades[0];
+    assert(copiedFollowerTrade.copied_from_trade_id === copiedSourceTrade.trade_id, "Follower trade is not linked to its source.");
+    assert(copiedFollowerTrade.symbol === copiedSourceTrade.symbol && copiedFollowerTrade.side === copiedSourceTrade.side, "Copied instrument or direction differs from source.");
+    assert(Math.abs(copiedFollowerTrade.entry_price - copiedSourceTrade.entry_price) < 1e-8 && Math.abs(copiedFollowerTrade.stop_loss - copiedSourceTrade.stop_loss) < 1e-8, "Copied entry or stop loss differs from source.");
+    assert(followerRisk.response.status === 200 && followerRisk.payload.current_open_risk <= followerRisk.payload.maximum_risk_amount + 1e-8, "Follower exceeded its own aggregate risk allowance.");
+  }],
+  ["10 close source and reconcile copied lifecycle", async () => {
+    const closed = await request("/trades/" + encodeURIComponent(copiedSourceTrade.trade_id) + "/close", {
+      method: "POST",
+      token,
+      body: { exit_price: 4010 }
+    });
+    assert(closed.response.status === 200 && closed.payload.status === "CLOSED" && closed.payload.closed_copies === 1, "Source close did not close its follower copy.");
+    const [sourceAccount, followerAccount, followerHistory, followerRisk] = await Promise.all([
+      request("/accounts/" + encodeURIComponent(accountId), { token }),
+      request("/accounts/" + encodeURIComponent(followerAccountId), { token }),
+      request("/accounts/" + encodeURIComponent(followerAccountId) + "/trades", { token }),
+      request("/accounts/" + encodeURIComponent(followerAccountId) + "/risk", { token })
+    ]);
+    assert(sourceAccount.response.status === 200 && followerAccount.response.status === 200, "Account balance reconciliation request failed.");
+    assert(followerHistory.response.status === 200 && followerHistory.payload.trades.find(item => item.trade_id === copiedFollowerTrade.trade_id).status === "CLOSED", "Follower trade ledger did not record the copied close.");
+    assert(followerRisk.response.status === 200 && Math.abs(followerRisk.payload.current_open_risk) < 1e-8, "Follower close did not release reserved risk.");
+    assert(followerAccount.payload.current_balance > 5000, "Follower realized paper P&L was not applied to its own balance.");
+    assert(sourceAccount.payload.current_balance > 10100, "Source account balance did not retain its earlier reconciled closes and new close.");
+  }]
+];
+
+for (const [name, check] of sequentialCopyChecks) {
+  await check();
+  console.log("PASS: Sequential copy check " + name + ".");
+}
+console.log("TAIMOBOT COPY LIFECYCLE CHECKS: 10/10 PASSED SEQUENTIALLY.");
+
+
 const trades = await request("/accounts/" + encodeURIComponent(accountId) + "/trades", { token });
 assert(trades.response.status === 200 && Array.isArray(trades.payload.trades), "Trade history endpoint failed.");
 console.log("PASS: Trade history endpoint returns a list.");
