@@ -30,9 +30,14 @@ def calculate_close_accounting(gross_pnl, *, spread_cost=0,
                                commission_cost=0, swap_cost=0,
                                other_costs=0):
     """Return unrounded gross, costs and net values for durable ledger writes."""
-    gross = _finite_non_negative(abs(gross_pnl), "Gross P&L") * (
-        -1 if float(gross_pnl) < 0 else 1
-    )
+    if isinstance(gross_pnl, bool):
+        raise ValueError("Gross P&L must be a finite number.")
+    try:
+        gross = float(gross_pnl)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("Gross P&L must be a finite number.")
+    if not math.isfinite(gross):
+        raise ValueError("Gross P&L must be a finite number.")
     costs = {
         "spread_cost": _finite_non_negative(spread_cost, "Spread cost"),
         "commission_cost": _finite_non_negative(commission_cost, "Commission cost"),
