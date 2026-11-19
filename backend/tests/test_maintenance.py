@@ -3169,6 +3169,353 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertFalse(inventory["live_database_replaced"])
 
 
+    def prepare_restore_identity_fixture(
+        self, backup_dir, selected_name, candidates,
+        *, inventory_hook=None, staging_hook=None, include_fingerprint=True
+    ):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+
+        backup_dir = Path(backup_dir)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        pre_restore = backup_dir / "taimobot-pre-restore.sqlite3"
+        pre_restore.write_bytes(b"pre-restore-snapshot")
+
+        def inventory(directory=None):
+            if directory is None or Path(directory).resolve() == backup_dir.resolve():
+                records = []
+                for name, ready in candidates:
+                    path = backup_dir / name
+                    record = {"file_name": name, "restore_ready": ready}
+                    if include_fingerprint and path.is_file() and not path.is_symlink():
+                        record["sha256"] = sha256_file(path)
+                    records.append(record)
+                result = {"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": records}
+                if inventory_hook:
+                    inventory_hook()
+                return result
+            staged_file = next(Path(directory).glob("taimobot-restore-*.sqlite3"))
+            return {
+                "status": "RECOVERY_INVENTORY_COMPLETE",
+                "candidates": [{
+                    "file_name": staged_file.name,
+                    "restore_ready": True,
+                    "sha256": sha256_file(staged_file),
+                }],
+            }
+
+        def create_backup():
+            return {"status": "BACKUP_VERIFIED", "backup_file": str(pre_restore)}
+
+        def stage_candidate(backup, staging):
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            staging.write_bytes(backup.read_bytes())
+            if staging_hook:
+                staging_hook()
+            return {"status": "RESTORE_CANDIDATE_VERIFIED"}
+
+        with patch("app.main.BACKUP_DIR", backup_dir), patch(
+            "app.main.require_admin"
+        ), patch(
+            "app.main.inspect_recovery_candidates", side_effect=inventory
+        ), patch(
+            "app.main.create_verified_backup", side_effect=create_backup
+        ) as create_backup_mock, patch(
+            "app.main.verify_restore_candidate", side_effect=stage_candidate
+        ) as stage_mock:
+            result = prepare_maintenance_restore(
+                MaintenanceRestorePrepareRequest(
+                    backup_file_name=selected_name,
+                    confirm_preparation=True,
+                ),
+                {"email": "restore-operator@example.com"},
+            )
+        return result, create_backup_mock, stage_mock
+
+
+    def test_restore_preparation_selects_exact_candidate_from_multiple_valid_backups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            first = backup_dir / "taimobot-first.sqlite3"
+            selected = backup_dir / "taimobot-selected.sqlite3"
+            first.write_bytes(b"first-candidate")
+            selected.write_bytes(b"selected-candidate")
+            result, _, stage = self.prepare_restore_identity_fixture(
+                backup_dir, selected.name,
+                [(first.name, True), (selected.name, True)]
+            )
+            self.assertEqual(result["selected_backup"], selected.name)
+            stage.assert_called_once()
+            self.assertEqual(stage.call_args.args[0], selected)
+            with database.get_connection() as connection:
+                plan = connection.execute(
+                    "SELECT backup_file FROM maintenance_restore_plans WHERE plan_id = ?",
+                    (result["plan_id"],)
+                ).fetchone()
+            self.assertEqual(Path(plan["backup_file"]), selected.resolve())
+
+    def test_restore_preparation_does_not_fallback_when_named_candidate_is_missing(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            available = backup_dir / "taimobot-available.sqlite3"
+            available.write_bytes(b"available")
+            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+                "app.main.inspect_recovery_candidates",
+                return_value={"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                    {"file_name": available.name, "restore_ready": True, "sha256": sha256_file(available)}
+                ]},
+            ), patch("app.main.create_verified_backup") as create_backup:
+                with self.assertRaises(HTTPException) as rejected:
+                    prepare_maintenance_restore(
+                        MaintenanceRestorePrepareRequest(
+                            backup_file_name="taimobot-not-selected.sqlite3",
+                            confirm_preparation=True,
+                        ),
+                        {"email": "restore-operator@example.com"},
+                    )
+            self.assertEqual(rejected.exception.status_code, 404)
+            create_backup.assert_not_called()
+
+    def test_restore_preparation_rejects_inventory_candidate_not_restore_ready(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            corrupt = backup_dir / "taimobot-corrupt.sqlite3"
+            corrupt.write_bytes(b"corrupt")
+            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+                "app.main.inspect_recovery_candidates",
+                return_value={"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                    {"file_name": corrupt.name, "restore_ready": False}
+                ]},
+            ), patch("app.main.create_verified_backup") as create_backup:
+                with self.assertRaises(HTTPException) as rejected:
+                    prepare_maintenance_restore(
+                        MaintenanceRestorePrepareRequest(
+                            backup_file_name=corrupt.name,
+                            confirm_preparation=True,
+                        ),
+                        {"email": "restore-operator@example.com"},
+                    )
+            self.assertEqual(rejected.exception.status_code, 409)
+            create_backup.assert_not_called()
+
+    def test_restore_preparation_rejects_path_traversal_backup_name(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            outside = Path(directory) / "taimobot-outside.sqlite3"
+            outside.write_bytes(b"outside")
+            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+                "app.main.inspect_recovery_candidates",
+                return_value={"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": []},
+            ), patch("app.main.create_verified_backup") as create_backup:
+                with self.assertRaises(HTTPException) as rejected:
+                    prepare_maintenance_restore(
+                        MaintenanceRestorePrepareRequest(
+                            backup_file_name="../taimobot-outside.sqlite3",
+                            confirm_preparation=True,
+                        ),
+                        {"email": "restore-operator@example.com"},
+                    )
+            self.assertEqual(rejected.exception.status_code, 404)
+            create_backup.assert_not_called()
+
+    def test_restore_preparation_rejects_symlinked_selected_backup(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            outside = Path(directory) / "outside.sqlite3"
+            outside.write_bytes(b"outside")
+            selected = backup_dir / "taimobot-symlink.sqlite3"
+            selected.symlink_to(outside)
+            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+                "app.main.inspect_recovery_candidates",
+                return_value={"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                    {"file_name": selected.name, "restore_ready": True, "sha256": sha256_file(outside)}
+                ]},
+            ), patch("app.main.create_verified_backup") as create_backup:
+                with self.assertRaises(HTTPException) as rejected:
+                    prepare_maintenance_restore(
+                        MaintenanceRestorePrepareRequest(
+                            backup_file_name=selected.name, confirm_preparation=True
+                        ),
+                        {"email": "restore-operator@example.com"},
+                    )
+            self.assertEqual(rejected.exception.status_code, 409)
+            create_backup.assert_not_called()
+
+    def test_restore_preparation_rejects_symlink_swap_after_inventory(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            selected = backup_dir / "taimobot-swap.sqlite3"
+            selected.write_bytes(b"selected-before-inventory")
+            outside = Path(directory) / "outside.sqlite3"
+            outside.write_bytes(b"outside-target")
+
+            def inventory(directory=None):
+                if directory is None or Path(directory).resolve() == backup_dir.resolve():
+                    fingerprint = sha256_file(selected)
+                    selected.unlink()
+                    selected.symlink_to(outside)
+                    return {"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                        {"file_name": selected.name, "restore_ready": True, "sha256": fingerprint}
+                    ]}
+                staged_file = next(Path(directory).glob("taimobot-restore-*.sqlite3"))
+                return {"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                    {"file_name": staged_file.name, "restore_ready": True, "sha256": sha256_file(staged_file)}
+                ]}
+            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+                "app.main.inspect_recovery_candidates", side_effect=inventory
+            ), patch("app.main.create_verified_backup") as create_backup:
+                with self.assertRaises(HTTPException) as rejected:
+                    prepare_maintenance_restore(
+                        MaintenanceRestorePrepareRequest(
+                            backup_file_name=selected.name, confirm_preparation=True
+                        ),
+                        {"email": "restore-operator@example.com"},
+                    )
+            self.assertEqual(rejected.exception.status_code, 409)
+            create_backup.assert_not_called()
+
+    def test_restore_preparation_rejects_regular_file_replacement_after_inventory(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            selected = backup_dir / "taimobot-regular-swap.sqlite3"
+            selected.write_bytes(b"original-backup")
+
+            def inventory(directory=None):
+                if directory is None or Path(directory).resolve() == backup_dir.resolve():
+                    fingerprint = sha256_file(selected)
+                    selected.write_bytes(b"replacement-backup")
+                    return {"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                        {"file_name": selected.name, "restore_ready": True, "sha256": fingerprint}
+                    ]}
+                staged_file = next(Path(directory).glob("taimobot-restore-*.sqlite3"))
+                return {"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                    {"file_name": staged_file.name, "restore_ready": True, "sha256": sha256_file(staged_file)}
+                ]}
+            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+                "app.main.inspect_recovery_candidates", side_effect=inventory
+            ), patch("app.main.create_verified_backup") as create_backup:
+                with self.assertRaises(HTTPException) as rejected:
+                    prepare_maintenance_restore(
+                        MaintenanceRestorePrepareRequest(
+                            backup_file_name=selected.name, confirm_preparation=True
+                        ),
+                        {"email": "restore-operator@example.com"},
+                    )
+            self.assertEqual(rejected.exception.status_code, 409)
+            self.assertIn("changed after recovery inventory", rejected.exception.detail)
+            create_backup.assert_not_called()
+
+    def test_restore_preparation_requires_inventory_fingerprint(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            selected = backup_dir / "taimobot-no-fingerprint.sqlite3"
+            selected.write_bytes(b"selected")
+            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+                "app.main.inspect_recovery_candidates",
+                return_value={"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                    {"file_name": selected.name, "restore_ready": True}
+                ]},
+            ), patch("app.main.create_verified_backup") as create_backup:
+                with self.assertRaises(HTTPException) as rejected:
+                    prepare_maintenance_restore(
+                        MaintenanceRestorePrepareRequest(
+                            backup_file_name=selected.name, confirm_preparation=True
+                        ),
+                        {"email": "restore-operator@example.com"},
+                    )
+            self.assertEqual(rejected.exception.status_code, 409)
+            create_backup.assert_not_called()
+
+    def test_restore_preparation_rechecks_source_fingerprint_after_staging(self):
+        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
+        from fastapi import HTTPException
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            selected = backup_dir / "taimobot-changed-during-stage.sqlite3"
+            selected.write_bytes(b"original-source")
+            pre_restore = backup_dir / "taimobot-pre-restore.sqlite3"
+            pre_restore.write_bytes(b"rollback")
+            def inventory(directory=None):
+                if directory is None or Path(directory).resolve() == backup_dir.resolve():
+                    return {"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                        {"file_name": selected.name, "restore_ready": True, "sha256": sha256_file(selected)}
+                    ]}
+                staged_file = next(Path(directory).glob("taimobot-restore-*.sqlite3"))
+                return {"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": [
+                    {"file_name": staged_file.name, "restore_ready": True, "sha256": sha256_file(staged_file)}
+                ]}
+            def stage_and_mutate(source, staging):
+                staging.parent.mkdir(parents=True, exist_ok=True)
+                staging.write_bytes(source.read_bytes())
+                source.write_bytes(b"source-changed-during-stage")
+                return {"status": "RESTORE_CANDIDATE_VERIFIED"}
+            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+                "app.main.inspect_recovery_candidates", side_effect=inventory
+            ), patch(
+                "app.main.create_verified_backup",
+                return_value={"status": "BACKUP_VERIFIED", "backup_file": str(pre_restore)}
+            ), patch("app.main.verify_restore_candidate", side_effect=stage_and_mutate):
+                with self.assertRaises(HTTPException) as rejected:
+                    prepare_maintenance_restore(
+                        MaintenanceRestorePrepareRequest(
+                            backup_file_name=selected.name, confirm_preparation=True
+                        ),
+                        {"email": "restore-operator@example.com"},
+                    )
+            self.assertEqual(rejected.exception.status_code, 500)
+            self.assertIn("changed while", rejected.exception.detail)
+            with database.get_connection() as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM maintenance_restore_plans").fetchone()[0],
+                    0,
+                )
+
+    def test_restore_preparation_persists_operator_and_exact_candidate_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            selected = backup_dir / "taimobot-operator-selected.sqlite3"
+            selected.write_bytes(b"operator-selected")
+            result, _, _ = self.prepare_restore_identity_fixture(
+                backup_dir, selected.name, [(selected.name, True)]
+            )
+            with database.get_connection() as connection:
+                plan = connection.execute(
+                    "SELECT backup_file, created_by, status FROM maintenance_restore_plans WHERE plan_id = ?",
+                    (result["plan_id"],)
+                ).fetchone()
+                artifacts = connection.execute(
+                    "SELECT source_sha256 FROM maintenance_restore_artifacts WHERE plan_id = ?",
+                    (result["plan_id"],)
+                ).fetchone()
+            self.assertEqual(plan["backup_file"], str(selected.resolve()))
+            self.assertEqual(plan["created_by"], "restore-operator@example.com")
+            self.assertEqual(plan["status"], "PREPARED")
+            self.assertEqual(artifacts["source_sha256"], sha256_file(selected))
+
+
 
 if __name__ == "__main__":
     unittest.main()
