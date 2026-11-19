@@ -680,16 +680,15 @@ class CopyTradingDatabaseTests(unittest.TestCase):
                 ).fetchall()
             ]
             connection.execute(
-                """
+                f"""
                 CREATE TRIGGER fail_second_group_trade_close
                 BEFORE UPDATE OF status ON trades
-                WHEN OLD.trade_id = ?
+                WHEN OLD.trade_id = '{second["trade_id"]}'
                   AND NEW.status = 'CLOSED'
                 BEGIN
                     SELECT RAISE(ABORT, 'injected mid-flight close failure');
                 END
-                """,
-                (second["trade_id"],)
+                """
             )
 
         with self.assertRaises(sqlite3.IntegrityError):
