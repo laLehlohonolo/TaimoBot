@@ -156,12 +156,12 @@ class CloseGroupRequest(BaseModel):
 
 
 class ProfitPreviewRequest(BaseModel):
-    current_price: float = Field(gt=0)
-    spread_cost: float = Field(default=0, ge=0)
-    commission_cost: float = Field(default=0, ge=0)
-    swap_cost: float = Field(default=0, ge=0)
-    other_costs: float = Field(default=0, ge=0)
-    minimum_net_profit: float = Field(default=0, ge=0)
+    current_price: StrictFloat = Field(gt=0)
+    spread_cost: StrictFloat = Field(default=0, ge=0)
+    commission_cost: StrictFloat = Field(default=0, ge=0)
+    swap_cost: StrictFloat = Field(default=0, ge=0)
+    other_costs: StrictFloat = Field(default=0, ge=0)
+    minimum_net_profit: StrictFloat = Field(default=0, ge=0)
 
 
 class CopyRelationshipRequest(BaseModel):
