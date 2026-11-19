@@ -424,6 +424,10 @@ class PositionGroupTests(unittest.TestCase):
             follower_balance = connection.execute(
                 "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-FOLLOWER-001'"
             ).fetchone()["balance"]
+        source_ledger_pnl = sum(row["realized_pnl"] for row in sources)
+        follower_ledger_pnl = sum(row["realized_pnl"] for row in copies)
+        self.assertAlmostEqual(source_balance, 10000 + source_ledger_pnl, places=10)
+        self.assertAlmostEqual(follower_balance, 10000 + follower_ledger_pnl, places=10)
         self.assertAlmostEqual(source_balance, 10098.86, places=2)
         self.assertAlmostEqual(follower_balance, 10100, places=2)
 
