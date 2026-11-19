@@ -23,6 +23,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run ten copy-recovery checks sequentially
         run: python scripts/run_copy_recovery_group.py
+      - name: Run ten copy-safety checks sequentially
+        run: python scripts/run_copy_safety_group.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
