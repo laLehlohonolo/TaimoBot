@@ -6,7 +6,7 @@ from .execution import (
     open_paper_trade, transaction, get_open_risk,
     _calculate_trade_pnl
 )
-from .risk import get_risk_profile, MAX_RISK_PERCENT
+from .risk import get_risk_profile, MAX_RISK_PERCENT, validate_positive_number
 from .close_accounting import calculate_close_accounting
 
 
@@ -711,13 +711,9 @@ def close_trade_with_copies(
     if not trade_id:
         raise ValueError("Trade ID is required.")
 
-    try:
-        exit_value = float(exit_price)
-    except (TypeError, ValueError):
-        raise ValueError("Exit price must be a positive number.")
-
-    if not (exit_value > 0 and exit_value < float("inf")):
-        raise ValueError("Exit price must be a positive number.")
+    exit_value = validate_positive_number(
+        exit_price, "Exit price"
+    )
 
     with transaction() as connection:
         requested_trade = connection.execute(
@@ -928,13 +924,12 @@ def close_position_group_with_copies(
     """Atomically close a source group and copies, allocating costs to sources."""
     group_id = str(group_id).strip()
 
-    try:
-        exit_value = float(exit_price)
-    except (TypeError, ValueError):
-        raise ValueError("Exit price must be a positive number.")
+    if not group_id:
+        raise ValueError("Group ID is required.")
 
-    if not group_id or not (0 < exit_value < float("inf")):
-        raise ValueError("Group ID and positive exit price are required.")
+    exit_value = validate_positive_number(
+        exit_price, "Exit price"
+    )
 
     with transaction() as connection:
         group = connection.execute(
