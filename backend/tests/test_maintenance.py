@@ -4017,6 +4017,181 @@ class DailyMaintenanceTests(unittest.TestCase):
             connection.close()
 
 
+    def _seed_restore_journal(self, path):
+        return append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "8" * 32, "9" * 32,
+            "operator@example.com", "INC-JOURNAL-IDENTITY",
+            details={"artifacts": {
+                "live_database_sha256": "1" * 64,
+                "source_backup_sha256": "2" * 64,
+                "staged_candidate_sha256": "3" * 64,
+                "rollback_backup_sha256": "4" * 64,
+            }},
+            journal_path=path,
+        )
+
+    def test_journal_append_rejects_regular_path_replacement_during_verification(self):
+        path = Path(self.temp_dir.name) / "restore-identity.jsonl"
+        self._seed_restore_journal(path)
+        original_bytes = path.read_bytes()
+        displaced = path.with_name("displaced-journal.jsonl")
+        external = path.with_name("replacement-journal.jsonl")
+        external.write_bytes(original_bytes)
+        real_verify = __import__("app.maintenance", fromlist=["verify_restore_execution_journal"]).verify_restore_execution_journal
+        def replace_then_verify(journal_path, **kwargs):
+            Path(journal_path).replace(displaced)
+            external.replace(Path(journal_path))
+            return real_verify(journal_path, **kwargs)
+        with patch("app.maintenance.verify_restore_execution_journal", side_effect=replace_then_verify):
+            with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+                append_restore_execution_event(
+                    "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
+                    "operator@example.com", "INC-JOURNAL-IDENTITY",
+                    journal_path=path,
+                )
+        self.assertEqual(displaced.read_bytes(), original_bytes)
+        self.assertEqual(path.read_bytes(), original_bytes)
+
+    def test_journal_append_rejects_symlink_swap_during_verification(self):
+        path = Path(self.temp_dir.name) / "restore-symlink-race.jsonl"
+        self._seed_restore_journal(path)
+        original_bytes = path.read_bytes()
+        displaced = path.with_name("displaced-symlink-journal.jsonl")
+        external = path.with_name("external-journal.jsonl")
+        external.write_bytes(original_bytes)
+        real_verify = __import__("app.maintenance", fromlist=["verify_restore_execution_journal"]).verify_restore_execution_journal
+        def replace_then_verify(journal_path, **kwargs):
+            Path(journal_path).replace(displaced)
+            Path(journal_path).symlink_to(external)
+            return real_verify(journal_path, **kwargs)
+        try:
+            with patch("app.maintenance.verify_restore_execution_journal", side_effect=replace_then_verify):
+                with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+                    append_restore_execution_event(
+                        "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
+                        "operator@example.com", "INC-JOURNAL-IDENTITY",
+                        journal_path=path,
+                    )
+            self.assertTrue(path.is_symlink())
+            self.assertEqual(displaced.read_bytes(), original_bytes)
+            self.assertEqual(external.read_bytes(), original_bytes)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_journal_append_rejects_path_deletion_during_verification(self):
+        path = Path(self.temp_dir.name) / "restore-deleted-race.jsonl"
+        self._seed_restore_journal(path)
+        displaced = path.with_name("deleted-race-original.jsonl")
+        real_verify = __import__("app.maintenance", fromlist=["verify_restore_execution_journal"]).verify_restore_execution_journal
+        def delete_then_verify(journal_path, **kwargs):
+            Path(journal_path).replace(displaced)
+            return real_verify(journal_path, **kwargs)
+        with patch("app.maintenance.verify_restore_execution_journal", side_effect=delete_then_verify):
+            with self.assertRaises((FileNotFoundError, RuntimeError)):
+                append_restore_execution_event(
+                    "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
+                    "operator@example.com", "INC-JOURNAL-IDENTITY",
+                    journal_path=path,
+                )
+        self.assertFalse(path.exists())
+        self.assertEqual(len(verify_restore_execution_journal(displaced)["records"]), 1)
+
+    def test_journal_append_rejects_in_place_write_during_verification(self):
+        path = Path(self.temp_dir.name) / "restore-in-place-race.jsonl"
+        self._seed_restore_journal(path)
+        real_verify = __import__("app.maintenance", fromlist=["verify_restore_execution_journal"]).verify_restore_execution_journal
+        def mutate_then_verify(journal_path, **kwargs):
+            with Path(journal_path).open("ab") as stream:
+                stream.write(b"external-mutation")
+            return real_verify(journal_path, **kwargs)
+        with patch("app.maintenance.verify_restore_execution_journal", side_effect=mutate_then_verify):
+            with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+                append_restore_execution_event(
+                    "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
+                    "operator@example.com", "INC-JOURNAL-IDENTITY",
+                    journal_path=path,
+                )
+        self.assertTrue(path.read_bytes().endswith(b"external-mutation"))
+
+    def test_journal_append_rejects_non_regular_directory_path(self):
+        path = Path(self.temp_dir.name) / "journal-directory"
+        path.mkdir()
+        with self.assertRaises(OSError):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", "1" * 32, "2" * 32,
+                "operator@example.com", "INC-JOURNAL-DIR",
+                journal_path=path,
+            )
+
+    def test_journal_append_continues_hash_chain_after_identity_checked_verification(self):
+        path = Path(self.temp_dir.name) / "restore-chain-identity.jsonl"
+        first = self._seed_restore_journal(path)
+        second = append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
+            "operator@example.com", "INC-JOURNAL-IDENTITY",
+            details={"artifacts": {
+                "staged_candidate_sha256": "3" * 64,
+                "published_database_sha256": "5" * 64,
+            }},
+            journal_path=path,
+        )
+        verified = verify_restore_execution_journal(path, include_records=True)
+        self.assertEqual(verified["status"], "RESTORE_JOURNAL_VERIFIED")
+        self.assertEqual(verified["record_count"], 2)
+        self.assertEqual(second["sequence"], 2)
+        self.assertEqual(verified["records"][1]["previous_record_sha256"], first["record_sha256"])
+
+    def test_journal_append_refuses_corrupt_existing_chain_without_modifying_bytes(self):
+        path = Path(self.temp_dir.name) / "restore-corrupt-chain.jsonl"
+        self._seed_restore_journal(path)
+        with path.open("ab") as stream:
+            stream.write(b"corrupt")
+        before = path.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+            append_restore_execution_event(
+                "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
+                "operator@example.com", "INC-JOURNAL-IDENTITY",
+                journal_path=path,
+            )
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_journal_append_refuses_symlink_before_open(self):
+        target = Path(self.temp_dir.name) / "journal-target.jsonl"
+        target.write_text("", encoding="utf-8")
+        link = Path(self.temp_dir.name) / "journal-link.jsonl"
+        link.symlink_to(target)
+        with self.assertRaises(OSError):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_STARTED", "1" * 32, "2" * 32,
+                "operator@example.com", "INC-JOURNAL-SYMLINK",
+                journal_path=link,
+            )
+        self.assertEqual(target.read_bytes(), b"")
+
+    def test_journal_append_refuses_oversized_event_without_appending(self):
+        path = Path(self.temp_dir.name) / "restore-large-event.jsonl"
+        self._seed_restore_journal(path)
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "8 KiB"):
+            append_restore_execution_event(
+                "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
+                "operator@example.com", "INC-JOURNAL-IDENTITY",
+                details={"payload": "x" * 9000},
+                journal_path=path,
+            )
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_journal_append_rejects_invalid_event_without_creating_file(self):
+        path = Path(self.temp_dir.name) / "restore-invalid-event.jsonl"
+        with self.assertRaisesRegex(ValueError, "Unsupported"):
+            append_restore_execution_event(
+                "RESTORE_EXECUTION_FINISHED", "1" * 32, "2" * 32,
+                "operator@example.com", "INC-JOURNAL-INVALID",
+                journal_path=path,
+            )
+        self.assertFalse(path.exists())
+
+
 
 if __name__ == "__main__":
     unittest.main()
