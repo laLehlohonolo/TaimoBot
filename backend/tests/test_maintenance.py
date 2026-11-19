@@ -31,7 +31,7 @@ from app.maintenance import (
     reconcile_restore_execution_artifacts,
     _restore_journal_digest,
 )
-from app import database
+from app import database, maintenance as maintenance_module
 from app.database import init_db
 from app.safety import deactivate_emergency_stop, require_trading_enabled
 
@@ -59,6 +59,17 @@ class DailyMaintenanceTests(unittest.TestCase):
     def tearDown(self):
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
+
+
+    def _write_abandoned_restore_marker(self, plan_id="a" * 32):
+        lock_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        lock_path.write_text(json.dumps({
+            "plan_id": plan_id,
+            "pid": 999999,
+            "created_at": "2026-11-17T10:00:00+02:00",
+            "lock_token": "b" * 32,
+        }), encoding="utf-8")
+        return lock_path
 
     def test_maintenance_window_uses_south_african_time(self):
         zone = ZoneInfo("Africa/Johannesburg")
@@ -4190,6 +4201,108 @@ class DailyMaintenanceTests(unittest.TestCase):
                 journal_path=path,
             )
         self.assertFalse(path.exists())
+
+
+    def test_recovery_audit_success_writes_verifiable_hash_chain(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "recovery-chain.jsonl"
+        recover_abandoned_restore_lock("operator", "INC-CHAIN-1", confirm=True, audit_path=audit)
+        with audit.open("rb") as stream:
+            verified = maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+        records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(verified["record_count"], 2)
+        self.assertEqual([r["sequence"] for r in records], [1, 2])
+        self.assertEqual(records[1]["previous_record_sha256"], records[0]["record_sha256"])
+        self.assertFalse(marker.exists())
+
+    def test_recovery_audit_chains_a_later_recovery_after_prior_complete(self):
+        audit = Path(self.temp_dir.name) / "recovery-multiple.jsonl"
+        for index in range(2):
+            self._write_abandoned_restore_marker(plan_id=str(index + 1) * 32)
+            recover_abandoned_restore_lock("operator", f"INC-CHAIN-{index}", confirm=True, audit_path=audit)
+        records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([r["sequence"] for r in records], [1, 2, 3, 4])
+        self.assertEqual(records[2]["previous_record_sha256"], records[1]["record_sha256"])
+        self.assertEqual(records[3]["previous_record_sha256"], records[2]["record_sha256"])
+
+    def test_recovery_refuses_audit_record_tampering_without_removing_marker(self):
+        audit = Path(self.temp_dir.name) / "recovery-tampered.jsonl"
+        self._write_abandoned_restore_marker()
+        recover_abandoned_restore_lock("operator", "INC-TAMPER-1", confirm=True, audit_path=audit)
+        rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        rows[0]["operator_id"] = "tampered"
+        audit.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
+        marker = self._write_abandoned_restore_marker("c" * 32)
+        with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+            recover_abandoned_restore_lock("operator", "INC-TAMPER-2", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+
+    def test_recovery_refuses_incomplete_audit_tail_without_removing_marker(self):
+        audit = Path(self.temp_dir.name) / "recovery-truncated.jsonl"
+        audit.write_bytes(b'{"sequence":1')
+        marker = self._write_abandoned_restore_marker()
+        with self.assertRaisesRegex(RuntimeError, "incomplete final record"):
+            recover_abandoned_restore_lock("operator", "INC-TRUNCATED", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+        self.assertEqual(audit.read_bytes(), b'{"sequence":1')
+
+    def test_recovery_refuses_duplicate_json_keys_in_audit(self):
+        audit = Path(self.temp_dir.name) / "recovery-duplicate.jsonl"
+        audit.write_text('{"sequence":1,"sequence":1}\\n', encoding="utf-8")
+        marker = self._write_abandoned_restore_marker()
+        with self.assertRaisesRegex(RuntimeError, "duplicate JSON object key"):
+            recover_abandoned_restore_lock("operator", "INC-DUPLICATE", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+
+    def test_recovery_refuses_broken_audit_hash_chain(self):
+        audit = Path(self.temp_dir.name) / "recovery-broken-chain.jsonl"
+        self._write_abandoned_restore_marker()
+        recover_abandoned_restore_lock("operator", "INC-CHAIN-A", confirm=True, audit_path=audit)
+        rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        rows[1]["previous_record_sha256"] = "0" * 64
+        audit.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
+        marker = self._write_abandoned_restore_marker("d" * 32)
+        with self.assertRaisesRegex(RuntimeError, "hash-chain link mismatch"):
+            recover_abandoned_restore_lock("operator", "INC-CHAIN-B", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+
+    def test_recovery_refuses_audit_claiming_database_mutation(self):
+        audit = Path(self.temp_dir.name) / "recovery-db-claim.jsonl"
+        self._write_abandoned_restore_marker()
+        recover_abandoned_restore_lock("operator", "INC-DB-A", confirm=True, audit_path=audit)
+        rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        rows[0]["database_changed"] = True
+        audit.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
+        marker = self._write_abandoned_restore_marker("e" * 32)
+        with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+            recover_abandoned_restore_lock("operator", "INC-DB-B", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+
+    def test_recovery_refuses_unknown_audit_event(self):
+        audit = Path(self.temp_dir.name) / "recovery-unknown.jsonl"
+        audit.write_text('{"sequence":1,"previous_record_sha256":"' + "0" * 64 + '","event":"RESTORE_LOCK_RECOVERY_SKIPPED"}\\n', encoding="utf-8")
+        marker = self._write_abandoned_restore_marker()
+        with self.assertRaisesRegex(RuntimeError, "unknown recovery audit event"):
+            recover_abandoned_restore_lock("operator", "INC-UNKNOWN", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+
+    def test_recovery_refuses_oversized_audit_before_appending(self):
+        audit = Path(self.temp_dir.name) / "recovery-oversized.jsonl"
+        audit.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+        marker = self._write_abandoned_restore_marker()
+        with self.assertRaisesRegex(RuntimeError, "size limit"):
+            recover_abandoned_restore_lock("operator", "INC-OVERSIZED", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+
+    def test_recovery_audit_write_failure_preserves_abandoned_marker(self):
+        audit = Path(self.temp_dir.name) / "recovery-write-failure.jsonl"
+        marker = self._write_abandoned_restore_marker()
+        with patch("app.maintenance.os.write", side_effect=OSError("audit storage unavailable")):
+            with self.assertRaisesRegex(OSError, "audit storage unavailable"):
+                recover_abandoned_restore_lock("operator", "INC-WRITE-FAIL", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+        self.assertEqual(audit.read_bytes(), b"")
+
 
 
 
