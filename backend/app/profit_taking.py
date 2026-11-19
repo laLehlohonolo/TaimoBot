@@ -110,22 +110,36 @@ def evaluate_group_profit(
         minimum_net_profit, "Minimum net profit", allow_zero=True
     )
     results = []
+    gross_values = []
+    cost_values = []
     for index, position in enumerate(positions):
         if not isinstance(position, dict):
             raise ValueError(f"Position {index} must be a mapping.")
-        results.append(
-            evaluate_position_profit(
-                position,
-                position.get("current_price"),
-                spread_cost=position.get("spread_cost", 0),
-                commission_cost=position.get("commission_cost", 0),
-                swap_cost=position.get("swap_cost", 0),
-                other_costs=position.get("other_costs", 0),
-            )
+        result = evaluate_position_profit(
+            position,
+            position.get("current_price"),
+            spread_cost=position.get("spread_cost", 0),
+            commission_cost=position.get("commission_cost", 0),
+            swap_cost=position.get("swap_cost", 0),
+            other_costs=position.get("other_costs", 0),
         )
+        results.append(result)
 
-    gross = sum(item["gross_pnl"] for item in results)
-    total_costs = sum(item["total_costs"] for item in results)
+        # Keep aggregate arithmetic at full precision. Per-leg display values
+        # are rounded for readability, but summing those rounded values can
+        # create a false difference from the unrounded close ledger.
+        entry = float(position["entry_price"])
+        quantity = float(position["quantity"])
+        mark = float(position["current_price"])
+        move = mark - entry if result["side"] == "BUY" else entry - mark
+        gross_values.append(move * quantity)
+        cost_values.append(sum(
+            float(position.get(field, 0) or 0)
+            for field in _COST_FIELDS
+        ))
+
+    gross = sum(gross_values)
+    total_costs = sum(cost_values)
     net = gross - total_costs
 
     return {
