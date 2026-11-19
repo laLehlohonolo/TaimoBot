@@ -721,7 +721,7 @@ def group_profit_preview(
             FROM trades
             WHERE position_group_id = ?
               AND status = 'OPEN'
-            ORDER BY created_at, trade_id
+            ORDER BY trade_id
             """,
             (group_id,)
         ).fetchall()
@@ -750,14 +750,24 @@ def group_profit_preview(
     }
     positions = []
     trade_ids = []
-    for trade in trades:
+    remaining_costs = dict(cost_totals)
+    for index, trade in enumerate(trades):
         weight = float(trade["quantity"]) / total_quantity
+        if index == len(trades) - 1:
+            allocated_costs = dict(remaining_costs)
+        else:
+            allocated_costs = {
+                name: amount * weight
+                for name, amount in cost_totals.items()
+            }
+            for name, amount in allocated_costs.items():
+                remaining_costs[name] -= amount
         positions.append({
             "side": trade["side"],
             "entry_price": trade["entry_price"],
             "quantity": trade["quantity"],
             "current_price": request.current_price,
-            **{name: amount * weight for name, amount in cost_totals.items()},
+            **allocated_costs,
         })
         trade_ids.append(trade["trade_id"])
 
