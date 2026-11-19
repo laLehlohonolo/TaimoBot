@@ -7,6 +7,7 @@ from .execution import (
     _calculate_trade_pnl
 )
 from .risk import get_risk_profile, MAX_RISK_PERCENT
+from .close_accounting import calculate_close_accounting
 
 
 
@@ -696,7 +697,10 @@ def _reconcile_pending_copy_executions_for_closed_source(connection, source_trad
         )
 
 
-def close_trade_with_copies(trade_id, exit_price):
+def close_trade_with_copies(
+    trade_id, exit_price, *, spread_cost=0, commission_cost=0,
+    swap_cost=0, other_costs=0
+):
     """
     Close an original source trade and every open direct copy atomically.
 
@@ -747,7 +751,22 @@ def close_trade_with_copies(trade_id, exit_price):
         trade_results = []
 
         for trade in trades_to_close:
-            pnl = _calculate_trade_pnl(trade, exit_value)
+            gross_pnl = _calculate_trade_pnl(trade, exit_value)
+            # Costs supplied for this close belong only to the requested
+            # position. Do not silently duplicate source costs onto copies
+            # held in separate follower accounts.
+            costs = (
+                {
+                    "spread_cost": spread_cost,
+                    "commission_cost": commission_cost,
+                    "swap_cost": swap_cost,
+                    "other_costs": other_costs,
+                }
+                if trade["trade_id"] == trade_id
+                else {}
+            )
+            accounting = calculate_close_accounting(gross_pnl, **costs)
+            pnl = accounting["net_realized_pnl"]
             account_id = trade["account_id"]
             account_pnl[account_id] = account_pnl.get(account_id, 0.0) + pnl
             trade_results.append({
@@ -755,6 +774,7 @@ def close_trade_with_copies(trade_id, exit_price):
                 "account_id": account_id,
                 "is_copy": trade["copied_from_trade_id"] is not None,
                 "realized_pnl": pnl,
+                **accounting,
                 "position_group_id": trade["position_group_id"]
             })
 
@@ -785,11 +805,24 @@ def close_trade_with_copies(trade_id, exit_price):
                 UPDATE trades
                 SET status = 'CLOSED',
                     realized_pnl = ?,
+                    gross_realized_pnl = ?,
+                    spread_cost = ?,
+                    commission_cost = ?,
+                    swap_cost = ?,
+                    other_costs = ?,
                     closed_at = CURRENT_TIMESTAMP
                 WHERE trade_id = ?
                   AND status = 'OPEN'
                 """,
-                (result["realized_pnl"], result["trade_id"])
+                (
+                    result["realized_pnl"],
+                    result["gross_realized_pnl"],
+                    result["spread_cost"],
+                    result["commission_cost"],
+                    result["swap_cost"],
+                    result["other_costs"],
+                    result["trade_id"]
+                )
             )
             if update.rowcount != 1:
                 raise ValueError(
