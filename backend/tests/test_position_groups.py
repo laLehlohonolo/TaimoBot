@@ -618,5 +618,70 @@ class PositionGroupTests(unittest.TestCase):
         self.assertIsNone(execution["lease_expires_at"])
 
 
+    def test_group_close_rolls_back_source_balance_if_follower_balance_write_fails(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+        opened = self.open_group_trade(group_id, "GROUP-BALANCE-ROLLBACK-001")
+        self.assertEqual(opened.status_code, 200)
+        source_trade_id = opened.json()["trade_id"]
+
+        with database.get_connection() as connection:
+            copied = connection.execute(
+                "SELECT trade_id FROM trades WHERE copied_from_trade_id = ?",
+                (source_trade_id,),
+            ).fetchone()
+            self.assertIsNotNone(copied)
+            copied_trade_id = copied["trade_id"]
+            connection.execute(
+                """
+                CREATE TRIGGER fail_follower_balance_update
+                BEFORE UPDATE OF balance ON paper_accounts
+                WHEN OLD.account_id = 'GROUP-FOLLOWER-001'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated follower balance write failure');
+                END
+                """
+            )
+
+        # The source balance is updated first; failure on the follower write
+        # must roll back that earlier balance update and every preceding close.
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_position_group_with_copies(group_id, 4010)
+
+        with database.get_connection() as connection:
+            trades = connection.execute(
+                """
+                SELECT trade_id, status, realized_pnl, gross_realized_pnl
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                ORDER BY trade_id
+                """,
+                (source_trade_id, copied_trade_id),
+            ).fetchall()
+            source_balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-001'"
+            ).fetchone()["balance"]
+            follower_balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-FOLLOWER-001'"
+            ).fetchone()["balance"]
+            group_status = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()["status"]
+            execution_status = connection.execute(
+                "SELECT status FROM copy_executions WHERE copied_trade_id = ?",
+                (copied_trade_id,),
+            ).fetchone()["status"]
+
+        self.assertEqual(len(trades), 2)
+        self.assertTrue(all(row["status"] == "OPEN" for row in trades))
+        self.assertTrue(all(row["realized_pnl"] == 0 for row in trades))
+        self.assertTrue(all(row["gross_realized_pnl"] is None for row in trades))
+        self.assertEqual(source_balance, 10000)
+        self.assertEqual(follower_balance, 10000)
+        self.assertEqual(group_status, "OPEN")
+        self.assertEqual(execution_status, "COPIED")
+
+
 if __name__ == "__main__":
     unittest.main()
