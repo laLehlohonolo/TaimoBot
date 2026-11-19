@@ -1821,6 +1821,7 @@ def verify_restore_execution_readiness_under_lock(
     plan_id: str,
     lock_token: str,
     external_processes_stopped: bool = False,
+    expected_artifact_hashes: dict | None = None,
     backup_dir: Path | None = None,
     live_database_path: Path | None = None,
 ) -> dict:
@@ -1838,6 +1839,16 @@ def verify_restore_execution_readiness_under_lock(
         raise ValueError(
             "Operator must explicitly confirm all external SQLite processes are stopped."
         )
+    required_hash_keys = {"source_sha256", "staged_sha256", "rollback_sha256"}
+    if (
+        not isinstance(expected_artifact_hashes, dict)
+        or set(expected_artifact_hashes) != required_hash_keys
+        or any(
+            not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+            for value in expected_artifact_hashes.values()
+        )
+    ):
+        raise ValueError("Expected source, staged and rollback SHA-256 fingerprints are required.")
 
     lock_state = inspect_restore_lock()
     if (
@@ -1847,6 +1858,17 @@ def verify_restore_execution_readiness_under_lock(
     ):
         raise RuntimeError("The matching active restore lock could not be verified.")
 
+    artifacts = (
+        ("source_sha256", Path(source_backup)),
+        ("staged_sha256", Path(staged_candidate)),
+        ("rollback_sha256", Path(rollback_backup)),
+    )
+    before_hashes = {
+        key: sha256_file(path)
+        for key, path in artifacts
+    }
+    if before_hashes != expected_artifact_hashes:
+        raise ValueError("Restore artifact fingerprint mismatch under lock.")
     result = verify_restore_execution_readiness(
         source_backup,
         staged_candidate,
@@ -1854,10 +1876,17 @@ def verify_restore_execution_readiness_under_lock(
         backup_dir=backup_dir,
         live_database_path=live_database_path,
     )
+    after_hashes = {
+        key: sha256_file(path)
+        for key, path in artifacts
+    }
+    if after_hashes != expected_artifact_hashes:
+        raise ValueError("Restore artifact changed during locked preflight.")
     return {
         **result,
         "status": "RESTORE_EXECUTION_LOCKED_PREFLIGHT_PASSED",
         "restore_lock_verified": True,
+        "artifact_fingerprints_match": True,
         "external_processes_stopped_operator_confirmed": True,
         "execution_authorized": False,
         "live_database_replaced": False,
