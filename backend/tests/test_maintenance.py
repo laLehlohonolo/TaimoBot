@@ -2463,6 +2463,11 @@ class DailyMaintenanceTests(unittest.TestCase):
                         plan_id=plan_id,
                         lock_token="d" * 32,
                         external_processes_stopped=True,
+                        expected_artifact_hashes={
+                            "source_sha256": sha256_file(source),
+                            "staged_sha256": sha256_file(staged),
+                            "rollback_sha256": sha256_file(rollback),
+                        },
                         backup_dir=backup_dir,
                         live_database_path=database.DB_PATH,
                     )
