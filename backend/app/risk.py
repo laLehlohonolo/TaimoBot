@@ -172,7 +172,9 @@ def calculate_position_size(
         "side": side,
         "account_balance": round(balance, 2),
         "risk_percent": requested_risk,
-        # Keep full precision in the reservation ledger. Rounding here can\n        # erase small positions and let aggregate open risk exceed 1%.\n        "risk_amount": requested_risk_amount,
+        # Keep full precision in the reservation ledger. Rounding here can
+        # erase small positions and let aggregate open risk exceed 1%.
+        "risk_amount": requested_risk_amount,
         "current_open_risk": round(open_risk, 2),
         "projected_total_open_risk": round(
             projected_total_risk, 2
