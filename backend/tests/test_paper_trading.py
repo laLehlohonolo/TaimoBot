@@ -1474,10 +1474,11 @@ class PaperTradingTests(unittest.TestCase):
                 requested,
                 places=12,
             )
-        self.assertAlmostEqual(
+        # The close API summary is rounded to account-currency cents;
+        # durable ledger rows and the preview retain higher precision.
+        self.assertEqual(
             close_response.json()["realized_pnl"],
-            preview["net_pnl"],
-            places=7,
+            round(preview["net_pnl"], 2),
         )
 
 
