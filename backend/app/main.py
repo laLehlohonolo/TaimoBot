@@ -141,10 +141,18 @@ class TradeRequest(BaseModel):
 
 class CloseTradeRequest(BaseModel):
     exit_price: float = Field(gt=0)
+    spread_cost: float = Field(default=0, ge=0)
+    commission_cost: float = Field(default=0, ge=0)
+    swap_cost: float = Field(default=0, ge=0)
+    other_costs: float = Field(default=0, ge=0)
 
 
 class CloseGroupRequest(BaseModel):
     exit_price: float = Field(gt=0)
+    spread_cost: float = Field(default=0, ge=0)
+    commission_cost: float = Field(default=0, ge=0)
+    swap_cost: float = Field(default=0, ge=0)
+    other_costs: float = Field(default=0, ge=0)
 
 
 class ProfitPreviewRequest(BaseModel):
@@ -896,7 +904,11 @@ def close_trade(
     try:
         return close_trade_with_copies(
             trade_id,
-            request.exit_price
+            request.exit_price,
+            spread_cost=request.spread_cost,
+            commission_cost=request.commission_cost,
+            swap_cost=request.swap_cost,
+            other_costs=request.other_costs,
         )
     except ValueError as error:
         raise HTTPException(
