@@ -311,6 +311,14 @@ def prepare_maintenance_restore(request: MaintenanceRestorePrepareRequest, user=
     selected_backup = backup_directory / request.backup_file_name
     if selected_backup.is_symlink() or not selected_backup.is_file() or selected_backup.resolve().parent != backup_directory:
         raise HTTPException(status_code=409, detail="Selected backup is not a safe managed file.")
+    inventory_fingerprint = candidate.get("sha256")
+    if not isinstance(inventory_fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", inventory_fingerprint):
+        raise HTTPException(status_code=409, detail="Selected backup has no trustworthy inventory fingerprint.")
+    try:
+        if sha256_file(selected_backup) != inventory_fingerprint:
+            raise HTTPException(status_code=409, detail="Selected backup changed after recovery inventory; refresh the inventory and prepare again.")
+    except OSError as error:
+        raise HTTPException(status_code=409, detail="Selected backup could not be fingerprinted safely.") from error
     plan_id = uuid4().hex
     staging_path = backup_directory / "recovery-staging" / ("taimobot-restore-" + plan_id + ".sqlite3")
     try:
@@ -325,6 +333,8 @@ def prepare_maintenance_restore(request: MaintenanceRestorePrepareRequest, user=
         if staged_inventory.get("status") != "RECOVERY_INVENTORY_COMPLETE" or staged_record is None or not staged_record.get("restore_ready"):
             raise RuntimeError("Staged restore failed schema or foreign-key verification.")
         selected_backup_hash = sha256_file(selected_backup)
+        if selected_backup_hash != inventory_fingerprint:
+            raise RuntimeError("Selected backup changed while the isolated candidate was being staged.")
         staged_candidate_hash = sha256_file(staging_path)
         rollback_backup_path = Path(pre_restore_backup["backup_file"]).resolve()
         rollback_backup_hash = sha256_file(rollback_backup_path)
