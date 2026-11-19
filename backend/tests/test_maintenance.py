@@ -2997,6 +2997,178 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["record_count"], 0)
         self.assertIn("size limit", result.get("reason", ""))
 
+    def create_byte_corrupted_sqlite_copy(self, target):
+        target = Path(target)
+        with sqlite3.connect(database.DB_PATH) as source, sqlite3.connect(target) as destination:
+            source.backup(destination)
+        with sqlite3.connect(target) as connection:
+            connection.execute(
+                "CREATE TABLE corruption_probe (probe_id INTEGER PRIMARY KEY, payload TEXT NOT NULL)"
+            )
+            connection.executemany(
+                "INSERT INTO corruption_probe(payload) VALUES (?)",
+                [("x" * 2048,) for _ in range(200)],
+            )
+            root_page = connection.execute(
+                "SELECT rootpage FROM sqlite_master WHERE name = 'corruption_probe'"
+            ).fetchone()[0]
+            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+        self.assertGreater(root_page, 1)
+        with target.open("r+b") as artifact:
+            artifact.seek((root_page - 1) * page_size)
+            artifact.write(b"\\xff")
+            artifact.flush()
+            os.fsync(artifact.fileno())
+        return target
+
+    def create_valid_restore_artifacts(self, root):
+        backup_dir = Path(root) / "backups"
+        staging_dir = backup_dir / "recovery-staging"
+        staging_dir.mkdir(parents=True)
+        source = backup_dir / "taimobot-source.sqlite3"
+        rollback = backup_dir / "taimobot-rollback.sqlite3"
+        staged = staging_dir / "taimobot-staged.sqlite3"
+        for target in (source, rollback, staged):
+            with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                live.backup(copy)
+        return backup_dir, source, staged, rollback
+
+
+    def test_byte_corrupted_sqlite_backup_is_not_restore_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid = root / "taimobot-valid.sqlite3"
+            corrupt = root / "taimobot-byte-corrupt.sqlite3"
+            with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(valid) as copy:
+                live.backup(copy)
+            self.create_byte_corrupted_sqlite_copy(corrupt)
+            live_before = database.DB_PATH.read_bytes()
+            result = inspect_recovery_candidates(root)
+            records = {item["file_name"]: item for item in result["candidates"]}
+            self.assertTrue(records[valid.name]["restore_ready"])
+            self.assertFalse(records[corrupt.name]["restore_ready"])
+            self.assertIn("BACKUP_UNREADABLE", records[corrupt.name]["issues"])
+            self.assertEqual(result["restore_ready_count"], 1)
+            self.assertEqual(database.DB_PATH.read_bytes(), live_before)
+            self.assertFalse(result["live_database_replaced"])
+
+    def test_byte_corrupted_source_backup_blocks_restore_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir, source, staged, rollback = self.create_valid_restore_artifacts(directory)
+            self.create_byte_corrupted_sqlite_copy(source)
+            with self.assertRaisesRegex(ValueError, "source backup is not restore-ready"):
+                verify_restore_execution_readiness(
+                    source, staged, rollback, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+            self.assertTrue(database.DB_PATH.is_file())
+
+    def test_byte_corrupted_staged_candidate_blocks_restore_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir, source, staged, rollback = self.create_valid_restore_artifacts(directory)
+            self.create_byte_corrupted_sqlite_copy(staged)
+            with self.assertRaisesRegex(ValueError, "staged recovery artifact is not restore-ready"):
+                verify_restore_execution_readiness(
+                    source, staged, rollback, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+            self.assertTrue(database.DB_PATH.is_file())
+
+    def test_byte_corrupted_rollback_backup_blocks_restore_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir, source, staged, rollback = self.create_valid_restore_artifacts(directory)
+            self.create_byte_corrupted_sqlite_copy(rollback)
+            with self.assertRaisesRegex(ValueError, "rollback backup is not restore-ready"):
+                verify_restore_execution_readiness(
+                    source, staged, rollback, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+            self.assertTrue(database.DB_PATH.is_file())
+
+    def test_byte_corrupted_live_database_blocks_restore_preflight_without_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir, source, staged, rollback = self.create_valid_restore_artifacts(directory)
+            corrupt_live = Path(directory) / "corrupt-live.sqlite3"
+            self.create_byte_corrupted_sqlite_copy(corrupt_live)
+            corrupt_before = corrupt_live.read_bytes()
+            with self.assertRaisesRegex(ValueError, "live database failed its integrity check"):
+                verify_restore_execution_readiness(
+                    source, staged, rollback, backup_dir=backup_dir,
+                    live_database_path=corrupt_live,
+                )
+            self.assertEqual(corrupt_live.read_bytes(), corrupt_before)
+            self.assertTrue(database.DB_PATH.is_file())
+
+    def test_restore_candidate_verification_rejects_page_corruption_and_cleans_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corrupt = Path(directory) / "taimobot-corrupt.sqlite3"
+            staging = Path(directory) / "recovery-staging" / "candidate.sqlite3"
+            self.create_byte_corrupted_sqlite_copy(corrupt)
+            live_before = database.DB_PATH.read_bytes()
+            with self.assertRaises(Exception):
+                verify_restore_candidate(corrupt, staging)
+            self.assertFalse(staging.exists())
+            self.assertEqual(database.DB_PATH.read_bytes(), live_before)
+
+    def test_inventory_identifies_exact_valid_candidate_among_corrupt_neighbours(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid = root / "taimobot-approved.sqlite3"
+            corrupt_a = root / "taimobot-neighbour-a.sqlite3"
+            corrupt_b = root / "taimobot-neighbour-b.sqlite3"
+            with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(valid) as copy:
+                live.backup(copy)
+            self.create_byte_corrupted_sqlite_copy(corrupt_a)
+            self.create_byte_corrupted_sqlite_copy(corrupt_b)
+            result = inspect_recovery_candidates(root)
+            records = {item["file_name"]: item for item in result["candidates"]}
+            self.assertEqual(result["candidate_count"], 3)
+            self.assertEqual(result["restore_ready_count"], 1)
+            self.assertTrue(records[valid.name]["restore_ready"])
+            self.assertFalse(records[corrupt_a.name]["restore_ready"])
+            self.assertFalse(records[corrupt_b.name]["restore_ready"])
+            self.assertEqual(records[valid.name]["file_name"], valid.name)
+
+    def test_byte_corrupted_candidate_with_wal_sidecar_is_skipped_and_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corrupt = root / "taimobot-corrupt-with-wal.sqlite3"
+            self.create_byte_corrupted_sqlite_copy(corrupt)
+            wal = Path(str(corrupt) + "-wal")
+            wal.write_bytes(b"forensic-wal-content")
+            wal_before = wal.read_bytes()
+            result = inspect_recovery_candidates(root)
+            record = result["candidates"][0]
+            self.assertFalse(record["restore_ready"])
+            self.assertEqual(record["integrity_check"], "SKIPPED_SIDECARS_PRESENT")
+            self.assertIn("SQLITE_SIDECARS_PRESENT", record["issues"])
+            self.assertEqual(wal.read_bytes(), wal_before)
+
+    def test_byte_corruption_after_inventory_is_rejected_by_final_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir, source, staged, rollback = self.create_valid_restore_artifacts(directory)
+            initial = inspect_recovery_candidates(backup_dir)
+            records = {item["file_name"]: item for item in initial["candidates"]}
+            self.assertTrue(records[source.name]["restore_ready"])
+            self.create_byte_corrupted_sqlite_copy(source)
+            with self.assertRaisesRegex(ValueError, "source backup is not restore-ready"):
+                verify_restore_execution_readiness(
+                    source, staged, rollback, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+            self.assertTrue(database.DB_PATH.is_file())
+
+    def test_corrupt_restore_candidate_never_changes_live_database_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corrupt = Path(directory) / "taimobot-corrupt-source.sqlite3"
+            self.create_byte_corrupted_sqlite_copy(corrupt)
+            live_before = sha256_file(database.DB_PATH)
+            inventory = inspect_recovery_candidates(directory)
+            self.assertFalse(inventory["candidates"][0]["restore_ready"])
+            self.assertEqual(sha256_file(database.DB_PATH), live_before)
+            self.assertFalse(inventory["live_database_replaced"])
+
+
 
 if __name__ == "__main__":
     unittest.main()
