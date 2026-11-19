@@ -29,6 +29,8 @@ jobs:
         run: python scripts/run_position_group_accounting.py
       - name: Run ten close-cost ledger checks sequentially
         run: python scripts/run_close_cost_ledger_group.py
+      - name: Run ten copied-ledger reconciliation checks sequentially
+        run: python scripts/run_copied_ledger_reconciliation.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
