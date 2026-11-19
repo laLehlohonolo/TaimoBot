@@ -16,9 +16,12 @@ _COST_FIELDS = (
 
 
 def _finite_number(value, name, *, allow_zero=False):
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a valid number.")
+
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f"{name} must be a valid number.")
 
     if not math.isfinite(number):
