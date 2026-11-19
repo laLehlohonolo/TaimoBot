@@ -25,6 +25,8 @@ jobs:
         run: python scripts/run_copy_recovery_group.py
       - name: Run ten copy-safety checks sequentially
         run: python scripts/run_copy_safety_group.py
+      - name: Run ten position-group accounting checks sequentially
+        run: python scripts/run_position_group_accounting.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
