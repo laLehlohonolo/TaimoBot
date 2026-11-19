@@ -1433,6 +1433,62 @@ def inspect_restore_lock() -> dict:
     }
 
 
+
+_RESTORE_LOCK_RECOVERY_AUDIT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _restore_lock_recovery_record_digest(record: dict) -> str:
+    payload = {key: value for key, value in record.items() if key != "record_sha256"}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _verify_restore_lock_recovery_audit_fd(descriptor: int) -> dict:
+    """Verify the recovery audit hash chain from an already-open file descriptor."""
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("Recovery audit destination is not a regular file.")
+    if metadata.st_size > _RESTORE_LOCK_RECOVERY_AUDIT_MAX_BYTES:
+        raise RuntimeError("Restore lock recovery audit exceeds the verification size limit.")
+    raw = os.pread(descriptor, metadata.st_size, 0)
+    if len(raw) != metadata.st_size:
+        raise RuntimeError("Restore lock recovery audit changed or was truncated during verification.")
+    if not raw:
+        return {"record_count": 0, "last_record_sha256": "0" * 64}
+    if not raw.endswith(b"\\n"):
+        raise RuntimeError("Restore lock recovery audit has an incomplete final record.")
+    previous = "0" * 64
+    count = 0
+    try:
+        for line in raw.splitlines():
+            record = json.loads(line.decode("utf-8"), object_pairs_hook=_restore_journal_object_without_duplicate_keys, parse_constant=_reject_restore_journal_json_constant)
+            if not isinstance(record, dict) or isinstance(record.get("sequence"), bool) or record.get("sequence") != count + 1:
+                raise ValueError("invalid recovery audit sequence")
+            if record.get("previous_record_sha256") != previous:
+                raise ValueError("recovery audit hash-chain link mismatch")
+            if record.get("event") not in ("RESTORE_LOCK_RECOVERY_STARTED", "RESTORE_LOCK_RECOVERY_COMPLETE"):
+                raise ValueError("unknown recovery audit event")
+            for field in ("operator_id", "incident_ref", "plan_id", "marker_sha256", "marker_file", "timestamp"):
+                value = record.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"invalid recovery audit {field}")
+            if not re.fullmatch(r"[a-f0-9]{32}", record["plan_id"]) or not re.fullmatch(r"[a-f0-9]{64}", record["marker_sha256"]):
+                raise ValueError("invalid recovery audit identity or fingerprint")
+            if record.get("database_changed") is not False or record.get("sidecars_changed") is not False:
+                raise ValueError("recovery audit cannot claim database or sidecar changes")
+            parsed = datetime.fromisoformat(record["timestamp"])
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError("recovery audit timestamp must include a timezone offset")
+            digest = _restore_lock_recovery_record_digest(record)
+            if record.get("record_sha256") != digest:
+                raise ValueError("recovery audit record fingerprint mismatch")
+            previous = digest
+            count += 1
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError) as error:
+        raise RuntimeError(f"Restore lock recovery audit integrity verification failed: {str(error)[:160]}") from error
+    return {"record_count": count, "last_record_sha256": previous}
+
+
 def recover_abandoned_restore_lock(
     operator_id: str,
     incident_ref: str,
@@ -1530,16 +1586,23 @@ def recover_abandoned_restore_lock(
         audit_file.parent.mkdir(parents=True, exist_ok=True)
         audit_fd = os.open(
             str(audit_file),
-            os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            os.O_CREAT | os.O_APPEND | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
         try:
-            if not __import__("stat").S_ISREG(os.fstat(audit_fd).st_mode):
+            if not stat.S_ISREG(os.fstat(audit_fd).st_mode):
                 raise RuntimeError("Recovery audit destination is not a regular file.")
+            fcntl.flock(audit_fd, fcntl.LOCK_EX)
+            audit_state = _verify_restore_lock_recovery_audit_fd(audit_fd)
             marker_hash = hashlib.sha256(marker_bytes).hexdigest()
+            sequence = audit_state["record_count"]
+            previous_hash = audit_state["last_record_sha256"]
 
             def write_audit(event: str) -> None:
+                nonlocal sequence, previous_hash
                 record = {
+                    "sequence": sequence + 1,
+                    "previous_record_sha256": previous_hash,
                     "event": event,
                     "timestamp": datetime.now(SAST).isoformat(),
                     "operator_id": operator,
@@ -1550,7 +1613,8 @@ def recover_abandoned_restore_lock(
                     "database_changed": False,
                     "sidecars_changed": False,
                 }
-                data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+                record["record_sha256"] = _restore_lock_recovery_record_digest(record)
+                data = (json.dumps(record, sort_keys=True) + "\\n").encode("utf-8")
                 view = memoryview(data)
                 while view:
                     written = os.write(audit_fd, view)
@@ -1558,6 +1622,8 @@ def recover_abandoned_restore_lock(
                         raise OSError("Could not complete recovery audit write.")
                     view = view[written:]
                 os.fsync(audit_fd)
+                sequence += 1
+                previous_hash = record["record_sha256"]
 
             write_audit("RESTORE_LOCK_RECOVERY_STARTED")
             lock_path.unlink()
