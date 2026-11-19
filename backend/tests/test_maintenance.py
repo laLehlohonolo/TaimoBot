@@ -4043,7 +4043,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             external.replace(Path(journal_path))
             return real_verify(journal_path, **kwargs)
         with patch("app.maintenance.verify_restore_execution_journal", side_effect=replace_then_verify):
-            with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+            with self.assertRaisesRegex(RuntimeError, "changed during verification"):
                 append_restore_execution_event(
                     "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
                     "operator@example.com", "INC-JOURNAL-IDENTITY",
@@ -4066,7 +4066,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             return real_verify(journal_path, **kwargs)
         try:
             with patch("app.maintenance.verify_restore_execution_journal", side_effect=replace_then_verify):
-                with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+                with self.assertRaisesRegex(RuntimeError, "changed during verification"):
                     append_restore_execution_event(
                         "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
                         "operator@example.com", "INC-JOURNAL-IDENTITY",
@@ -4094,7 +4094,7 @@ class DailyMaintenanceTests(unittest.TestCase):
                     journal_path=path,
                 )
         self.assertFalse(path.exists())
-        self.assertEqual(len(verify_restore_execution_journal(displaced)["records"]), 1)
+        self.assertEqual(len(verify_restore_execution_journal(displaced, include_records=True)["records"]), 1)
 
     def test_journal_append_rejects_in_place_write_during_verification(self):
         path = Path(self.temp_dir.name) / "restore-in-place-race.jsonl"
@@ -4105,7 +4105,7 @@ class DailyMaintenanceTests(unittest.TestCase):
                 stream.write(b"external-mutation")
             return real_verify(journal_path, **kwargs)
         with patch("app.maintenance.verify_restore_execution_journal", side_effect=mutate_then_verify):
-            with self.assertRaisesRegex(RuntimeError, "integrity verification"):
+            with self.assertRaisesRegex(RuntimeError, "changed during verification"):
                 append_restore_execution_event(
                     "RESTORE_SOURCE_PUBLISHED", "8" * 32, "9" * 32,
                     "operator@example.com", "INC-JOURNAL-IDENTITY",
