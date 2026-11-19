@@ -3829,9 +3829,9 @@ class DailyMaintenanceTests(unittest.TestCase):
         backup_dir = root / "backups"
         staging_dir = backup_dir / "recovery-staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
-        source = backup_dir / "source.sqlite3"
-        rollback = backup_dir / "rollback.sqlite3"
-        staged = staging_dir / "staged.sqlite3"
+        source = backup_dir / "taimobot-source.sqlite3"
+        rollback = backup_dir / "taimobot-rollback.sqlite3"
+        staged = staging_dir / "taimobot-staged.sqlite3"
         for target in (source, rollback, staged):
             with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
                 live.backup(copy)
