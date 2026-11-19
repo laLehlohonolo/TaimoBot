@@ -229,6 +229,14 @@ export default function App() {
   const [newAccountId, setNewAccountId] = useState("");
   const [startingBalance, setStartingBalance] = useState("10000");
   const [creating, setCreating] = useState(false);
+  const [orderSymbol, setOrderSymbol] = useState("XAUUSD");
+  const [orderSide, setOrderSide] = useState("BUY");
+  const [entryPrice, setEntryPrice] = useState("");
+  const [stopLoss, setStopLoss] = useState("");
+  const [takeProfit, setTakeProfit] = useState("");
+  const [orderBusy, setOrderBusy] = useState(false);
+  const [orderPreview, setOrderPreview] = useState(null);
+  const [closeBusy, setCloseBusy] = useState("");
 
   const refreshPublicStatus = useCallback(async () => {
     try {
@@ -345,6 +353,90 @@ export default function App() {
     }
   }
 
+  async function previewPaperOrder(event) {
+    event.preventDefault();
+    if (!session?.access_token || !account || !risk) return;
+    setError("");
+    setOrderPreview(null);
+    setOrderBusy(true);
+    try {
+      const funding = Number(account.starting_balance);
+      const assignedRisk = funding < 5000 ? 0.25 : funding < 25000 ? 0.5 : 1.0;
+      const result = await apiRequest("/risk/preview", {
+        method: "POST",
+        body: JSON.stringify({
+          account_balance: Number(account.current_balance),
+          entry_price: Number(entryPrice),
+          stop_loss: Number(stopLoss),
+          risk_percent: assignedRisk,
+          side: orderSide
+        })
+      });
+      setOrderPreview({ ...result, assignedRisk });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Risk preview failed.");
+    } finally {
+      setOrderBusy(false);
+    }
+  }
+
+  async function submitPaperOrder(event) {
+    event.preventDefault();
+    if (!session?.access_token || !account) return;
+    setOrderBusy(true);
+    setError("");
+    try {
+      await apiRequest("/trades", {
+        method: "POST",
+        body: JSON.stringify({
+          account_id: account.account_id,
+          client_order_id: "WEB-" + crypto.randomUUID(),
+          symbol: orderSymbol.trim().toUpperCase(),
+          side: orderSide,
+          entry_price: Number(entryPrice),
+          stop_loss: Number(stopLoss),
+          take_profit: takeProfit.trim() ? Number(takeProfit) : null,
+          risk_percent: orderPreview?.assignedRisk ?? 1.0
+        })
+      }, session.access_token);
+      setEntryPrice("");
+      setStopLoss("");
+      setTakeProfit("");
+      setOrderPreview(null);
+      await loadSelectedAccount(session.access_token, account.account_id);
+      await loadAccounts(session.access_token);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Paper order was rejected.");
+    } finally {
+      setOrderBusy(false);
+    }
+  }
+
+  async function closePaperTrade(trade) {
+    if (!session?.access_token || trade.status !== "OPEN") return;
+    const raw = window.prompt("Enter simulated exit price for " + trade.symbol + ":");
+    if (raw === null) return;
+    const exitPrice = Number(raw);
+    if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
+      setError("Exit price must be a valid positive number.");
+      return;
+    }
+    setCloseBusy(trade.trade_id);
+    setError("");
+    try {
+      await apiRequest("/trades/" + encodeURIComponent(trade.trade_id) + "/close", {
+        method: "POST",
+        body: JSON.stringify({ exit_price: exitPrice })
+      }, session.access_token);
+      await loadSelectedAccount(session.access_token, account.account_id);
+      await loadAccounts(session.access_token);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Paper close failed.");
+    } finally {
+      setCloseBusy("");
+    }
+  }
+
   async function logout() {
     if (session?.access_token) {
       try { await apiRequest("/auth/logout", { method: "POST" }, session.access_token); } catch { /* clear local session regardless */ }
@@ -423,9 +515,22 @@ export default function App() {
                     <MetricCard label="OPEN POSITIONS" value={account.open_trades} note={account.total_trades + " total trades"} />
                     <MetricCard label="REALIZED P&L" value={"R " + Number(account.realized_pnl).toFixed(2)} note={account.closed_trades + " closed trades"} />
                   </div>
+                  <div className="panel order-panel">
+                    <div className="table-heading"><div><p className="eyebrow">SIMULATED EXECUTION</p><h3>Open paper position</h3></div><StatusPill good={!emergencyActive && safety?.new_orders_allowed !== false}>{emergencyActive || safety?.new_orders_allowed === false ? "Entries blocked" : "Paper only"}</StatusPill></div>
+                    <form className="order-form" onSubmit={submitPaperOrder}>
+                      <label>Instrument<input required minLength={1} maxLength={30} pattern="[A-Za-z0-9._/-]+" value={orderSymbol} onChange={event => { setOrderSymbol(event.target.value); setOrderPreview(null); }} /></label>
+                      <label>Direction<select value={orderSide} onChange={event => { setOrderSide(event.target.value); setOrderPreview(null); }}><option value="BUY">BUY</option><option value="SELL">SELL</option></select></label>
+                      <label>Entry price<input required type="number" min="0.00000001" step="any" value={entryPrice} onChange={event => { setEntryPrice(event.target.value); setOrderPreview(null); }} /></label>
+                      <label>Stop loss<input required type="number" min="0.00000001" step="any" value={stopLoss} onChange={event => { setStopLoss(event.target.value); setOrderPreview(null); }} /></label>
+                      <label>Take profit (optional)<input type="number" min="0.00000001" step="any" value={takeProfit} onChange={event => setTakeProfit(event.target.value)} /></label>
+                      <div className="order-actions"><button className="secondary-button" type="button" disabled={orderBusy || !entryPrice || !stopLoss} onClick={previewPaperOrder}>{orderBusy ? "Checking…" : "Preview risk"}</button><button className="primary-button" type="submit" disabled={orderBusy || !entryPrice || !stopLoss || !risk || emergencyActive || safety?.new_orders_allowed === false}>{orderBusy ? "Submitting…" : "Open paper position"}</button></div>
+                    </form>
+                    {orderPreview && <div className="preview-result" role="status"><strong>Estimated position size: {orderPreview.position_size}</strong><span>Risk amount: R {Number(orderPreview.risk_amount).toFixed(2)} · Assigned profile: {orderPreview.assignedRisk}%</span><small>Preview is indicative. The backend recalculates assigned risk and checks combined account exposure before accepting the order.</small></div>}
+                    <p className="muted">Paper execution only. The backend enforces your assigned risk profile and the combined 1% account ceiling. Existing positions are never closed automatically by this form.</p>
+                  </div>
                   {risk && <div className="panel risk-panel"><div><span className="card-label">OPEN RISK</span><strong>R {Number(risk.current_open_risk).toFixed(2)} / R {Number(risk.maximum_risk_amount).toFixed(2)}</strong></div><div className="risk-track"><span style={{ width: Math.min(100, risk.maximum_risk_amount ? (risk.current_open_risk / risk.maximum_risk_amount) * 100 : 0) + "%" }} /></div><p className="muted">Maximum combined account risk: {risk.maximum_risk_percent}% · remaining budget R {Number(risk.remaining_risk_budget).toFixed(2)}</p></div>}
                   <div className="panel trades-panel"><div className="table-heading"><h3>Recent trades</h3><span className="muted">{trades.length} records</span></div>
-                    {trades.length === 0 ? <p className="muted">No trades recorded for this account.</p> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop loss</th><th>Risk</th><th>Status</th><th>Realized P&L</th></tr></thead><tbody>{trades.map(trade => <tr key={trade.trade_id}><td>{trade.symbol}</td><td>{trade.side}</td><td>{Number(trade.entry_price).toFixed(2)}</td><td>{Number(trade.stop_loss).toFixed(2)}</td><td>R {Number(trade.risk_amount).toFixed(2)}</td><td><span className={"trade-status " + trade.status.toLowerCase()}>{trade.status}</span></td><td>R {Number(trade.realized_pnl).toFixed(2)}</td></tr>)}</tbody></table></div>}
+                    {trades.length === 0 ? <p className="muted">No trades recorded for this account.</p> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop loss</th><th>Risk</th><th>Status</th><th>Realized P&L</th></tr></thead><tbody>{trades.map(trade => <tr key={trade.trade_id}><td>{trade.symbol}</td><td>{trade.side}</td><td>{Number(trade.entry_price).toFixed(2)}</td><td>{Number(trade.stop_loss).toFixed(2)}</td><td>R {Number(trade.risk_amount).toFixed(2)}</td><td><span className={"trade-status " + trade.status.toLowerCase()}>{trade.status}</span></td><td>R {Number(trade.realized_pnl).toFixed(2)}</td><td>{trade.status === "OPEN" && <button className="text-button" disabled={closeBusy === trade.trade_id} onClick={() => closePaperTrade(trade)}>{closeBusy === trade.trade_id ? "Closing…" : "Close paper"}</button>}</td></tr>)}</tbody></table></div>}
                   </div>
                 </>
               ) : <div className="panel empty-state"><h2>{accounts.length ? "Select an account" : "Your paper workspace is ready"}</h2><p className="muted">{accounts.length ? "Choose an account to inspect its balance, risk and trade history." : "Create your first paper account to begin tracking simulated activity."}</p></div>}
