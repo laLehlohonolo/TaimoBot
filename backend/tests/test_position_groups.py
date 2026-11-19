@@ -683,5 +683,180 @@ class PositionGroupTests(unittest.TestCase):
         self.assertEqual(execution_status, "COPIED")
 
 
+    def test_group_close_rolls_back_when_final_group_status_write_fails(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+        opened = self.open_group_trade(group_id, "GROUP-FINAL-WRITE-ROLLBACK-001")
+        self.assertEqual(opened.status_code, 200)
+        source_trade_id = opened.json()["trade_id"]
+
+        with database.get_connection() as connection:
+            copied = connection.execute(
+                "SELECT trade_id FROM trades WHERE copied_from_trade_id = ?",
+                (source_trade_id,),
+            ).fetchone()
+            self.assertIsNotNone(copied)
+            copied_trade_id = copied["trade_id"]
+            connection.execute(
+                """
+                CREATE TRIGGER fail_group_final_status_write
+                BEFORE UPDATE OF status ON position_groups
+                WHEN OLD.group_id = ?
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated final group status write failure');
+                END
+                """.replace("WHEN OLD.group_id = ?", f"WHEN OLD.group_id = '{group_id}'")
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_position_group_with_copies(
+                group_id,
+                4010,
+                spread_cost=0.12,
+                commission_cost=0.23,
+                swap_cost=0.34,
+                other_costs=0.45,
+            )
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, realized_pnl, gross_realized_pnl,
+                       spread_cost, commission_cost, swap_cost, other_costs
+                FROM trades WHERE trade_id IN (?, ?)
+                """,
+                (source_trade_id, copied_trade_id),
+            ).fetchall()
+            group_status = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()["status"]
+            execution_status = connection.execute(
+                "SELECT status FROM copy_executions WHERE copied_trade_id = ?",
+                (copied_trade_id,),
+            ).fetchone()["status"]
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status"] == "OPEN" for row in rows))
+        self.assertTrue(all(row["realized_pnl"] == 0 for row in rows))
+        self.assertTrue(all(row["gross_realized_pnl"] is None for row in rows))
+        self.assertTrue(all(
+            (row["spread_cost"], row["commission_cost"], row["swap_cost"], row["other_costs"])
+            == (0, 0, 0, 0)
+            for row in rows
+        ))
+        self.assertEqual(self.account_balance("GROUP-001"), 10000)
+        self.assertEqual(self.account_balance("GROUP-FOLLOWER-001"), 10000)
+        self.assertEqual(group_status, "OPEN")
+        self.assertEqual(execution_status, "COPIED")
+
+    def test_group_close_rollback_state_survives_database_reinitialization(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+        opened = self.open_group_trade(group_id, "GROUP-RESTART-ROLLBACK-001")
+        self.assertEqual(opened.status_code, 200)
+        source_trade_id = opened.json()["trade_id"]
+
+        with database.get_connection() as connection:
+            copied = connection.execute(
+                "SELECT trade_id FROM trades WHERE copied_from_trade_id = ?",
+                (source_trade_id,),
+            ).fetchone()
+            copied_trade_id = copied["trade_id"]
+            connection.execute(
+                f"""
+                CREATE TRIGGER fail_restart_follower_close
+                BEFORE UPDATE OF status ON trades
+                WHEN OLD.trade_id = '{copied_trade_id}'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated close failure before restart');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_position_group_with_copies(group_id, 4010)
+
+        # Re-run startup migrations against the same on-disk database,
+        # simulating the database initialization path after an application restart.
+        init_db()
+
+        with database.get_connection() as connection:
+            source_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (source_trade_id,),
+            ).fetchone()["status"]
+            copied_status = connection.execute(
+                "SELECT status FROM trades WHERE trade_id = ?",
+                (copied_trade_id,),
+            ).fetchone()["status"]
+            group_status = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()["status"]
+            execution_status = connection.execute(
+                "SELECT status FROM copy_executions WHERE copied_trade_id = ?",
+                (copied_trade_id,),
+            ).fetchone()["status"]
+
+        self.assertEqual(source_status, "OPEN")
+        self.assertEqual(copied_status, "OPEN")
+        self.assertEqual(group_status, "OPEN")
+        self.assertEqual(execution_status, "COPIED")
+        self.assertEqual(self.account_balance("GROUP-001"), 10000)
+        self.assertEqual(self.account_balance("GROUP-FOLLOWER-001"), 10000)
+
+    def test_successful_group_close_ledger_and_balances_survive_database_reinitialization(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+        opened = self.open_group_trade(group_id, "GROUP-RESTART-COMMIT-001")
+        self.assertEqual(opened.status_code, 200)
+        source_trade_id = opened.json()["trade_id"]
+
+        response = self.client.post(
+            f"/groups/{group_id}/close",
+            json={
+                "exit_price": 4010,
+                "spread_cost": 0.12,
+                "commission_cost": 0.23,
+                "swap_cost": 0.34,
+                "other_costs": 0.45,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        init_db()
+
+        with database.get_connection() as connection:
+            group_status = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()["status"]
+            ledger = connection.execute(
+                """
+                SELECT status, realized_pnl, gross_realized_pnl,
+                       spread_cost, commission_cost, swap_cost, other_costs
+                FROM trades WHERE trade_id = ?
+                """,
+                (source_trade_id,),
+            ).fetchone()
+
+        self.assertEqual(group_status, "CLOSED")
+        self.assertEqual(ledger["status"], "CLOSED")
+        self.assertAlmostEqual(ledger["spread_cost"], 0.12)
+        self.assertAlmostEqual(ledger["commission_cost"], 0.23)
+        self.assertAlmostEqual(ledger["swap_cost"], 0.34)
+        self.assertAlmostEqual(ledger["other_costs"], 0.45)
+        self.assertAlmostEqual(
+            ledger["realized_pnl"],
+            ledger["gross_realized_pnl"] - 1.14,
+        )
+        self.assertAlmostEqual(
+            self.account_balance("GROUP-001"),
+            10000 + ledger["realized_pnl"],
+        )
+        self.assertAlmostEqual(self.account_balance("GROUP-FOLLOWER-001"), 10050)
+
+
 if __name__ == "__main__":
     unittest.main()
