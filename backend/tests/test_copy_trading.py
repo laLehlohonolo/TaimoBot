@@ -635,6 +635,122 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.assertAlmostEqual(balances["FOLLOWER-001"], 5000 + copy_net)
 
 
+    def test_group_close_rolls_back_all_trades_balances_and_copy_records_on_midflight_failure(self):
+        self.create_relationship("REL-GROUP-ROLLBACK")
+        group = create_position_group("SOURCE-001", "XAUUSD", "BUY")
+        first = open_paper_trade(
+            account_id="SOURCE-001",
+            client_order_id="GROUP-ROLLBACK-ORDER-1",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group["group_id"],
+        )
+        second = open_paper_trade(
+            account_id="SOURCE-001",
+            client_order_id="GROUP-ROLLBACK-ORDER-2",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3980,
+            symbol="XAUUSD",
+            position_group_id=group["group_id"],
+        )
+        first_copy = replicate_open_trade(first["trade_id"])
+        second_copy = replicate_open_trade(second["trade_id"])
+        self.assertEqual(first_copy["successful_copies"], 1)
+        self.assertEqual(second_copy["successful_copies"], 1)
+
+        with database.get_connection() as connection:
+            before_balances = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    "SELECT account_id, balance FROM paper_accounts"
+                ).fetchall()
+            }
+            before_executions = [
+                tuple(row) for row in connection.execute(
+                    """
+                    SELECT source_trade_id, status, lease_token, lease_expires_at
+                    FROM copy_executions
+                    WHERE source_trade_id IN (?, ?)
+                    ORDER BY source_trade_id
+                    """,
+                    (first["trade_id"], second["trade_id"])
+                ).fetchall()
+            ]
+            connection.execute(
+                """
+                CREATE TRIGGER fail_second_group_trade_close
+                BEFORE UPDATE OF status ON trades
+                WHEN OLD.trade_id = ?
+                  AND NEW.status = 'CLOSED'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected mid-flight close failure');
+                END
+                """,
+                (second["trade_id"],)
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_position_group_with_copies(
+                group["group_id"],
+                4010,
+                spread_cost=0.30,
+                commission_cost=0.06,
+            )
+
+        with database.get_connection() as connection:
+            trade_states = [
+                tuple(row) for row in connection.execute(
+                    """
+                    SELECT trade_id, status, realized_pnl, gross_realized_pnl,
+                           spread_cost, commission_cost
+                    FROM trades
+                    WHERE trade_id IN (?, ?, ?, ?)
+                    ORDER BY trade_id
+                    """,
+                    (
+                        first["trade_id"],
+                        second["trade_id"],
+                        first_copy["copies"][0]["copied_trade_id"],
+                        second_copy["copies"][0]["copied_trade_id"],
+                    )
+                ).fetchall()
+            ]
+            after_balances = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    "SELECT account_id, balance FROM paper_accounts"
+                ).fetchall()
+            }
+            group_status = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group["group_id"],)
+            ).fetchone()["status"]
+            after_executions = [
+                tuple(row) for row in connection.execute(
+                    """
+                    SELECT source_trade_id, status, lease_token, lease_expires_at
+                    FROM copy_executions
+                    WHERE source_trade_id IN (?, ?)
+                    ORDER BY source_trade_id
+                    """,
+                    (first["trade_id"], second["trade_id"])
+                ).fetchall()
+            ]
+
+        self.assertEqual(len(trade_states), 4)
+        self.assertTrue(all(row[1] == "OPEN" for row in trade_states))
+        self.assertTrue(all(row[2] == 0 for row in trade_states))
+        self.assertTrue(all(row[3] is None for row in trade_states))
+        self.assertTrue(all(row[4] == 0 for row in trade_states))
+        self.assertTrue(all(row[5] == 0 for row in trade_states))
+        self.assertEqual(after_balances, before_balances)
+        self.assertEqual(group_status, "OPEN")
+        self.assertEqual(after_executions, before_executions)
+
+
 if __name__ == "__main__":
     unittest.main()
  
