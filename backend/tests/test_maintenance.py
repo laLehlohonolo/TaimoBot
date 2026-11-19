@@ -2110,6 +2110,32 @@ class DailyMaintenanceTests(unittest.TestCase):
             real_close(guard_fd)
 
 
+    def test_restore_lock_guard_close_failure_retains_ownership_and_blocks_database(self):
+        import app.maintenance as maintenance_module
+
+        lock = acquire_restore_lock("b" * 32)
+        guard_fd = maintenance_module._RESTORE_GUARD_FDS[lock["lock_token"]]
+        real_close = os.close
+
+        def fail_guard_close(descriptor):
+            if descriptor == guard_fd:
+                raise OSError("simulated process guard close failure")
+            return real_close(descriptor)
+
+        with patch("app.maintenance.os.close", side_effect=fail_guard_close):
+            with self.assertRaisesRegex(RuntimeError, "process guard close failed"):
+                release_restore_lock(lock["lock_token"])
+
+        self.assertFalse(Path(lock["lock_file"]).exists())
+        self.assertIn(lock["lock_token"], maintenance_module._RESTORE_GUARD_FDS)
+        with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
+            database.get_connection()
+
+        # Test-only cleanup: emulate process teardown after fail-closed state.
+        maintenance_module._RESTORE_GUARD_FDS.pop(lock["lock_token"])
+        real_close(guard_fd)
+
+
     def test_restore_lock_refuses_to_start_while_application_connection_is_open(self):
         from app.database import get_connection, open_connection_count
 
