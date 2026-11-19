@@ -134,5 +134,30 @@ class AdaptiveProfitTakingTests(unittest.TestCase):
             evaluate_group_profit([])
 
 
+    def test_group_aggregate_preserves_precision_beyond_rounded_leg_display(self):
+        result = evaluate_group_profit(
+            [
+                {
+                    "side": "BUY",
+                    "entry_price": 100,
+                    "quantity": 1,
+                    "current_price": 100.000000006,
+                },
+                {
+                    "side": "BUY",
+                    "entry_price": 100,
+                    "quantity": 1,
+                    "current_price": 100.000000006,
+                },
+            ]
+        )
+
+        # Each displayed leg rounds to 1e-8, but the true aggregate is
+        # 1.2e-8 and must be rounded only after summing full precision.
+        self.assertEqual(result["positions"][0]["gross_pnl"], 1e-8)
+        self.assertEqual(result["gross_pnl"], 1e-8)
+        self.assertAlmostEqual(result["net_pnl"], 1e-8)
+
+
 if __name__ == "__main__":
     unittest.main()
