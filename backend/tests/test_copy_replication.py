@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -1056,6 +1057,247 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertIsNone(execution["lease_token"])
         self.assertIsNone(execution["lease_expires_at"])
 
+
+
+    def create_three_follower_source(self, order_id):
+        for account_id, balance in (("FOLLOWER_TWO", 7000), ("FOLLOWER_THREE", 9000)):
+            create_paper_account(account_id, balance, owner_user_id=self.user_id)
+            response = self.client.post(
+                f"/accounts/{account_id}/copy-relationships",
+                json={"source_account_id": "SOURCE"}
+            )
+            self.assertEqual(response.status_code, 200)
+
+        source = self.create_source_trade(order_id)
+        replication = replicate_open_trade(source["trade_id"])
+        self.assertEqual(replication["successful_copies"], 3)
+        with database.get_connection() as connection:
+            copies = connection.execute(
+                """
+                SELECT trade_id, account_id FROM trades
+                WHERE copied_from_trade_id = ?
+                ORDER BY account_id
+                """,
+                (source["trade_id"],)
+            ).fetchall()
+        self.assertEqual(len(copies), 3)
+        return source, {row["account_id"]: row["trade_id"] for row in copies}
+
+    def assert_multi_follower_close_rolled_back(self, source_trade_id, copied_ids):
+        with database.get_connection() as connection:
+            source = connection.execute(
+                "SELECT status, realized_pnl, gross_realized_pnl FROM trades WHERE trade_id = ?",
+                (source_trade_id,)
+            ).fetchone()
+            copies = connection.execute(
+                """
+                SELECT trade_id, status, realized_pnl, gross_realized_pnl
+                FROM trades WHERE trade_id IN (?, ?, ?)
+                """,
+                tuple(copied_ids.values())
+            ).fetchall()
+            executions = connection.execute(
+                """
+                SELECT status FROM copy_executions WHERE source_trade_id = ?
+                """,
+                (source_trade_id,)
+            ).fetchall()
+        self.assertEqual(source["status"], "OPEN")
+        self.assertEqual(source["realized_pnl"], 0)
+        self.assertIsNone(source["gross_realized_pnl"])
+        self.assertEqual(len(copies), 3)
+        self.assertTrue(all(row["status"] == "OPEN" for row in copies))
+        self.assertTrue(all(row["realized_pnl"] == 0 for row in copies))
+        self.assertTrue(all(row["gross_realized_pnl"] is None for row in copies))
+        self.assertEqual(len(executions), 3)
+        self.assertTrue(all(row["status"] == "COPIED" for row in executions))
+
+    def create_close_failure_trigger(self, trigger_name, table, update_column, where):
+        with database.get_connection() as connection:
+            connection.execute(
+                f"""
+                CREATE TRIGGER {trigger_name}
+                BEFORE UPDATE OF {update_column} ON {table}
+                WHEN {where}
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated multi-follower close write failure');
+                END
+                """
+            )
+
+
+    def test_multi_follower_close_rolls_back_if_first_follower_balance_write_fails(self):
+        source, copies = self.create_three_follower_source("MULTI-ROLLBACK-FIRST-BALANCE")
+        before = {
+            "SOURCE": 10000, "FOLLOWER": 5000,
+            "FOLLOWER_TWO": 7000, "FOLLOWER_THREE": 9000
+        }
+        self.create_close_failure_trigger(
+            "fail_multi_first_follower_balance", "paper_accounts", "balance",
+            "OLD.account_id = 'FOLLOWER'"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+        self.assert_multi_follower_close_rolled_back(source["trade_id"], copies)
+        with database.get_connection() as connection:
+            balances = dict(connection.execute(
+                "SELECT account_id, balance FROM paper_accounts"
+            ).fetchall())
+        for account_id, balance in before.items():
+            self.assertEqual(balances[account_id], balance)
+
+    def test_multi_follower_close_rolls_back_if_last_follower_balance_write_fails(self):
+        source, copies = self.create_three_follower_source("MULTI-ROLLBACK-LAST-BALANCE")
+        before = {"SOURCE": 10000, "FOLLOWER": 5000, "FOLLOWER_TWO": 7000, "FOLLOWER_THREE": 9000}
+        self.create_close_failure_trigger(
+            "fail_multi_last_follower_balance", "paper_accounts", "balance",
+            "OLD.account_id = 'FOLLOWER_TWO'"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+        self.assert_multi_follower_close_rolled_back(source["trade_id"], copies)
+        with database.get_connection() as connection:
+            balances = dict(connection.execute(
+                "SELECT account_id, balance FROM paper_accounts"
+            ).fetchall())
+        for account_id, balance in before.items():
+            self.assertEqual(balances[account_id], balance)
+
+    def test_multi_follower_close_rolls_back_if_a_copy_trade_write_fails(self):
+        source, copies = self.create_three_follower_source("MULTI-ROLLBACK-COPY-TRADE")
+        target_id = copies["FOLLOWER_TWO"]
+        self.create_close_failure_trigger(
+            "fail_multi_copy_trade_close", "trades", "status",
+            f"OLD.trade_id = '{target_id}'"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+        self.assert_multi_follower_close_rolled_back(source["trade_id"], copies)
+        self.assertEqual(self.account_balance_for("SOURCE"), 10000)
+        self.assertEqual(self.account_balance_for("FOLLOWER"), 5000)
+        self.assertEqual(self.account_balance_for("FOLLOWER_TWO"), 7000)
+        self.assertEqual(self.account_balance_for("FOLLOWER_THREE"), 9000)
+
+    def test_multi_follower_close_rolls_back_if_copy_execution_finalization_fails(self):
+        source, copies = self.create_three_follower_source("MULTI-ROLLBACK-EXECUTION")
+        target_id = copies["FOLLOWER_TWO"]
+        self.create_close_failure_trigger(
+            "fail_multi_execution_finalize", "copy_executions", "status",
+            f"OLD.copied_trade_id = '{target_id}'"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+        self.assert_multi_follower_close_rolled_back(source["trade_id"], copies)
+        for account_id, balance in (("SOURCE", 10000), ("FOLLOWER", 5000), ("FOLLOWER_TWO", 7000), ("FOLLOWER_THREE", 9000)):
+            self.assertEqual(self.account_balance_for(account_id), balance)
+
+    def test_multi_follower_close_rolls_back_if_source_trade_write_fails(self):
+        source, copies = self.create_three_follower_source("MULTI-ROLLBACK-SOURCE-TRADE")
+        self.create_close_failure_trigger(
+            "fail_multi_source_trade_close", "trades", "status",
+            f"OLD.trade_id = '{source['trade_id']}'"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+        self.assert_multi_follower_close_rolled_back(source["trade_id"], copies)
+
+    def test_multi_follower_close_retry_succeeds_after_balance_failure_is_removed(self):
+        source, copies = self.create_three_follower_source("MULTI-RETRY-AFTER-ROLLBACK")
+        self.create_close_failure_trigger(
+            "fail_multi_retry_balance", "paper_accounts", "balance",
+            "OLD.account_id = 'FOLLOWER_TWO'"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+        self.assert_multi_follower_close_rolled_back(source["trade_id"], copies)
+        with database.get_connection() as connection:
+            connection.execute("DROP TRIGGER fail_multi_retry_balance")
+        result = close_trade_with_copies(source["trade_id"], 4010)
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertEqual(result["closed_copies"], 3)
+        self.assertEqual(len(result["copy_closures"]), 3)
+
+    def test_multi_follower_close_rejects_duplicate_retry_without_double_credit(self):
+        source, copies = self.create_three_follower_source("MULTI-DUPLICATE-CLOSE")
+        result = close_trade_with_copies(source["trade_id"], 4010)
+        self.assertEqual(result["closed_copies"], 3)
+        balances_after_close = {
+            account_id: self.account_balance_for(account_id)
+            for account_id in ("SOURCE", "FOLLOWER", "FOLLOWER_TWO", "FOLLOWER_THREE")
+        }
+        with self.assertRaisesRegex(ValueError, "Only open trades"):
+            close_trade_with_copies(source["trade_id"], 4010)
+        for account_id, balance in balances_after_close.items():
+            self.assertEqual(self.account_balance_for(account_id), balance)
+
+    def test_multi_follower_close_still_closes_existing_copies_when_relationships_paused(self):
+        source, copies = self.create_three_follower_source("MULTI-CLOSE-PAUSED-RELATIONSHIPS")
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE copy_relationships SET status = 'PAUSED' WHERE source_account_id = 'SOURCE'"
+            )
+        result = close_trade_with_copies(source["trade_id"], 4010)
+        self.assertEqual(result["closed_copies"], 3)
+        with database.get_connection() as connection:
+            statuses = connection.execute(
+                "SELECT status FROM trades WHERE copied_from_trade_id = ?",
+                (source["trade_id"],)
+            ).fetchall()
+        self.assertEqual(len(statuses), 3)
+        self.assertTrue(all(row["status"] == "CLOSED" for row in statuses))
+
+    def test_multi_follower_close_rejects_negative_follower_balance_without_partial_close(self):
+        source, copies = self.create_three_follower_source("MULTI-NEGATIVE-FOLLOWER-BALANCE")
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE paper_accounts SET balance = 1 WHERE account_id = 'FOLLOWER_TWO'"
+            )
+        with self.assertRaisesRegex(ValueError, "negative"):
+            close_trade_with_copies(source["trade_id"], 3990)
+        self.assert_multi_follower_close_rolled_back(source["trade_id"], copies)
+        self.assertEqual(self.account_balance_for("SOURCE"), 10000)
+        self.assertEqual(self.account_balance_for("FOLLOWER"), 5000)
+        self.assertEqual(self.account_balance_for("FOLLOWER_TWO"), 1)
+        self.assertEqual(self.account_balance_for("FOLLOWER_THREE"), 9000)
+
+    def test_multi_follower_close_preserves_source_costs_once_after_retry(self):
+        source, copies = self.create_three_follower_source("MULTI-COST-RETRY")
+        self.create_close_failure_trigger(
+            "fail_multi_cost_retry_balance", "paper_accounts", "balance",
+            "OLD.account_id = 'FOLLOWER_THREE'"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(
+                source["trade_id"], 4010, spread_cost=1.1,
+                commission_cost=0.8, swap_cost=0.6, other_costs=0.5
+            )
+        self.assert_multi_follower_close_rolled_back(source["trade_id"], copies)
+        with database.get_connection() as connection:
+            connection.execute("DROP TRIGGER fail_multi_cost_retry_balance")
+        result = close_trade_with_copies(
+            source["trade_id"], 4010, spread_cost=1.1,
+            commission_cost=0.8, swap_cost=0.6, other_costs=0.5
+        )
+        self.assertEqual(result["closed_copies"], 3)
+        with database.get_connection() as connection:
+            source_row = connection.execute(
+                "SELECT * FROM trades WHERE trade_id = ?", (source["trade_id"],)
+            ).fetchone()
+            follower_rows = connection.execute(
+                "SELECT * FROM trades WHERE copied_from_trade_id = ?",
+                (source["trade_id"],)
+            ).fetchall()
+        self.assertAlmostEqual(
+            source_row["realized_pnl"],
+            source_row["gross_realized_pnl"] - 3.0,
+            places=6
+        )
+        self.assertTrue(all(row["realized_pnl"] == row["gross_realized_pnl"] for row in follower_rows))
+        self.assertTrue(all(
+            (row["spread_cost"], row["commission_cost"], row["swap_cost"], row["other_costs"])
+            == (0, 0, 0, 0)
+            for row in follower_rows
+        ))
 
     def test_source_close_reconciles_multiple_followers_independently(self):
         create_paper_account("FOLLOWER_TWO", 7000, owner_user_id=self.user_id)
