@@ -1406,6 +1406,81 @@ class PaperTradingTests(unittest.TestCase):
         )
         self.assertAlmostEqual(close_response.json()["realized_pnl"], source_net, places=7)
 
+    def test_group_preview_and_close_match_with_uneven_quantity_cost_allocation(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        first = self.open_trade("GROUP-UNEQUAL-QUANTITY-1")
+        second = self.open_trade("GROUP-UNEQUAL-QUANTITY-2")
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE trades SET position_group_id = ?, quantity = ? WHERE trade_id = ?",
+                (group_id, 0.013, first["trade_id"]),
+            )
+            connection.execute(
+                "UPDATE trades SET position_group_id = ?, quantity = ? WHERE trade_id = ?",
+                (group_id, 0.027, second["trade_id"]),
+            )
+
+        costs = {
+            "spread_cost": 0.123456789,
+            "commission_cost": 0.234567891,
+            "swap_cost": 0.345678912,
+            "other_costs": 0.456789123,
+        }
+        preview_response = self.client.post(
+            f"/groups/{group_id}/profit-preview",
+            json={"current_price": 4001.123456789, **costs},
+        )
+        self.assertEqual(preview_response.status_code, 200)
+        preview = preview_response.json()
+
+        close_response = self.client.post(
+            f"/groups/{group_id}/close",
+            json={"exit_price": 4001.123456789, **costs},
+        )
+        self.assertEqual(close_response.status_code, 200)
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_id, realized_pnl, gross_realized_pnl,
+                       spread_cost, commission_cost, swap_cost, other_costs
+                FROM trades
+                WHERE position_group_id = ?
+                ORDER BY trade_id
+                """,
+                (group_id,),
+            ).fetchall()
+
+        self.assertEqual(len(rows), 2)
+        self.assertAlmostEqual(
+            sum(row["realized_pnl"] for row in rows),
+            preview["net_pnl"],
+            places=7,
+        )
+        self.assertAlmostEqual(
+            sum(row["gross_realized_pnl"] for row in rows),
+            preview["gross_pnl"],
+            places=7,
+        )
+        for field, requested in costs.items():
+            self.assertAlmostEqual(
+                sum(row[field] for row in rows),
+                requested,
+                places=12,
+            )
+        self.assertAlmostEqual(
+            close_response.json()["realized_pnl"],
+            preview["net_pnl"],
+            places=7,
+        )
+
+
     def test_group_profit_preview_rejects_group_without_open_positions(self):
         group_response = self.client.post(
             "/accounts/TEST-001/groups",
