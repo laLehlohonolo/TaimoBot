@@ -1,4 +1,5 @@
 import tempfile
+import sqlite3
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -10,7 +11,7 @@ from app.database import init_db
 from app.auth import register_user, create_session
 from app.execution import create_paper_account, open_paper_trade
 from app.main import app
-from app.copy_trading import replicate_open_trade
+from app.copy_trading import replicate_open_trade, close_trade_with_copies
 
 
 class CopyTradeClosingTests(unittest.TestCase):
@@ -195,6 +196,36 @@ class CopyTradeClosingTests(unittest.TestCase):
         self.assertEqual(second.status_code, 400)
         self.assertEqual(self.account_balance("SOURCE"), 10050)
         self.assertEqual(self.account_balance("FOLLOWER"), 5025)
+
+    def test_single_source_close_rolls_back_every_write_when_copy_update_fails(self):
+        source, copied_id = self.create_copied_trade()
+
+        with database.get_connection() as connection:
+            connection.execute(
+                f"""
+                CREATE TRIGGER fail_follower_single_close
+                BEFORE UPDATE OF status ON trades
+                WHEN OLD.trade_id = '{copied_id}'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated follower close failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+
+        self.assertEqual(self.trade_status(source["trade_id"]), "OPEN")
+        self.assertEqual(self.trade_status(copied_id), "OPEN")
+        self.assertEqual(self.account_balance("SOURCE"), 10000)
+        self.assertEqual(self.account_balance("FOLLOWER"), 5000)
+
+        with database.get_connection() as connection:
+            execution = connection.execute(
+                "SELECT status FROM copy_executions WHERE copied_trade_id = ?",
+                (copied_id,),
+            ).fetchone()
+        self.assertEqual(execution["status"], "COPIED")
 
     def test_source_and_copies_remain_open_if_any_balance_would_go_negative(self):
         source, copied_id = self.create_copied_trade()
