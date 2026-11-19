@@ -85,6 +85,15 @@ class PositionGroupTests(unittest.TestCase):
             }
         )
 
+    def account_balance(self, account_id):
+        with database.get_connection() as connection:
+            row = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        return float(row["balance"])
+
     def test_api_creates_position_group(self):
         group_id = self.create_group()
 
