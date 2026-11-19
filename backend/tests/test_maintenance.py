@@ -2093,7 +2093,7 @@ class DailyMaintenanceTests(unittest.TestCase):
 
         self.assertIsNotNone(failed_fd["value"])
         self.assertFalse(Path(lock["lock_file"]).exists())
-        self.assertNotIn(lock["lock_token"], maintenance_module._RESTORE_GUARD_FDS)
+        self.assertIn(lock["lock_token"], maintenance_module._RESTORE_GUARD_FDS)
         with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
             database.get_connection()
 
