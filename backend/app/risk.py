@@ -29,9 +29,12 @@ class RiskError(ValueError):
 
 def validate_positive_number(value, field_name):
     """Validate a finite positive number."""
+    if isinstance(value, bool):
+        raise RiskError(f"{field_name} must be a valid number.")
+
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise RiskError(f"{field_name} must be a valid number.")
 
     if not math.isfinite(number) or number <= 0:
@@ -42,9 +45,12 @@ def validate_positive_number(value, field_name):
 
 def validate_non_negative_number(value, field_name):
     """Validate a finite number that may be zero."""
+    if isinstance(value, bool):
+        raise RiskError(f"{field_name} must be a valid number.")
+
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise RiskError(f"{field_name} must be a valid number.")
 
     if not math.isfinite(number) or number < 0:
