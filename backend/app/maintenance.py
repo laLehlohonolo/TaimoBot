@@ -1459,6 +1459,7 @@ def _verify_restore_lock_recovery_audit_fd(descriptor: int) -> dict:
         raise RuntimeError("Restore lock recovery audit has an incomplete final record.")
     previous = "0" * 64
     count = 0
+    records = []
     try:
         for line in raw.splitlines():
             record = json.loads(line.decode("utf-8"), object_pairs_hook=_restore_journal_object_without_duplicate_keys, parse_constant=_reject_restore_journal_json_constant)
@@ -1483,7 +1484,28 @@ def _verify_restore_lock_recovery_audit_fd(descriptor: int) -> dict:
             if record.get("record_sha256") != digest:
                 raise ValueError("recovery audit record fingerprint mismatch")
             previous = digest
+            records.append(record)
             count += 1
+
+        # Recovery is a two-event transaction. A STARTED without COMPLETE is
+        # an interrupted operation and must never be silently resumed by a
+        # later cleanup attempt. COMPLETE must close the exact same identity.
+        pending = None
+        identity_fields = ("operator_id", "incident_ref", "plan_id", "marker_sha256", "marker_file")
+        for record in records:
+            event = record["event"]
+            if event == "RESTORE_LOCK_RECOVERY_STARTED":
+                if pending is not None:
+                    raise ValueError("duplicate STARTED before prior recovery COMPLETE")
+                pending = record
+            else:
+                if pending is None:
+                    raise ValueError("COMPLETE event has no matching STARTED")
+                if any(record.get(field) != pending.get(field) for field in identity_fields):
+                    raise ValueError("recovery COMPLETE identity does not match STARTED")
+                pending = None
+        if pending is not None:
+            raise ValueError("unmatched STARTED recovery requires operator review")
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError) as error:
         raise RuntimeError(f"Restore lock recovery audit integrity verification failed: {str(error)[:160]}") from error
     return {"record_count": count, "last_record_sha256": previous}
