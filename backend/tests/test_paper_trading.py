@@ -1264,6 +1264,86 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(sum(row["realized_pnl"] for row in states), 0)
         self.assertEqual(balance, 10000)
 
+    def test_group_profit_preview_matches_actual_close_ledger_and_balance(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        first = self.open_trade(
+            "GROUP-PREVIEW-CLOSE-PARITY-1",
+            position_group_id=group_id,
+        )
+        second = self.open_trade(
+            "GROUP-PREVIEW-CLOSE-PARITY-2",
+            position_group_id=group_id,
+        )
+        costs = {
+            "spread_cost": 0.20,
+            "commission_cost": 0.10,
+            "swap_cost": 0.10,
+            "other_costs": 0.10,
+        }
+        exit_price = 4001.0
+
+        preview_response = self.client.post(
+            f"/groups/{group_id}/profit-preview",
+            json={"current_price": exit_price, **costs},
+        )
+        self.assertEqual(preview_response.status_code, 200)
+        preview = preview_response.json()
+
+        with database.get_connection() as connection:
+            balance_before = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()["balance"]
+
+        close_response = self.client.post(
+            f"/groups/{group_id}/close",
+            json={"exit_price": exit_price, **costs},
+        )
+        self.assertEqual(close_response.status_code, 200)
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_id, status, realized_pnl, gross_realized_pnl,
+                       spread_cost, commission_cost, swap_cost, other_costs
+                FROM trades
+                WHERE position_group_id = ?
+                ORDER BY trade_id
+                """,
+                (group_id,),
+            ).fetchall()
+            balance_after = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()["balance"]
+
+        source_net = sum(row["realized_pnl"] for row in rows)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status"] == "CLOSED" for row in rows))
+        self.assertAlmostEqual(preview["net_pnl"], source_net, places=7)
+        self.assertAlmostEqual(
+            balance_after - balance_before, preview["net_pnl"], places=7
+        )
+        self.assertAlmostEqual(
+            sum(row["gross_realized_pnl"] for row in rows),
+            preview["gross_pnl"],
+            places=7,
+        )
+        self.assertAlmostEqual(
+            sum(
+                row["spread_cost"] + row["commission_cost"]
+                + row["swap_cost"] + row["other_costs"]
+                for row in rows
+            ),
+            preview["total_costs"],
+            places=7,
+        )
+        self.assertAlmostEqual(close_response.json()["realized_pnl"], source_net, places=7)
+
     def test_group_profit_preview_rejects_group_without_open_positions(self):
         group_response = self.client.post(
             "/accounts/TEST-001/groups",
