@@ -3474,7 +3474,9 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertIn("changed while", rejected.exception.detail)
             with database.get_connection() as connection:
                 self.assertEqual(
-                    connection.execute("SELECT COUNT(*) FROM maintenance_restore_plans").fetchone()[0],
+                    connection.execute(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_restore_plans'"
+                    ).fetchone()[0],
                     0,
                 )
 
