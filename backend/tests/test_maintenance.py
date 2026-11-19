@@ -4331,7 +4331,9 @@ class DailyMaintenanceTests(unittest.TestCase):
     def test_recovery_journal_rejects_complete_without_started(self):
         audit = Path(self.temp_dir.name) / "pair-orphan-complete.jsonl"
         rows = self._create_recovery_audit_pair(audit)
-        audit.write_text(json.dumps(rows[1], sort_keys=True) + "\n", encoding="utf-8")
+        orphan = dict(rows[1], sequence=1, previous_record_sha256="0" * 64)
+        orphan["record_sha256"] = maintenance_module._restore_lock_recovery_record_digest(orphan)
+        audit.write_text(json.dumps(orphan, sort_keys=True) + "\n", encoding="utf-8")
         with audit.open("rb") as stream:
             with self.assertRaisesRegex(RuntimeError, "COMPLETE event has no matching STARTED"):
                 maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
