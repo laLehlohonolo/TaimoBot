@@ -1561,6 +1561,7 @@ def release_restore_lock(lock_token: str) -> dict:
     lock_path = restore_lock_path()
     marker_fd = None
     directory_fd = None
+    marker_unlinked = False
     try:
         marker_fd = os.open(
             str(lock_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -1596,9 +1597,15 @@ def release_restore_lock(lock_token: str) -> dict:
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
         )
         os.unlink(lock_path)
+        marker_unlinked = True
         os.fsync(directory_fd)
     except OSError as error:
-        raise RuntimeError("Restore lock release could not be completed safely; lock remains active.") from error
+        state = (
+            "marker removal was not confirmed durable; process guard remains held."
+            if marker_unlinked
+            else "marker remains active and process guard remains held."
+        )
+        raise RuntimeError(f"Restore lock release could not be completed safely; {state}") from error
     finally:
         if marker_fd is not None:
             os.close(marker_fd)
