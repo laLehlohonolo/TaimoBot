@@ -1059,6 +1059,14 @@ class CopyTradeReplicationTests(unittest.TestCase):
 
 
 
+    def account_balance_for(self, account_id):
+        with database.get_connection() as connection:
+            row = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = ?",
+                (account_id,)
+            ).fetchone()
+        return row["balance"]
+
     def create_three_follower_source(self, order_id):
         for account_id, balance in (("FOLLOWER_TWO", 7000), ("FOLLOWER_THREE", 9000)):
             create_paper_account(account_id, balance, owner_user_id=self.user_id)
@@ -1233,9 +1241,15 @@ class CopyTradeReplicationTests(unittest.TestCase):
     def test_multi_follower_close_still_closes_existing_copies_when_relationships_paused(self):
         source, copies = self.create_three_follower_source("MULTI-CLOSE-PAUSED-RELATIONSHIPS")
         with database.get_connection() as connection:
-            connection.execute(
-                "UPDATE copy_relationships SET status = 'PAUSED' WHERE source_account_id = 'SOURCE'"
-            )
+            relationship_ids = [
+                row["relationship_id"]
+                for row in connection.execute(
+                    "SELECT relationship_id FROM copy_relationships WHERE source_account_id = 'SOURCE'"
+                ).fetchall()
+            ]
+        for relationship_id in relationship_ids:
+            response = self.client.post(f"/copy-relationships/{relationship_id}/pause")
+            self.assertEqual(response.status_code, 200)
         result = close_trade_with_copies(source["trade_id"], 4010)
         self.assertEqual(result["closed_copies"], 3)
         with database.get_connection() as connection:
