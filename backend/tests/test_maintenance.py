@@ -4231,7 +4231,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         recover_abandoned_restore_lock("operator", "INC-TAMPER-1", confirm=True, audit_path=audit)
         rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
         rows[0]["operator_id"] = "tampered"
-        audit.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
+        audit.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         marker = self._write_abandoned_restore_marker("c" * 32)
         with self.assertRaisesRegex(RuntimeError, "integrity verification"):
             recover_abandoned_restore_lock("operator", "INC-TAMPER-2", confirm=True, audit_path=audit)
@@ -4248,7 +4248,7 @@ class DailyMaintenanceTests(unittest.TestCase):
 
     def test_recovery_refuses_duplicate_json_keys_in_audit(self):
         audit = Path(self.temp_dir.name) / "recovery-duplicate.jsonl"
-        audit.write_text('{"sequence":1,"sequence":1}\\n', encoding="utf-8")
+        audit.write_text('{"sequence":1,"sequence":1}\n', encoding="utf-8")
         marker = self._write_abandoned_restore_marker()
         with self.assertRaisesRegex(RuntimeError, "duplicate JSON object key"):
             recover_abandoned_restore_lock("operator", "INC-DUPLICATE", confirm=True, audit_path=audit)
@@ -4260,7 +4260,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         recover_abandoned_restore_lock("operator", "INC-CHAIN-A", confirm=True, audit_path=audit)
         rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
         rows[1]["previous_record_sha256"] = "0" * 64
-        audit.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
+        audit.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         marker = self._write_abandoned_restore_marker("d" * 32)
         with self.assertRaisesRegex(RuntimeError, "hash-chain link mismatch"):
             recover_abandoned_restore_lock("operator", "INC-CHAIN-B", confirm=True, audit_path=audit)
@@ -4272,7 +4272,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         recover_abandoned_restore_lock("operator", "INC-DB-A", confirm=True, audit_path=audit)
         rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
         rows[0]["database_changed"] = True
-        audit.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
+        audit.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         marker = self._write_abandoned_restore_marker("e" * 32)
         with self.assertRaisesRegex(RuntimeError, "integrity verification"):
             recover_abandoned_restore_lock("operator", "INC-DB-B", confirm=True, audit_path=audit)
@@ -4280,7 +4280,7 @@ class DailyMaintenanceTests(unittest.TestCase):
 
     def test_recovery_refuses_unknown_audit_event(self):
         audit = Path(self.temp_dir.name) / "recovery-unknown.jsonl"
-        audit.write_text('{"sequence":1,"previous_record_sha256":"' + "0" * 64 + '","event":"RESTORE_LOCK_RECOVERY_SKIPPED"}\\n', encoding="utf-8")
+        audit.write_text('{"sequence":1,"previous_record_sha256":"' + "0" * 64 + '","event":"RESTORE_LOCK_RECOVERY_SKIPPED"}\n', encoding="utf-8")
         marker = self._write_abandoned_restore_marker()
         with self.assertRaisesRegex(RuntimeError, "unknown recovery audit event"):
             recover_abandoned_restore_lock("operator", "INC-UNKNOWN", confirm=True, audit_path=audit)
