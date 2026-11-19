@@ -1072,6 +1072,38 @@ class PaperTradingTests(unittest.TestCase):
         self.assertLessEqual(totals["total_open_risk"], 300)
 
 
+    def test_account_history_reports_net_realized_pnl_after_close_costs(self):
+        trade = self.open_trade("ORDER-HISTORY-NET-PNL")
+
+        close_response = self.client.post(
+            f"/trades/{trade['trade_id']}/close",
+            json={
+                "exit_price": 4001,
+                "spread_cost": 0.25,
+                "commission_cost": 0.50,
+                "swap_cost": 0.10,
+                "other_costs": 0.15,
+            },
+        )
+
+        self.assertEqual(close_response.status_code, 200)
+        close_result = close_response.json()
+        self.assertAlmostEqual(close_result["realized_pnl"], 4.0, places=7)
+
+        history_response = self.client.get("/accounts/TEST-001")
+        self.assertEqual(history_response.status_code, 200)
+        history = history_response.json()
+
+        self.assertAlmostEqual(history["realized_pnl"], 4.0, places=7)
+        self.assertAlmostEqual(history["current_balance"], 10004.0, places=7)
+        self.assertEqual(history["closed_trades"], 1)
+        self.assertEqual(history["open_trades"], 0)
+        self.assertAlmostEqual(
+            history["current_balance"],
+            history["starting_balance"] + history["realized_pnl"],
+            places=7,
+        )
+
     def test_profit_preview_api_is_read_only_and_accounts_for_costs(self):
         trade = self.open_trade("ORDER-PROFIT-PREVIEW")
 
