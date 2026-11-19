@@ -2018,6 +2018,27 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertIsNotNone(connection.execute("SELECT 1").fetchone())
 
 
+    def test_restore_lock_guard_remains_held_until_marker_directory_is_synced(self):
+        lock = acquire_restore_lock("c" * 32)
+        real_fsync = __import__("os").fsync
+        checked = {"during_sync": False}
+
+        def check_guard_before_sync(descriptor):
+            with self.assertRaisesRegex(RuntimeError, "connections remain active"):
+                acquire_restore_lock("d" * 32, timeout_seconds=0)
+            checked["during_sync"] = True
+            return real_fsync(descriptor)
+
+        with patch("app.maintenance.os.fsync", side_effect=check_guard_before_sync):
+            released = release_restore_lock(lock["lock_token"])
+
+        self.assertTrue(checked["during_sync"])
+        self.assertTrue(released["marker_removed"])
+        self.assertTrue(released["directory_synced"])
+        self.assertFalse(is_restore_lock_active())
+        self.assertFalse(Path(lock["lock_file"]).exists())
+
+
     def test_restore_lock_refuses_to_start_while_application_connection_is_open(self):
         from app.database import get_connection, open_connection_count
 
