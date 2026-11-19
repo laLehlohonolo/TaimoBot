@@ -4,7 +4,9 @@ import sys
 from pathlib import Path
 import unittest
 
-TEST_FILE = Path(__file__).resolve().parents[1] / "tests" / "test_copy_replication.py"
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND_ROOT))
+TEST_FILE = BACKEND_ROOT / "tests" / "test_copy_replication.py"
 SPEC = importlib.util.spec_from_file_location("copy_replication_tests", TEST_FILE)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
