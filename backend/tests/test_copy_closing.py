@@ -247,5 +247,53 @@ class CopyTradeClosingTests(unittest.TestCase):
         self.assertEqual(self.account_balance("FOLLOWER"), 1)
 
 
+    def test_single_close_rolls_back_source_balance_if_follower_balance_write_fails(self):
+        source, copied_id = self.create_copied_trade()
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER fail_follower_single_balance_update
+                BEFORE UPDATE OF balance ON paper_accounts
+                WHEN OLD.account_id = 'FOLLOWER'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated follower balance write failure');
+                END
+                """
+            )
+
+        # The source balance write happens first. The later follower failure
+        # must roll back the source balance and both trade-ledger updates.
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_id, status, realized_pnl, gross_realized_pnl,
+                       spread_cost, commission_cost, swap_cost, other_costs
+                FROM trades WHERE trade_id IN (?, ?)
+                """,
+                (source["trade_id"], copied_id),
+            ).fetchall()
+            execution = connection.execute(
+                "SELECT status FROM copy_executions WHERE copied_trade_id = ?",
+                (copied_id,),
+            ).fetchone()
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status"] == "OPEN" for row in rows))
+        self.assertTrue(all(row["realized_pnl"] == 0 for row in rows))
+        self.assertTrue(all(row["gross_realized_pnl"] is None for row in rows))
+        self.assertTrue(all(
+            (row["spread_cost"], row["commission_cost"], row["swap_cost"], row["other_costs"])
+            == (0, 0, 0, 0)
+            for row in rows
+        ))
+        self.assertEqual(self.account_balance("SOURCE"), 10000)
+        self.assertEqual(self.account_balance("FOLLOWER"), 5000)
+        self.assertEqual(execution["status"], "COPIED")
+
+
 if __name__ == "__main__":
     unittest.main()
