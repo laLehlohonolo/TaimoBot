@@ -1057,5 +1057,152 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertIsNone(execution["lease_expires_at"])
 
 
+    def test_source_close_reconciles_multiple_followers_independently(self):
+        create_paper_account("FOLLOWER_TWO", 7000, owner_user_id=self.user_id)
+        response = self.client.post(
+            "/accounts/FOLLOWER_TWO/copy-relationships",
+            json={"source_account_id": "SOURCE"}
+        )
+        self.assertEqual(response.status_code, 201)
+
+        source = self.create_source_trade("MULTI-FOLLOWER-SOURCE")
+        copied = replicate_open_trade(source["trade_id"])
+        self.assertEqual(copied["successful_copies"], 2)
+
+        with database.get_connection() as connection:
+            follower_trades = connection.execute(
+                """
+                SELECT trade_id, account_id, quantity, entry_price
+                FROM trades WHERE copied_from_trade_id = ?
+                ORDER BY account_id
+                """,
+                (source["trade_id"],)
+            ).fetchall()
+        self.assertEqual(len(follower_trades), 2)
+
+        result = close_trade_with_copies(
+            source["trade_id"], 4010,
+            spread_cost=1.25, commission_cost=0.75,
+            swap_cost=0.5, other_costs=0.25
+        )
+        self.assertEqual(result["closed_copies"], 2)
+        self.assertEqual(len(result["copy_closures"]), 2)
+
+        with database.get_connection() as connection:
+            source_row = connection.execute(
+                "SELECT * FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()
+            followers = connection.execute(
+                """
+                SELECT * FROM trades WHERE copied_from_trade_id = ?
+                ORDER BY account_id
+                """,
+                (source["trade_id"],)
+            ).fetchall()
+            executions = connection.execute(
+                """
+                SELECT status FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchall()
+            balances = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    """
+                    SELECT account_id, balance FROM paper_accounts
+                    WHERE account_id IN ('SOURCE', 'FOLLOWER', 'FOLLOWER_TWO')
+                    """
+                ).fetchall()
+            }
+
+        self.assertEqual(source_row["status"], "CLOSED")
+        self.assertAlmostEqual(
+            source_row["realized_pnl"],
+            source_row["gross_realized_pnl"] - 2.75,
+            places=6
+        )
+        self.assertEqual(len(followers), 2)
+        self.assertTrue(all(row["status"] == "CLOSED" for row in followers))
+        self.assertTrue(all(row["spread_cost"] == 0 for row in followers))
+        self.assertTrue(all(row["commission_cost"] == 0 for row in followers))
+        self.assertTrue(all(row["swap_cost"] == 0 for row in followers))
+        self.assertTrue(all(row["other_costs"] == 0 for row in followers))
+        self.assertTrue(all(row["realized_pnl"] == row["gross_realized_pnl"] for row in followers))
+        self.assertEqual(len(executions), 2)
+        self.assertTrue(all(row["status"] == "CLOSED" for row in executions))
+        self.assertAlmostEqual(balances["SOURCE"], 10000 + source_row["realized_pnl"], places=6)
+        for row in followers:
+            self.assertAlmostEqual(
+                balances[row["account_id"]],
+                (5000 if row["account_id"] == "FOLLOWER" else 7000)
+                + row["realized_pnl"],
+                places=6
+            )
+
+    def test_individual_follower_close_does_not_close_source_or_other_followers(self):
+        create_paper_account("FOLLOWER_TWO", 7000, owner_user_id=self.user_id)
+        response = self.client.post(
+            "/accounts/FOLLOWER_TWO/copy-relationships",
+            json={"source_account_id": "SOURCE"}
+        )
+        self.assertEqual(response.status_code, 201)
+
+        source = self.create_source_trade("FOLLOWER-ONLY-CLOSE")
+        copied = replicate_open_trade(source["trade_id"])
+        self.assertEqual(copied["successful_copies"], 2)
+
+        with database.get_connection() as connection:
+            target = connection.execute(
+                """
+                SELECT trade_id FROM trades
+                WHERE copied_from_trade_id = ? AND account_id = 'FOLLOWER'
+                """,
+                (source["trade_id"],)
+            ).fetchone()["trade_id"]
+            other = connection.execute(
+                """
+                SELECT trade_id FROM trades
+                WHERE copied_from_trade_id = ? AND account_id = 'FOLLOWER_TWO'
+                """,
+                (source["trade_id"],)
+            ).fetchone()["trade_id"]
+
+        result = close_trade_with_copies(
+            target, 4010, commission_cost=0.5
+        )
+        self.assertEqual(result["close_scope"], "FOLLOWER_ONLY")
+        self.assertEqual(result["closed_copies"], 0)
+
+        with database.get_connection() as connection:
+            statuses = {
+                row["trade_id"]: row["status"]
+                for row in connection.execute(
+                    """
+                    SELECT trade_id, status FROM trades
+                    WHERE trade_id IN (?, ?, ?)
+                    """,
+                    (source["trade_id"], target, other)
+                ).fetchall()
+            }
+            execution_statuses = {
+                row["copied_trade_id"]: row["status"]
+                for row in connection.execute(
+                    """
+                    SELECT copied_trade_id, status FROM copy_executions
+                    WHERE source_trade_id = ?
+                    """,
+                    (source["trade_id"],)
+                ).fetchall()
+            }
+
+        self.assertEqual(statuses[source["trade_id"]], "OPEN")
+        self.assertEqual(statuses[target], "CLOSED")
+        self.assertEqual(statuses[other], "OPEN")
+        self.assertEqual(execution_statuses[target], "CLOSED")
+        self.assertEqual(execution_statuses[other], "COPIED")
+
+
 if __name__ == "__main__":
     unittest.main()
