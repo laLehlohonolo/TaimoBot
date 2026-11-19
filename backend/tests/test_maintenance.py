@@ -3305,27 +3305,13 @@ class DailyMaintenanceTests(unittest.TestCase):
             create_backup.assert_not_called()
 
     def test_restore_preparation_rejects_path_traversal_backup_name(self):
-        from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
-        from fastapi import HTTPException
-        with tempfile.TemporaryDirectory() as directory:
-            backup_dir = Path(directory) / "backups"
-            backup_dir.mkdir()
-            outside = Path(directory) / "taimobot-outside.sqlite3"
-            outside.write_bytes(b"outside")
-            with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
-                "app.main.inspect_recovery_candidates",
-                return_value={"status": "RECOVERY_INVENTORY_COMPLETE", "candidates": []},
-            ), patch("app.main.create_verified_backup") as create_backup:
-                with self.assertRaises(HTTPException) as rejected:
-                    prepare_maintenance_restore(
-                        MaintenanceRestorePrepareRequest(
-                            backup_file_name="../taimobot-outside.sqlite3",
-                            confirm_preparation=True,
-                        ),
-                        {"email": "restore-operator@example.com"},
-                    )
-            self.assertEqual(rejected.exception.status_code, 404)
-            create_backup.assert_not_called()
+        from app.main import MaintenanceRestorePrepareRequest
+        with self.assertRaises(ValueError):
+            MaintenanceRestorePrepareRequest(
+                backup_file_name="../taimobot-outside.sqlite3",
+                confirm_preparation=True,
+            )
+
 
     def test_restore_preparation_rejects_symlinked_selected_backup(self):
         from app.main import MaintenanceRestorePrepareRequest, prepare_maintenance_restore
