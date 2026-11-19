@@ -921,8 +921,11 @@ def close_trade_with_copies(
         "mode": "paper_trading"
     }
 
-def close_position_group_with_copies(group_id, exit_price):
-    """Atomically close a source position group and all direct open copies."""
+def close_position_group_with_copies(
+    group_id, exit_price, *, spread_cost=0, commission_cost=0,
+    swap_cost=0, other_costs=0
+):
+    """Atomically close a source group and copies, allocating costs to sources."""
     group_id = str(group_id).strip()
 
     try:
@@ -971,12 +974,50 @@ def close_position_group_with_copies(group_id, exit_price):
             source_ids
         ).fetchall()
 
+        # Validate the complete cost input before doing any writes.
+        requested_costs = calculate_close_accounting(
+            0,
+            spread_cost=spread_cost,
+            commission_cost=commission_cost,
+            swap_cost=swap_cost,
+            other_costs=other_costs,
+        )
+        cost_fields = (
+            "spread_cost", "commission_cost", "swap_cost", "other_costs"
+        )
+        total_quantity = sum(float(trade["quantity"]) for trade in source_trades)
+        if not (total_quantity > 0 and total_quantity < float("inf")):
+            raise ValueError("Group quantity must be finite and positive.")
+
+        allocated = {trade["trade_id"]: {} for trade in source_trades}
+        for field in cost_fields:
+            remaining_cost = requested_costs[field]
+            for index, trade in enumerate(source_trades):
+                if index == len(source_trades) - 1:
+                    share = remaining_cost
+                else:
+                    share = (
+                        requested_costs[field]
+                        * float(trade["quantity"]) / total_quantity
+                    )
+                    remaining_cost -= share
+                allocated[trade["trade_id"]][field] = share
+
         trades_to_close = [*source_trades, *copies]
         account_pnl = {}
         results = []
 
         for trade in trades_to_close:
-            pnl = _calculate_trade_pnl(trade, exit_value)
+            gross_pnl = _calculate_trade_pnl(trade, exit_value)
+            trade_costs = (
+                allocated[trade["trade_id"]]
+                if trade["trade_id"] in allocated
+                else {}
+            )
+            accounting = calculate_close_accounting(
+                gross_pnl, **trade_costs
+            )
+            pnl = accounting["net_realized_pnl"]
             account_id = trade["account_id"]
 
             account_pnl[account_id] = (
@@ -988,7 +1029,8 @@ def close_position_group_with_copies(group_id, exit_price):
                 "account_id": account_id,
                 "source_trade_id": trade["copied_from_trade_id"],
                 "is_copy": trade["copied_from_trade_id"] is not None,
-                "realized_pnl": pnl
+                "realized_pnl": pnl,
+                **accounting
             })
 
         new_balances = {}
@@ -1021,10 +1063,23 @@ def close_position_group_with_copies(group_id, exit_price):
                 UPDATE trades
                 SET status = 'CLOSED',
                     realized_pnl = ?,
+                    gross_realized_pnl = ?,
+                    spread_cost = ?,
+                    commission_cost = ?,
+                    swap_cost = ?,
+                    other_costs = ?,
                     closed_at = CURRENT_TIMESTAMP
                 WHERE trade_id = ? AND status = 'OPEN'
                 """,
-                (item["realized_pnl"], item["trade_id"])
+                (
+                    item["realized_pnl"],
+                    item["gross_realized_pnl"],
+                    item["spread_cost"],
+                    item["commission_cost"],
+                    item["swap_cost"],
+                    item["other_costs"],
+                    item["trade_id"]
+                )
             )
 
             if update.rowcount != 1:
