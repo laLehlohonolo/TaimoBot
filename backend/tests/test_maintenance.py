@@ -3505,6 +3505,320 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertEqual(artifacts["source_sha256"], sha256_file(selected))
 
 
+    def _create_restore_approval_fixture(self, plan_id, *, status="PREPARED"):
+        backup_dir = Path(self.temp_dir.name) / "backups"
+        staging_dir = backup_dir / "recovery-staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        source = backup_dir / f"{plan_id}-source.sqlite3"
+        rollback = backup_dir / f"{plan_id}-rollback.sqlite3"
+        staged = staging_dir / f"{plan_id}-staged.sqlite3"
+        source.write_bytes(b"source-" + plan_id.encode())
+        rollback.write_bytes(b"rollback-" + plan_id.encode())
+        staged.write_bytes(b"staged-" + plan_id.encode())
+        with database.get_connection() as connection:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS maintenance_restore_plans (
+                    plan_id TEXT PRIMARY KEY, backup_file TEXT NOT NULL,
+                    staging_file TEXT NOT NULL, pre_restore_backup_file TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS maintenance_restore_artifacts (
+                    plan_id TEXT PRIMARY KEY REFERENCES maintenance_restore_plans(plan_id) ON DELETE CASCADE,
+                    source_sha256 TEXT NOT NULL, staged_sha256 TEXT NOT NULL,
+                    rollback_sha256 TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                "INSERT INTO maintenance_restore_plans VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (plan_id, str(source), str(staged), str(rollback), status,
+                 datetime.now(ZoneInfo("Africa/Johannesburg")).isoformat(), "creator@example.com"),
+            )
+            connection.execute(
+                "INSERT INTO maintenance_restore_artifacts VALUES (?, ?, ?, ?)",
+                (plan_id, sha256_file(source), sha256_file(staged), sha256_file(rollback)),
+            )
+        return backup_dir, source, staged, rollback
+
+    def _ready_restore_inventory(self, backup_dir, source, staged, rollback):
+        def inventory(directory=None):
+            if Path(directory).resolve() == backup_dir.resolve():
+                names = [source.name, rollback.name]
+            else:
+                names = [staged.name]
+            return {
+                "status": "RECOVERY_INVENTORY_COMPLETE",
+                "candidates": [{"file_name": name, "restore_ready": True} for name in names],
+            }
+        return inventory
+
+
+    def test_restore_approval_rejects_source_symlink_swap_during_inventory(self):
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "d" * 32
+        backup_dir, source, staged, rollback = self._create_restore_approval_fixture(plan_id)
+        outside = Path(self.temp_dir.name) / "outside-source.sqlite3"
+        outside.write_bytes(source.read_bytes())
+        inventory = self._ready_restore_inventory(backup_dir, source, staged, rollback)
+        calls = 0
+        def swap(directory=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                source.unlink()
+                source.symlink_to(outside)
+            return inventory(directory)
+        with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+            "app.main.inspect_recovery_candidates", side_effect=swap
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                approve_maintenance_restore(
+                    MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()["status"], "PREPARED")
+
+    def test_restore_approval_rejects_staging_symlink_swap_during_inventory(self):
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "e" * 32
+        backup_dir, source, staged, rollback = self._create_restore_approval_fixture(plan_id)
+        outside = Path(self.temp_dir.name) / "outside-staged.sqlite3"
+        outside.write_bytes(staged.read_bytes())
+        inventory = self._ready_restore_inventory(backup_dir, source, staged, rollback)
+        calls = 0
+        def swap(directory=None):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                staged.unlink()
+                staged.symlink_to(outside)
+            return inventory(directory)
+        with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+            "app.main.inspect_recovery_candidates", side_effect=swap
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                approve_maintenance_restore(
+                    MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()["status"], "PREPARED")
+
+    def test_restore_approval_rejects_rollback_symlink_swap_during_inventory(self):
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "f" * 32
+        backup_dir, source, staged, rollback = self._create_restore_approval_fixture(plan_id)
+        outside = Path(self.temp_dir.name) / "outside-rollback.sqlite3"
+        outside.write_bytes(rollback.read_bytes())
+        inventory = self._ready_restore_inventory(backup_dir, source, staged, rollback)
+        calls = 0
+        def swap(directory=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                rollback.unlink()
+                rollback.symlink_to(outside)
+            return inventory(directory)
+        with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+            "app.main.inspect_recovery_candidates", side_effect=swap
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                approve_maintenance_restore(
+                    MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()["status"], "PREPARED")
+
+    def test_restore_approval_compare_and_set_rejects_concurrent_plan_status_change(self):
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "1" * 32
+        backup_dir, source, staged, rollback = self._create_restore_approval_fixture(plan_id)
+        inventory = self._ready_restore_inventory(backup_dir, source, staged, rollback)
+        calls = 0
+        def change_status(directory=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                with database.get_connection() as connection:
+                    connection.execute(
+                        "UPDATE maintenance_restore_plans SET status='EXPIRED' WHERE plan_id=?",
+                        (plan_id,),
+                    )
+            return inventory(directory)
+        with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+            "app.main.inspect_recovery_candidates", side_effect=change_status
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                approve_maintenance_restore(
+                    MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()["status"], "EXPIRED")
+
+    def test_restore_approval_compare_and_set_rejects_plan_deleted_during_verification(self):
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "2" * 32
+        backup_dir, source, staged, rollback = self._create_restore_approval_fixture(plan_id)
+        inventory = self._ready_restore_inventory(backup_dir, source, staged, rollback)
+        calls = 0
+        def delete_plan(directory=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                with database.get_connection() as connection:
+                    connection.execute(
+                        "DELETE FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+                    )
+            return inventory(directory)
+        with patch("app.main.BACKUP_DIR", backup_dir), patch("app.main.require_admin"), patch(
+            "app.main.inspect_recovery_candidates", side_effect=delete_plan
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                approve_maintenance_restore(
+                    MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        with database.get_connection() as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone())
+
+    def test_restore_preflight_rejects_prepared_plan_without_mutating_it(self):
+        from app.main import MaintenanceRestorePreflightRequest, preflight_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "3" * 32
+        self._create_restore_approval_fixture(plan_id, status="PREPARED")
+        with patch("app.main.require_admin"), patch("app.main.verify_approved_restore_plan") as verify:
+            with self.assertRaises(HTTPException) as rejected:
+                preflight_maintenance_restore(
+                    MaintenanceRestorePreflightRequest(plan_id=plan_id),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        verify.assert_called_once()
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()["status"], "PREPARED")
+
+    def test_restore_preflight_reports_read_only_non_authorizing_success(self):
+        from app.main import MaintenanceRestorePreflightRequest, preflight_maintenance_restore
+        plan_id = "4" * 32
+        self._create_restore_approval_fixture(plan_id, status="APPROVED")
+        expected = {
+            "status": "APPROVED_RESTORE_PREFLIGHT_PASSED",
+            "plan_approved": True,
+            "execution_authorized": False,
+            "live_database_replaced": False,
+            "trading_mode": "paper",
+        }
+        with patch("app.main.require_admin"), patch(
+            "app.main.verify_approved_restore_plan", return_value=expected
+        ) as verify:
+            result = preflight_maintenance_restore(
+                MaintenanceRestorePreflightRequest(plan_id=plan_id),
+                {"email": "approver@example.com"},
+            )
+        self.assertEqual(result, expected)
+        verify.assert_called_once()
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()["status"], "APPROVED")
+
+    def test_restore_preflight_active_lock_blocks_without_plan_mutation(self):
+        from app.main import MaintenanceRestorePreflightRequest, preflight_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "5" * 32
+        self._create_restore_approval_fixture(plan_id, status="APPROVED")
+        with patch("app.main.require_admin"), patch(
+            "app.main.verify_approved_restore_plan", side_effect=ValueError("A restore lock is already active.")
+        ) as verify:
+            with self.assertRaises(HTTPException) as rejected:
+                preflight_maintenance_restore(
+                    MaintenanceRestorePreflightRequest(plan_id=plan_id),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        self.assertIn("restore lock", rejected.exception.detail)
+        verify.assert_called_once()
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()["status"], "APPROVED")
+
+    def test_restore_preflight_rejects_missing_artifact_fingerprint_row(self):
+        from app.main import MaintenanceRestorePreflightRequest, preflight_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "6" * 32
+        backup_dir, source, staged, rollback = self._create_restore_approval_fixture(plan_id)
+        with database.get_connection() as connection:
+            connection.execute(
+                "DELETE FROM maintenance_restore_artifacts WHERE plan_id=?", (plan_id,)
+            )
+        with patch("app.main.require_admin"), patch("app.main.verify_approved_restore_plan") as verify:
+            with self.assertRaises(HTTPException) as rejected:
+                preflight_maintenance_restore(
+                    MaintenanceRestorePreflightRequest(plan_id=plan_id),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        verify.assert_not_called()
+
+    def test_restore_preflight_fingerprint_failure_does_not_change_approved_plan(self):
+        from app.main import MaintenanceRestorePreflightRequest, preflight_maintenance_restore
+        from fastapi import HTTPException
+        plan_id = "7" * 32
+        backup_dir, source, staged, rollback = self._create_restore_approval_fixture(plan_id, status="APPROVED")
+        staged.write_bytes(b"changed-after-approval")
+        with patch("app.main.require_admin"), patch(
+            "app.main.verify_approved_restore_plan", side_effect=ValueError("Restore artifact fingerprint mismatch.")
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                preflight_maintenance_restore(
+                    MaintenanceRestorePreflightRequest(plan_id=plan_id),
+                    {"email": "approver@example.com"},
+                )
+        self.assertEqual(rejected.exception.status_code, 409)
+        self.assertIn("fingerprint", rejected.exception.detail)
+        with database.get_connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()["status"], "APPROVED")
+
+    def test_sha256_file_rejects_symlink_without_following_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "outside.sqlite3"
+            link = Path(directory) / "linked.sqlite3"
+            target.write_bytes(b"must-not-be-followed")
+            link.symlink_to(target)
+            with self.assertRaises(OSError):
+                sha256_file(link)
+            self.assertEqual(target.read_bytes(), b"must-not-be-followed")
+
+
 
 if __name__ == "__main__":
     unittest.main()
