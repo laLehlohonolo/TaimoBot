@@ -750,6 +750,53 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.assertEqual(after_executions, before_executions)
 
 
+    def test_single_and_group_close_reject_boolean_nonfinite_and_overflow_prices(self):
+        source = self.open_trade("SOURCE-001", "CLOSE-PRICE-VALIDATION-SOURCE")
+        group = create_position_group("SOURCE-001", "XAUUSD", "BUY")
+        grouped = open_paper_trade(
+            account_id="SOURCE-001",
+            client_order_id="CLOSE-PRICE-VALIDATION-GROUP",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group["group_id"],
+        )
+
+        invalid_prices = (True, float("nan"), float("inf"), 10 ** 10000)
+        for invalid in invalid_prices:
+            with self.subTest(close_type="single", invalid_type=type(invalid).__name__):
+                with self.assertRaises(ValueError):
+                    close_trade_with_copies(source["trade_id"], invalid)
+            with self.subTest(close_type="group", invalid_type=type(invalid).__name__):
+                with self.assertRaises(ValueError):
+                    close_position_group_with_copies(group["group_id"], invalid)
+
+        with database.get_connection() as connection:
+            source_state = connection.execute(
+                "SELECT status, realized_pnl FROM trades WHERE trade_id = ?",
+                (source["trade_id"],)
+            ).fetchone()
+            group_trade_state = connection.execute(
+                "SELECT status, realized_pnl FROM trades WHERE trade_id = ?",
+                (grouped["trade_id"],)
+            ).fetchone()
+            group_state = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group["group_id"],)
+            ).fetchone()["status"]
+            balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'SOURCE-001'"
+            ).fetchone()["balance"]
+
+        self.assertEqual(source_state["status"], "OPEN")
+        self.assertEqual(source_state["realized_pnl"], 0)
+        self.assertEqual(group_trade_state["status"], "OPEN")
+        self.assertEqual(group_trade_state["realized_pnl"], 0)
+        self.assertEqual(group_state, "OPEN")
+        self.assertEqual(balance, 10000)
+
+
 if __name__ == "__main__":
     unittest.main()
  
