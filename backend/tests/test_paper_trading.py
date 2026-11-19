@@ -1131,6 +1131,35 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("only for open trades", response.json()["detail"])
 
+    def test_profit_preview_rejects_boolean_and_overflow_cost_inputs(self):
+        trade = self.open_trade("ORDER-PROFIT-PREVIEW-NONFINITE")
+        for field in (
+            "current_price",
+            "spread_cost",
+            "commission_cost",
+            "swap_cost",
+            "other_costs",
+            "minimum_net_profit",
+        ):
+            for invalid in (True, 10 ** 10000):
+                payload = {"current_price": 4001, field: invalid}
+                with self.subTest(field=field, invalid_type=type(invalid).__name__):
+                    with self.assertRaises(ValueError):
+                        from app.profit_taking import evaluate_position_profit
+                        evaluate_position_profit(
+                            {
+                                "side": "BUY",
+                                "entry_price": 4000,
+                                "quantity": 1,
+                            },
+                            payload["current_price"],
+                            spread_cost=payload.get("spread_cost", 0),
+                            commission_cost=payload.get("commission_cost", 0),
+                            swap_cost=payload.get("swap_cost", 0),
+                            other_costs=payload.get("other_costs", 0),
+                            minimum_net_profit=payload.get("minimum_net_profit", 0),
+                        )
+
     def test_profit_preview_validates_positive_current_price(self):
         trade = self.open_trade("ORDER-PROFIT-PREVIEW-INVALID")
 
