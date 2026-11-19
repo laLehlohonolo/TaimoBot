@@ -1165,9 +1165,18 @@ def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:
         raise ValueError("chunk_size must be a positive integer")
     digest = hashlib.sha256()
-    with Path(path).open("rb") as artifact:
-        for chunk in iter(lambda: artifact.read(chunk_size), b""):
-            digest.update(chunk)
+    artifact_path = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(artifact_path), flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not os.path.isfile(artifact_path) or not __import__("stat").S_ISREG(metadata.st_mode):
+            raise OSError("Recovery artifact is not a regular file.")
+        with os.fdopen(descriptor, "rb", closefd=False) as artifact:
+            for chunk in iter(lambda: artifact.read(chunk_size), b""):
+                digest.update(chunk)
+    finally:
+        os.close(descriptor)
     return digest.hexdigest()
 
 
