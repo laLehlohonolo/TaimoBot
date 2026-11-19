@@ -2074,6 +2074,36 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(is_restore_lock_active())
 
 
+    def test_restore_lock_marker_close_failure_keeps_process_guard_held(self):
+        import app.maintenance as maintenance_module
+
+        lock = acquire_restore_lock("a" * 32)
+        real_close = os.close
+        failed_fd = {"value": None}
+
+        def fail_marker_close(descriptor):
+            if descriptor != maintenance_module._RESTORE_GUARD_FDS[lock["lock_token"]] and failed_fd["value"] is None:
+                failed_fd["value"] = descriptor
+                raise OSError("simulated marker descriptor close failure")
+            return real_close(descriptor)
+
+        with patch("app.maintenance.os.close", side_effect=fail_marker_close):
+            with self.assertRaisesRegex(OSError, "marker descriptor close failure"):
+                release_restore_lock(lock["lock_token"])
+
+        self.assertIsNotNone(failed_fd["value"])
+        self.assertFalse(Path(lock["lock_file"]).exists())
+        self.assertNotIn(lock["lock_token"], maintenance_module._RESTORE_GUARD_FDS)
+        with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
+            database.get_connection()
+
+        # Test-only cleanup: close the descriptor whose close was fault-injected.
+        real_close(failed_fd["value"])
+        guard_fd = maintenance_module._RESTORE_GUARD_FDS.pop(lock["lock_token"], None)
+        if guard_fd is not None:
+            real_close(guard_fd)
+
+
     def test_restore_lock_refuses_to_start_while_application_connection_is_open(self):
         from app.database import get_connection, open_connection_count
 
