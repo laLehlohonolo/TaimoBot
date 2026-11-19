@@ -355,6 +355,79 @@ class PositionGroupTests(unittest.TestCase):
         self.assertEqual(open_trades, 0)
         self.assertEqual(closed_copies, 2)
 
+    def test_group_close_allocates_costs_to_sources_once_not_follower_copies(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+
+        first = self.open_group_trade(group_id, "GROUP-COPY-COST-001")
+        second = self.open_group_trade(group_id, "GROUP-COPY-COST-002")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+
+        costs = {
+            "spread_cost": 0.12,
+            "commission_cost": 0.23,
+            "swap_cost": 0.34,
+            "other_costs": 0.45,
+        }
+        response = self.client.post(
+            f"/groups/{group_id}/close",
+            json={"exit_price": 4010, **costs},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        with database.get_connection() as connection:
+            sources = connection.execute(
+                """
+                SELECT realized_pnl, gross_realized_pnl, spread_cost,
+                       commission_cost, swap_cost, other_costs
+                FROM trades
+                WHERE position_group_id = ? AND copied_from_trade_id IS NULL
+                """,
+                (group_id,),
+            ).fetchall()
+            copies = connection.execute(
+                """
+                SELECT realized_pnl, gross_realized_pnl, spread_cost,
+                       commission_cost, swap_cost, other_costs
+                FROM trades
+                WHERE copied_from_trade_id IN (
+                    SELECT trade_id FROM trades WHERE position_group_id = ?
+                )
+                """,
+                (group_id,),
+            ).fetchall()
+
+        self.assertEqual(len(sources), 2)
+        self.assertEqual(len(copies), 2)
+        for field, requested in costs.items():
+            self.assertAlmostEqual(
+                sum(row[field] for row in sources),
+                requested,
+                places=12,
+            )
+            self.assertEqual(sum(row[field] for row in copies), 0)
+        self.assertAlmostEqual(
+            sum(row["realized_pnl"] for row in sources),
+            sum(row["gross_realized_pnl"] for row in sources) - sum(costs.values()),
+            places=10,
+        )
+        self.assertAlmostEqual(
+            sum(row["realized_pnl"] for row in copies),
+            sum(row["gross_realized_pnl"] for row in copies),
+            places=10,
+        )
+        with database.get_connection() as connection:
+            source_balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-001'"
+            ).fetchone()["balance"]
+            follower_balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'GROUP-FOLLOWER-001'"
+            ).fetchone()["balance"]
+        self.assertAlmostEqual(source_balance, 10098.86, places=2)
+        self.assertAlmostEqual(follower_balance, 10100, places=2)
+
+
     def test_group_close_rolls_back_when_follower_close_fails(self):
         group_id = self.create_group()
         self.create_follower_relationship()
