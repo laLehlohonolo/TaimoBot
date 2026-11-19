@@ -1090,6 +1090,10 @@ class PaperTradingTests(unittest.TestCase):
         close_result = close_response.json()
         self.assertAlmostEqual(close_result["realized_pnl"], 4.0, places=7)
 
+        # Repeated startup migrations must preserve net P&L and balance.
+        init_db()
+        init_db()
+
         history_response = self.client.get("/accounts/TEST-001")
         self.assertEqual(history_response.status_code, 200)
         history = history_response.json()
