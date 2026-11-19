@@ -76,6 +76,8 @@ def get_trade_history(account_id, limit=50):
                 take_profit,
                 status,
                 risk_amount,
+                position_group_id,
+                copied_from_trade_id,
                 realized_pnl,
                 opened_at,
                 closed_at
