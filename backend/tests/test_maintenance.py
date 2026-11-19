@@ -4305,6 +4305,115 @@ class DailyMaintenanceTests(unittest.TestCase):
 
 
 
+    def _create_recovery_audit_pair(self, audit, plan_id="a" * 32):
+        self._write_abandoned_restore_marker(plan_id)
+        recover_abandoned_restore_lock("operator", "INC-PAIR", confirm=True, audit_path=audit)
+        return [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+
+    def test_recovery_journal_accepts_only_a_completed_matching_pair(self):
+        audit = Path(self.temp_dir.name) / "pair-valid.jsonl"
+        self._create_recovery_audit_pair(audit)
+        with audit.open("rb") as stream:
+            verified = maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+        self.assertEqual(verified["record_count"], 2)
+
+    def test_unmatched_started_blocks_next_recovery_and_preserves_new_marker(self):
+        audit = Path(self.temp_dir.name) / "pair-unmatched.jsonl"
+        rows = self._create_recovery_audit_pair(audit)
+        audit.write_text(json.dumps(rows[0], sort_keys=True) + "\\n", encoding="utf-8")
+        marker = self._write_abandoned_restore_marker("c" * 32)
+        before = audit.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "unmatched STARTED"):
+            recover_abandoned_restore_lock("operator", "INC-RETRY", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+        self.assertEqual(audit.read_bytes(), before)
+
+    def test_recovery_journal_rejects_complete_without_started(self):
+        audit = Path(self.temp_dir.name) / "pair-orphan-complete.jsonl"
+        rows = self._create_recovery_audit_pair(audit)
+        audit.write_text(json.dumps(rows[1], sort_keys=True) + "\\n", encoding="utf-8")
+        with audit.open("rb") as stream:
+            with self.assertRaisesRegex(RuntimeError, "COMPLETE event has no matching STARTED"):
+                maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+
+    def test_recovery_journal_rejects_duplicate_started_events(self):
+        audit = Path(self.temp_dir.name) / "pair-duplicate-start.jsonl"
+        rows = self._create_recovery_audit_pair(audit)
+        second = dict(rows[0], sequence=2, previous_record_sha256=rows[0]["record_sha256"])
+        second["record_sha256"] = maintenance_module._restore_lock_recovery_record_digest(second)
+        audit.write_text("".join(json.dumps(row, sort_keys=True) + "\\n" for row in (rows[0], second)), encoding="utf-8")
+        with audit.open("rb") as stream:
+            with self.assertRaisesRegex(RuntimeError, "duplicate STARTED"):
+                maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+
+    def test_recovery_journal_rejects_mismatched_operator_incident_or_plan(self):
+        for field, value in (("operator_id", "other"), ("incident_ref", "INC-OTHER"), ("plan_id", "f" * 32)):
+            audit = Path(self.temp_dir.name) / f"pair-mismatch-{field}.jsonl"
+            rows = self._create_recovery_audit_pair(audit)
+            rows[1][field] = value
+            rows[1]["record_sha256"] = maintenance_module._restore_lock_recovery_record_digest(rows[1])
+            audit.write_text("".join(json.dumps(row, sort_keys=True) + "\\n" for row in rows), encoding="utf-8")
+            with audit.open("rb") as stream:
+                with self.assertRaisesRegex(RuntimeError, "identity does not match"):
+                    maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+
+    def test_recovery_journal_rejects_marker_fingerprint_replacement(self):
+        audit = Path(self.temp_dir.name) / "pair-marker-replacement.jsonl"
+        rows = self._create_recovery_audit_pair(audit)
+        rows[1]["marker_sha256"] = "f" * 64
+        rows[1]["record_sha256"] = maintenance_module._restore_lock_recovery_record_digest(rows[1])
+        audit.write_text("".join(json.dumps(row, sort_keys=True) + "\\n" for row in rows), encoding="utf-8")
+        with audit.open("rb") as stream:
+            with self.assertRaisesRegex(RuntimeError, "identity does not match"):
+                maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+
+    def test_active_restore_guard_blocks_recovery_even_with_completed_history(self):
+        audit = Path(self.temp_dir.name) / "pair-active-lock.jsonl"
+        self._create_recovery_audit_pair(audit)
+        lock = acquire_restore_lock("d" * 32)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "not confirmed abandoned"):
+                recover_abandoned_restore_lock("operator", "INC-ACTIVE", confirm=True, audit_path=audit)
+            self.assertTrue(Path(lock["lock_file"]).exists())
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_recovery_cleanup_preserves_source_staged_and_rollback_artifacts(self):
+        audit = Path(self.temp_dir.name) / "pair-preserve-artifacts.jsonl"
+        artifacts = {}
+        for name in ("source-backup.sqlite3", "staged.sqlite3", "rollback.sqlite3"):
+            path = Path(self.temp_dir.name) / name
+            path.write_bytes((name + "-preserve").encode())
+            artifacts[path] = path.read_bytes()
+        self._write_abandoned_restore_marker()
+        recover_abandoned_restore_lock("operator", "INC-PRESERVE", confirm=True, audit_path=audit)
+        for path, content in artifacts.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertFalse(database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock").exists())
+
+    def test_recovery_audit_requires_manual_review_after_process_restart(self):
+        audit = Path(self.temp_dir.name) / "pair-process-restart.jsonl"
+        rows = self._create_recovery_audit_pair(audit)
+        audit.write_text(json.dumps(rows[0], sort_keys=True) + "\\n", encoding="utf-8")
+        before = database.DB_PATH.read_bytes()
+        marker = self._write_abandoned_restore_marker("e" * 32)
+        with self.assertRaisesRegex(RuntimeError, "unmatched STARTED"):
+            recover_abandoned_restore_lock("operator", "INC-AFTER-RESTART", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+        self.assertEqual(database.DB_PATH.read_bytes(), before)
+
+    def test_recovery_audit_pair_verification_is_idempotent_and_read_only(self):
+        audit = Path(self.temp_dir.name) / "pair-idempotent.jsonl"
+        self._create_recovery_audit_pair(audit)
+        before = audit.read_bytes()
+        database_before = database.DB_PATH.read_bytes()
+        for _ in range(3):
+            with audit.open("rb") as stream:
+                self.assertEqual(maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())["record_count"], 2)
+        self.assertEqual(audit.read_bytes(), before)
+        self.assertEqual(database.DB_PATH.read_bytes(), database_before)
+
+
 
 if __name__ == "__main__":
     unittest.main()
