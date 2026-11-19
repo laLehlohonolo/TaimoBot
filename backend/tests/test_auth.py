@@ -257,6 +257,79 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.assertEqual(account.status_code, 404)
         self.assertEqual(trade.status_code, 404)
 
+    def test_foreign_user_cannot_read_preview_or_close_another_users_trade(self):
+        owner = self.client.post(
+            "/auth/register",
+            json={"email": "isolated-owner@example.com", "password": "OwnerPassphrase-2026!"}
+        )
+        self.assertEqual(owner.status_code, 200)
+        owner_login = self.client.post(
+            "/auth/login",
+            json={"email": "isolated-owner@example.com", "password": "OwnerPassphrase-2026!"}
+        )
+        owner_headers = {
+            "Authorization": "Bearer " + owner_login.json()["access_token"]
+        }
+        account = self.client.post(
+            "/accounts",
+            json={"account_id": "ISOLATED-OWNER", "starting_balance": 10000},
+            headers=owner_headers,
+        )
+        self.assertEqual(account.status_code, 200)
+        opened = self.client.post(
+            "/trades",
+            json={
+                "account_id": "ISOLATED-OWNER",
+                "client_order_id": "ISOLATION-OWNER-ORDER",
+                "symbol": "XAUUSD",
+                "side": "BUY",
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5,
+            },
+            headers=owner_headers,
+        )
+        self.assertEqual(opened.status_code, 200)
+        trade_id = opened.json()["trade_id"]
+
+        stranger = self.client.post(
+            "/auth/register",
+            json={"email": "isolated-stranger@example.com", "password": "StrangerPassphrase-2026!"}
+        )
+        self.assertEqual(stranger.status_code, 200)
+        stranger_login = self.client.post(
+            "/auth/login",
+            json={"email": "isolated-stranger@example.com", "password": "StrangerPassphrase-2026!"}
+        )
+        stranger_headers = {
+            "Authorization": "Bearer " + stranger_login.json()["access_token"]
+        }
+
+        attempts = (
+            self.client.get("/accounts/ISOLATED-OWNER", headers=stranger_headers),
+            self.client.get("/accounts/ISOLATED-OWNER/risk", headers=stranger_headers),
+            self.client.get("/accounts/ISOLATED-OWNER/trades", headers=stranger_headers),
+            self.client.post(
+                f"/trades/{trade_id}/profit-preview",
+                json={"current_price": 4001},
+                headers=stranger_headers,
+            ),
+            self.client.post(
+                f"/trades/{trade_id}/close",
+                json={"exit_price": 4001},
+                headers=stranger_headers,
+            ),
+        )
+        self.assertEqual([response.status_code for response in attempts], [404] * 5)
+
+        owner_history = self.client.get(
+            "/accounts/ISOLATED-OWNER", headers=owner_headers
+        )
+        self.assertEqual(owner_history.status_code, 200)
+        self.assertEqual(owner_history.json()["current_balance"], 10000)
+        self.assertEqual(owner_history.json()["open_trades"], 1)
+        self.assertEqual(owner_history.json()["closed_trades"], 0)
+
     def test_eight_failed_logins_trigger_temporary_lockout(self):
         email = "locked@example.com"
         password = "StrongPassphrase123!"
