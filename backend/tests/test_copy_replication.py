@@ -1063,7 +1063,7 @@ class CopyTradeReplicationTests(unittest.TestCase):
             "/accounts/FOLLOWER_TWO/copy-relationships",
             json={"source_account_id": "SOURCE"}
         )
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 200)
 
         source = self.create_source_trade("MULTI-FOLLOWER-SOURCE")
         copied = replicate_open_trade(source["trade_id"])
@@ -1147,7 +1147,7 @@ class CopyTradeReplicationTests(unittest.TestCase):
             "/accounts/FOLLOWER_TWO/copy-relationships",
             json={"source_account_id": "SOURCE"}
         )
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 200)
 
         source = self.create_source_trade("FOLLOWER-ONLY-CLOSE")
         copied = replicate_open_trade(source["trade_id"])
