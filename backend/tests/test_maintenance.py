@@ -905,6 +905,7 @@ class DailyMaintenanceTests(unittest.TestCase):
                             else next(Path(directory).glob("taimobot-restore-*.sqlite3")).name
                         ),
                         "restore_ready": True,
+                        "sha256": sha256_file(selected),
                     }],
                 },
             ), patch(
