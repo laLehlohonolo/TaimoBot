@@ -3047,7 +3047,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             records = {item["file_name"]: item for item in result["candidates"]}
             self.assertTrue(records[valid.name]["restore_ready"])
             self.assertFalse(records[corrupt.name]["restore_ready"])
-            self.assertIn("BACKUP_UNREADABLE", records[corrupt.name]["issues"])
+            self.assertIn("SQLITE_INTEGRITY_FAILED", records[corrupt.name]["issues"])
             self.assertEqual(result["restore_ready_count"], 1)
             self.assertEqual(database.DB_PATH.read_bytes(), live_before)
             self.assertFalse(result["live_database_replaced"])
@@ -3067,7 +3067,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             backup_dir, source, staged, rollback = self.create_valid_restore_artifacts(directory)
             self.create_byte_corrupted_sqlite_copy(staged)
-            with self.assertRaisesRegex(ValueError, "staged recovery artifact is not restore-ready"):
+            with self.assertRaisesRegex(ValueError, "staged restore candidate is not restore-ready"):
                 verify_restore_execution_readiness(
                     source, staged, rollback, backup_dir=backup_dir,
                     live_database_path=database.DB_PATH,
