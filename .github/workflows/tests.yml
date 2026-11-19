@@ -33,6 +33,8 @@ jobs:
         run: python scripts/run_copied_ledger_reconciliation.py
       - name: Run ten copy lifecycle close-race checks sequentially
         run: python scripts/run_copy_lifecycle_close_races.py
+      - name: Run ten multi-follower close reconciliation checks sequentially
+        run: python scripts/run_multi_follower_close_reconciliation.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
