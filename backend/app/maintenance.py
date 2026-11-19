@@ -1869,6 +1869,14 @@ def verify_restore_execution_readiness_under_lock(
         raise ValueError(
             "Operator must explicitly confirm all external SQLite processes are stopped."
         )
+    lock_state = inspect_restore_lock()
+    if (
+        lock_state.get("status") != "RESTORE_LOCK_ACTIVE"
+        or lock_state.get("plan_id") != plan_id
+        or lock_state.get("lock_token") != lock_token
+    ):
+        raise RuntimeError("The matching active restore lock could not be verified.")
+
     required_hash_keys = {"source_sha256", "staged_sha256", "rollback_sha256"}
     if (
         not isinstance(expected_artifact_hashes, dict)
@@ -1879,14 +1887,6 @@ def verify_restore_execution_readiness_under_lock(
         )
     ):
         raise ValueError("Expected source, staged and rollback SHA-256 fingerprints are required.")
-
-    lock_state = inspect_restore_lock()
-    if (
-        lock_state.get("status") != "RESTORE_LOCK_ACTIVE"
-        or lock_state.get("plan_id") != plan_id
-        or lock_state.get("lock_token") != lock_token
-    ):
-        raise RuntimeError("The matching active restore lock could not be verified.")
 
     artifacts = (
         ("source_sha256", Path(source_backup)),
