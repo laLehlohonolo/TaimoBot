@@ -793,7 +793,11 @@ def close_group(
     try:
         return close_position_group_with_copies(
             group_id=group_id,
-            exit_price=request.exit_price
+            exit_price=request.exit_price,
+            spread_cost=request.spread_cost,
+            commission_cost=request.commission_cost,
+            swap_cost=request.swap_cost,
+            other_costs=request.other_costs,
         )
     except ValueError as error:
         status_code = (
