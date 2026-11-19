@@ -59,7 +59,8 @@ def _reject_restore_journal_json_constant(value):
 
 
 def verify_restore_execution_journal(
-    journal_path: Path | None = None, *, include_records: bool = False, lock_file: bool = True
+    journal_path: Path | None = None, *, include_records: bool = False,
+    lock_file: bool = True, expected_identity: tuple[int, int] | None = None,
 ) -> dict:
     """Verify the append-only hash chain without changing the journal."""
     path = Path(journal_path or (Path(database.DB_PATH).parent / "restore-execution.audit.jsonl"))
@@ -73,9 +74,19 @@ def verify_restore_execution_journal(
     try:
         if lock_file:
             fcntl.flock(descriptor, fcntl.LOCK_SH)
-        if not __import__("stat").S_ISREG(os.fstat(descriptor).st_mode):
+        metadata = os.fstat(descriptor)
+        if not __import__("stat").S_ISREG(metadata.st_mode):
             return {"status": "RESTORE_JOURNAL_UNSAFE", "record_count": 0}
-        size = os.fstat(descriptor).st_size
+        identity = (metadata.st_dev, metadata.st_ino)
+        if expected_identity is not None and identity != expected_identity:
+            return {"status": "RESTORE_JOURNAL_PATH_CHANGED", "record_count": 0}
+        path_metadata = os.stat(path, follow_symlinks=False)
+        if (
+            not __import__("stat").S_ISREG(path_metadata.st_mode)
+            or (path_metadata.st_dev, path_metadata.st_ino) != identity
+        ):
+            return {"status": "RESTORE_JOURNAL_PATH_CHANGED", "record_count": 0}
+        size = metadata.st_size
         if size > _RESTORE_JOURNAL_MAX_BYTES:
             return {"status": "RESTORE_JOURNAL_INVALID", "reason": "journal exceeds size limit", "record_count": 0}
         chunks = []
@@ -661,10 +672,29 @@ def append_restore_execution_event(
         0o600,
     )
     try:
-        if not __import__("stat").S_ISREG(os.fstat(descriptor).st_mode):
+        metadata = os.fstat(descriptor)
+        if not __import__("stat").S_ISREG(metadata.st_mode):
             raise RuntimeError("Restore execution journal is not a regular file.")
+        identity = (metadata.st_dev, metadata.st_ino)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        verification = verify_restore_execution_journal(path, lock_file=False)
+        path_metadata = os.stat(path, follow_symlinks=False)
+        if (
+            not __import__("stat").S_ISREG(path_metadata.st_mode)
+            or (path_metadata.st_dev, path_metadata.st_ino) != identity
+        ):
+            raise RuntimeError("Restore execution journal path changed before append; append refused.")
+        verification = verify_restore_execution_journal(
+            path, lock_file=False, expected_identity=identity
+        )
+        current_metadata = os.fstat(descriptor)
+        current_path_metadata = os.stat(path, follow_symlinks=False)
+        if (
+            (current_metadata.st_dev, current_metadata.st_ino) != identity
+            or (current_path_metadata.st_dev, current_path_metadata.st_ino) != identity
+            or current_metadata.st_size != current_path_metadata.st_size
+            or current_metadata.st_size != metadata.st_size
+        ):
+            raise RuntimeError("Restore execution journal changed during verification; append refused.")
         if verification["status"] not in ("RESTORE_JOURNAL_EMPTY", "RESTORE_JOURNAL_VERIFIED"):
             raise RuntimeError("Restore execution journal failed integrity verification; append refused.")
         record = {
