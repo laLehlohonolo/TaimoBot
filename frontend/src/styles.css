@@ -156,3 +156,19 @@ td{color:#c6d8cc}
 @keyframes welcome-fall{0%{transform:translateY(-5vh) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(110vh) rotate(260deg);opacity:0}}
 @media(max-width:650px){.journey-grid{grid-template-columns:1fr}.welcome-card{padding:30px 22px}}
 @media(prefers-reduced-motion:reduce){.welcome-overlay,.welcome-card,.welcome-emblem,.welcome-confetti span{animation:none!important}}
+
+
+.order-panel{padding:20px;margin-top:12px}
+.order-panel h3{margin:0;font-size:15px}
+.order-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}
+.order-form label{display:grid;gap:6px;color:#b6c9bc;font-size:11px}
+.order-form input,.order-form select{width:100%;min-width:0;background:#07170f;border:1px solid rgba(145,181,156,.25);border-radius:7px;padding:11px;color:#e8f1ec;font:inherit;font-size:13px;outline:none}
+.order-form input:focus,.order-form select:focus{border-color:#65b986;box-shadow:0 0 0 2px rgba(101,185,134,.12)}
+.order-actions{grid-column:1/-1;display:flex;gap:9px;flex-wrap:wrap}
+.secondary-button{background:#142b20;color:#d7e9dd;border:1px solid rgba(145,181,156,.3);border-radius:8px;padding:12px 15px;font-size:12px;font-weight:700;cursor:pointer}
+.secondary-button:disabled{opacity:.5;cursor:wait}
+.preview-result{display:grid;gap:5px;margin-top:14px;padding:13px;border:1px solid rgba(101,185,134,.3);border-radius:8px;background:rgba(25,67,43,.22);font-size:12px}
+.preview-result span,.preview-result small{color:#a9c2b2;line-height:1.6}
+.order-panel>p{font-size:10px;line-height:1.6;margin:13px 0 0}
+.trades-panel table th:last-child,.trades-panel table td:last-child{white-space:nowrap}
+@media(max-width:520px){.order-form{grid-template-columns:1fr}.order-actions{display:grid;grid-template-columns:1fr}.order-actions button{width:100%}}
