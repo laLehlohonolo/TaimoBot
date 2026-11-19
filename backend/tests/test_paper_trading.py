@@ -1355,5 +1355,40 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(balance, 10000)
 
 
+    def test_profit_preview_api_rejects_boolean_numeric_fields(self):
+        trade = self.open_trade("ORDER-PREVIEW-STRICT-NUMBERS")
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        endpoints = (
+            f"/trades/{trade['trade_id']}/profit-preview",
+            f"/groups/{group_id}/profit-preview",
+        )
+        fields = (
+            "current_price",
+            "spread_cost",
+            "commission_cost",
+            "swap_cost",
+            "other_costs",
+            "minimum_net_profit",
+        )
+
+        for endpoint in endpoints:
+            for field in fields:
+                payload = {"current_price": 4001}
+                if field != "current_price":
+                    payload[field] = True
+                else:
+                    payload["current_price"] = True
+
+                with self.subTest(endpoint=endpoint, field=field):
+                    response = self.client.post(endpoint, json=payload)
+                    self.assertEqual(response.status_code, 422)
+
+
 if __name__ == "__main__":
     unittest.main()
