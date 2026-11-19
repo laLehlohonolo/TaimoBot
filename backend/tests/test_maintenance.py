@@ -2426,6 +2426,11 @@ class DailyMaintenanceTests(unittest.TestCase):
                     plan_id=plan_id,
                     lock_token=lock["lock_token"],
                     external_processes_stopped=True,
+                    expected_artifact_hashes={
+                        "source_sha256": sha256_file(source),
+                        "staged_sha256": sha256_file(staged),
+                        "rollback_sha256": sha256_file(rollback),
+                    },
                     backup_dir=backup_dir,
                     live_database_path=database.DB_PATH,
                 )
@@ -3817,6 +3822,194 @@ class DailyMaintenanceTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 sha256_file(link)
             self.assertEqual(target.read_bytes(), b"must-not-be-followed")
+
+
+    def _make_locked_restore_artifacts(self, suffix):
+        root = Path(self.temp_dir.name) / f"locked-restore-{suffix}"
+        backup_dir = root / "backups"
+        staging_dir = backup_dir / "recovery-staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        source = backup_dir / "source.sqlite3"
+        rollback = backup_dir / "rollback.sqlite3"
+        staged = staging_dir / "staged.sqlite3"
+        for target in (source, rollback, staged):
+            with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                live.backup(copy)
+        hashes = {
+            "source_sha256": sha256_file(source),
+            "staged_sha256": sha256_file(staged),
+            "rollback_sha256": sha256_file(rollback),
+        }
+        return backup_dir, source, staged, rollback, hashes
+
+    def test_locked_preflight_requires_all_three_expected_fingerprints(self):
+        backup_dir, source, staged, rollback, hashes = self._make_locked_restore_artifacts("missing-hashes")
+        lock = acquire_restore_lock("8" * 32)
+        try:
+            with self.assertRaisesRegex(ValueError, "fingerprints are required"):
+                verify_restore_execution_readiness_under_lock(
+                    source, staged, rollback, plan_id="8" * 32,
+                    lock_token=lock["lock_token"], external_processes_stopped=True,
+                    backup_dir=backup_dir, live_database_path=database.DB_PATH,
+                )
+            self.assertTrue(is_restore_lock_active())
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_locked_preflight_rejects_source_fingerprint_mismatch(self):
+        backup_dir, source, staged, rollback, hashes = self._make_locked_restore_artifacts("source-hash")
+        lock = acquire_restore_lock("9" * 32)
+        try:
+            wrong = dict(hashes)
+            wrong["source_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
+                verify_restore_execution_readiness_under_lock(
+                    source, staged, rollback, plan_id="9" * 32,
+                    lock_token=lock["lock_token"], external_processes_stopped=True,
+                    expected_artifact_hashes=wrong, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+            self.assertTrue(is_restore_lock_active())
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_locked_preflight_rejects_staged_fingerprint_mismatch(self):
+        backup_dir, source, staged, rollback, hashes = self._make_locked_restore_artifacts("staged-hash")
+        lock = acquire_restore_lock("a" * 32)
+        try:
+            wrong = dict(hashes)
+            wrong["staged_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
+                verify_restore_execution_readiness_under_lock(
+                    source, staged, rollback, plan_id="a" * 32,
+                    lock_token=lock["lock_token"], external_processes_stopped=True,
+                    expected_artifact_hashes=wrong, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_locked_preflight_rejects_rollback_fingerprint_mismatch(self):
+        backup_dir, source, staged, rollback, hashes = self._make_locked_restore_artifacts("rollback-hash")
+        lock = acquire_restore_lock("b" * 32)
+        try:
+            wrong = dict(hashes)
+            wrong["rollback_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
+                verify_restore_execution_readiness_under_lock(
+                    source, staged, rollback, plan_id="b" * 32,
+                    lock_token=lock["lock_token"], external_processes_stopped=True,
+                    expected_artifact_hashes=wrong, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_locked_preflight_detects_artifact_change_during_inventory(self):
+        backup_dir, source, staged, rollback, hashes = self._make_locked_restore_artifacts("during-inventory")
+        lock = acquire_restore_lock("c" * 32)
+        original = inspect_recovery_candidates
+        calls = 0
+        def mutate_after_inventory(directory):
+            nonlocal calls
+            result = original(directory)
+            calls += 1
+            if calls == 2:
+                with staged.open("ab") as stream:
+                    stream.write(b"changed-during-preflight")
+            return result
+        try:
+            with patch("app.maintenance.inspect_recovery_candidates", side_effect=mutate_after_inventory):
+                with self.assertRaisesRegex(ValueError, "changed during locked preflight"):
+                    verify_restore_execution_readiness_under_lock(
+                        source, staged, rollback, plan_id="c" * 32,
+                        lock_token=lock["lock_token"], external_processes_stopped=True,
+                        expected_artifact_hashes=hashes, backup_dir=backup_dir,
+                        live_database_path=database.DB_PATH,
+                    )
+            self.assertTrue(is_restore_lock_active())
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_locked_preflight_rejects_plan_id_not_bound_to_lock(self):
+        backup_dir, source, staged, rollback, hashes = self._make_locked_restore_artifacts("wrong-plan")
+        lock = acquire_restore_lock("d" * 32)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "matching active restore lock"):
+                verify_restore_execution_readiness_under_lock(
+                    source, staged, rollback, plan_id="e" * 32,
+                    lock_token=lock["lock_token"], external_processes_stopped=True,
+                    expected_artifact_hashes=hashes, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_locked_preflight_requires_explicit_external_process_acknowledgement(self):
+        backup_dir, source, staged, rollback, hashes = self._make_locked_restore_artifacts("no-ack")
+        lock = acquire_restore_lock("f" * 32)
+        try:
+            with self.assertRaisesRegex(ValueError, "external SQLite processes"):
+                verify_restore_execution_readiness_under_lock(
+                    source, staged, rollback, plan_id="f" * 32,
+                    lock_token=lock["lock_token"], external_processes_stopped=False,
+                    expected_artifact_hashes=hashes, backup_dir=backup_dir,
+                    live_database_path=database.DB_PATH,
+                )
+            self.assertTrue(is_restore_lock_active())
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_released_lock_token_cannot_release_a_later_lock(self):
+        first = acquire_restore_lock("1" * 32)
+        old_token = first["lock_token"]
+        release_restore_lock(old_token)
+        second = acquire_restore_lock("2" * 32)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+                release_restore_lock(old_token)
+            self.assertEqual(inspect_restore_lock()["plan_id"], "2" * 32)
+            self.assertTrue(is_restore_lock_active())
+        finally:
+            release_restore_lock(second["lock_token"])
+
+    def test_tampered_lock_marker_cannot_be_released_by_original_owner(self):
+        lock = acquire_restore_lock("3" * 32)
+        marker = Path(lock["lock_file"])
+        original = marker.read_text(encoding="utf-8")
+        try:
+            payload = json.loads(original)
+            payload["lock_token"] = "4" * 32
+            marker.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+                release_restore_lock(lock["lock_token"])
+            self.assertTrue(marker.exists())
+            self.assertTrue(is_restore_lock_active())
+        finally:
+            marker.write_text(original, encoding="utf-8")
+            release_restore_lock(lock["lock_token"])
+
+    def test_second_lock_cannot_replace_first_plan_or_owner(self):
+        first = acquire_restore_lock("5" * 32)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "another process"):
+                acquire_restore_lock("6" * 32, timeout_seconds=0.02)
+            state = inspect_restore_lock()
+            self.assertEqual(state["status"], "RESTORE_LOCK_ACTIVE")
+            self.assertEqual(state["plan_id"], "5" * 32)
+            self.assertEqual(state["lock_token"], first["lock_token"])
+        finally:
+            release_restore_lock(first["lock_token"])
+
+    def test_restore_lock_is_not_published_when_database_connection_is_open(self):
+        connection = database.get_connection()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "connections remain open"):
+                acquire_restore_lock("7" * 32)
+            self.assertFalse(is_restore_lock_active())
+            self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+        finally:
+            connection.close()
 
 
 
