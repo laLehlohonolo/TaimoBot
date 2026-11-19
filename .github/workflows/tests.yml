@@ -39,6 +39,8 @@ jobs:
         run: python scripts/run_multi_follower_close_rollback.py
       - name: Run ten SQLite corruption recovery checks sequentially
         run: python scripts/run_sqlite_corruption_recovery.py
+      - name: Run ten restore candidate identity checks sequentially
+        run: python scripts/run_restore_candidate_identity.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
