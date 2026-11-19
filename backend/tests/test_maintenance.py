@@ -4320,7 +4320,7 @@ class DailyMaintenanceTests(unittest.TestCase):
     def test_unmatched_started_blocks_next_recovery_and_preserves_new_marker(self):
         audit = Path(self.temp_dir.name) / "pair-unmatched.jsonl"
         rows = self._create_recovery_audit_pair(audit)
-        audit.write_text(json.dumps(rows[0], sort_keys=True) + "\\n", encoding="utf-8")
+        audit.write_text(json.dumps(rows[0], sort_keys=True) + "\n", encoding="utf-8")
         marker = self._write_abandoned_restore_marker("c" * 32)
         before = audit.read_bytes()
         with self.assertRaisesRegex(RuntimeError, "unmatched STARTED"):
@@ -4331,7 +4331,7 @@ class DailyMaintenanceTests(unittest.TestCase):
     def test_recovery_journal_rejects_complete_without_started(self):
         audit = Path(self.temp_dir.name) / "pair-orphan-complete.jsonl"
         rows = self._create_recovery_audit_pair(audit)
-        audit.write_text(json.dumps(rows[1], sort_keys=True) + "\\n", encoding="utf-8")
+        audit.write_text(json.dumps(rows[1], sort_keys=True) + "\n", encoding="utf-8")
         with audit.open("rb") as stream:
             with self.assertRaisesRegex(RuntimeError, "COMPLETE event has no matching STARTED"):
                 maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
@@ -4341,7 +4341,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         rows = self._create_recovery_audit_pair(audit)
         second = dict(rows[0], sequence=2, previous_record_sha256=rows[0]["record_sha256"])
         second["record_sha256"] = maintenance_module._restore_lock_recovery_record_digest(second)
-        audit.write_text("".join(json.dumps(row, sort_keys=True) + "\\n" for row in (rows[0], second)), encoding="utf-8")
+        audit.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in (rows[0], second)), encoding="utf-8")
         with audit.open("rb") as stream:
             with self.assertRaisesRegex(RuntimeError, "duplicate STARTED"):
                 maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
@@ -4352,7 +4352,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             rows = self._create_recovery_audit_pair(audit)
             rows[1][field] = value
             rows[1]["record_sha256"] = maintenance_module._restore_lock_recovery_record_digest(rows[1])
-            audit.write_text("".join(json.dumps(row, sort_keys=True) + "\\n" for row in rows), encoding="utf-8")
+            audit.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
             with audit.open("rb") as stream:
                 with self.assertRaisesRegex(RuntimeError, "identity does not match"):
                     maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
@@ -4362,7 +4362,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         rows = self._create_recovery_audit_pair(audit)
         rows[1]["marker_sha256"] = "f" * 64
         rows[1]["record_sha256"] = maintenance_module._restore_lock_recovery_record_digest(rows[1])
-        audit.write_text("".join(json.dumps(row, sort_keys=True) + "\\n" for row in rows), encoding="utf-8")
+        audit.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
         with audit.open("rb") as stream:
             with self.assertRaisesRegex(RuntimeError, "identity does not match"):
                 maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
@@ -4394,7 +4394,7 @@ class DailyMaintenanceTests(unittest.TestCase):
     def test_recovery_audit_requires_manual_review_after_process_restart(self):
         audit = Path(self.temp_dir.name) / "pair-process-restart.jsonl"
         rows = self._create_recovery_audit_pair(audit)
-        audit.write_text(json.dumps(rows[0], sort_keys=True) + "\\n", encoding="utf-8")
+        audit.write_text(json.dumps(rows[0], sort_keys=True) + "\n", encoding="utf-8")
         before = database.DB_PATH.read_bytes()
         marker = self._write_abandoned_restore_marker("e" * 32)
         with self.assertRaisesRegex(RuntimeError, "unmatched STARTED"):
