@@ -1607,13 +1607,32 @@ def release_restore_lock(lock_token: str) -> dict:
         )
         raise RuntimeError(f"Restore lock release could not be completed safely; {state}") from error
     finally:
-        if marker_fd is not None:
-            os.close(marker_fd)
-        if directory_fd is not None:
-            os.close(directory_fd)
+        close_errors = []
+        for descriptor in (marker_fd, directory_fd):
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                close_errors.append(error)
+        if close_errors:
+            # Keep the process-shared guard registered and held whenever any
+            # release-phase descriptor cannot be closed cleanly.
+            raise RuntimeError(
+                "Restore lock release could not close its inspection descriptors safely; "
+                "process guard remains held."
+            ) from close_errors[0]
 
+    # Do not discard ownership bookkeeping until the OS confirms the guard
+    # descriptor has closed. If close fails, a retry can still find the fd.
+    try:
+        os.close(guard_fd)
+    except OSError as error:
+        raise RuntimeError(
+            "Restore lock marker is removed, but the process guard close failed; "
+            "database access remains blocked while ownership is retained."
+        ) from error
     _RESTORE_GUARD_FDS.pop(lock_token, None)
-    os.close(guard_fd)
     return {
         "status": "RESTORE_LOCK_RELEASED",
         "database_quiescent": False,
