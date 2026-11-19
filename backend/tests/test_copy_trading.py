@@ -6,8 +6,13 @@ from unittest.mock import patch
 from pathlib import Path
 
 from app import database
-from app.copy_trading import close_trade_with_copies, replicate_open_trade
-from app.execution import open_paper_trade, update_copy_relationship_status
+from app.copy_trading import (
+    close_trade_with_copies, close_position_group_with_copies,
+    replicate_open_trade
+)
+from app.execution import (
+    open_paper_trade, create_position_group, update_copy_relationship_status
+)
 from app.safety import deactivate_emergency_stop
 
 
@@ -534,6 +539,100 @@ class CopyTradingDatabaseTests(unittest.TestCase):
             balances["FOLLOWER-001"],
             5000 + copy_row["realized_pnl"]
         )
+
+
+    def test_group_close_allocates_costs_by_quantity_and_not_to_copies(self):
+        self.create_relationship("REL-GROUP-COSTS")
+        group = create_position_group("SOURCE-001", "XAUUSD", "BUY")
+        first = open_paper_trade(
+            account_id="SOURCE-001",
+            client_order_id="GROUP-COST-ORDER-1",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group["group_id"],
+        )
+        second = open_paper_trade(
+            account_id="SOURCE-001",
+            client_order_id="GROUP-COST-ORDER-2",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3980,
+            symbol="XAUUSD",
+            position_group_id=group["group_id"],
+        )
+        first_copy = replicate_open_trade(first["trade_id"])
+        second_copy = replicate_open_trade(second["trade_id"])
+        self.assertEqual(first_copy["successful_copies"], 1)
+        self.assertEqual(second_copy["successful_copies"], 1)
+
+        close_position_group_with_copies(
+            group["group_id"],
+            4010,
+            spread_cost=0.30,
+            commission_cost=0.06,
+            swap_cost=0.03,
+            other_costs=0.01,
+        )
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_id, account_id, copied_from_trade_id,
+                       quantity, gross_realized_pnl, realized_pnl,
+                       spread_cost, commission_cost, swap_cost, other_costs
+                FROM trades
+                WHERE trade_id IN (?, ?, ?, ?)
+                """,
+                (
+                    first["trade_id"],
+                    second["trade_id"],
+                    first_copy["copies"][0]["copied_trade_id"],
+                    second_copy["copies"][0]["copied_trade_id"],
+                )
+            ).fetchall()
+            balances = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    "SELECT account_id, balance FROM paper_accounts"
+                ).fetchall()
+            }
+
+        source_rows = [row for row in rows if row["copied_from_trade_id"] is None]
+        copy_rows = [row for row in rows if row["copied_from_trade_id"] is not None]
+        self.assertEqual(len(source_rows), 2)
+        self.assertEqual(len(copy_rows), 2)
+
+        total_quantity = sum(row["quantity"] for row in source_rows)
+        self.assertAlmostEqual(sum(row["spread_cost"] for row in source_rows), 0.30)
+        self.assertAlmostEqual(sum(row["commission_cost"] for row in source_rows), 0.06)
+        self.assertAlmostEqual(sum(row["swap_cost"] for row in source_rows), 0.03)
+        self.assertAlmostEqual(sum(row["other_costs"] for row in source_rows), 0.01)
+
+        for row in source_rows:
+            expected_spread = 0.30 * row["quantity"] / total_quantity
+            self.assertAlmostEqual(row["spread_cost"], expected_spread)
+            self.assertAlmostEqual(
+                row["realized_pnl"],
+                row["gross_realized_pnl"]
+                - row["spread_cost"]
+                - row["commission_cost"]
+                - row["swap_cost"]
+                - row["other_costs"],
+            )
+
+        for row in copy_rows:
+            self.assertEqual(row["realized_pnl"], row["gross_realized_pnl"])
+            self.assertEqual(row["spread_cost"], 0)
+            self.assertEqual(row["commission_cost"], 0)
+            self.assertEqual(row["swap_cost"], 0)
+            self.assertEqual(row["other_costs"], 0)
+
+        source_net = sum(row["realized_pnl"] for row in source_rows)
+        copy_net = sum(row["realized_pnl"] for row in copy_rows)
+        self.assertAlmostEqual(balances["SOURCE-001"], 10000 + source_net)
+        self.assertAlmostEqual(balances["FOLLOWER-001"], 5000 + copy_net)
 
 
 if __name__ == "__main__":
