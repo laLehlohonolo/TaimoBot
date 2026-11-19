@@ -164,6 +164,35 @@ class PaperTradingTests(unittest.TestCase):
             result["projected_total_open_risk"], 100
         )
 
+    def test_risk_inputs_reject_booleans_and_overflowing_integers(self):
+        invalid_positive_values = (True, 10 ** 10000)
+        for field in ("account_balance", "entry_price", "stop_loss", "risk_percent"):
+            for invalid in invalid_positive_values:
+                values = {
+                    "account_balance": 10000,
+                    "entry_price": 4000,
+                    "stop_loss": 3990,
+                    "risk_percent": 0.5,
+                    "side": "BUY",
+                }
+                values[field] = invalid
+                with self.subTest(field=field, value_type=type(invalid).__name__):
+                    with self.assertRaises(RiskError):
+                        calculate_position_size(**values)
+
+    def test_current_open_risk_rejects_booleans_and_overflowing_integers(self):
+        for invalid in (True, 10 ** 10000):
+            with self.subTest(value_type=type(invalid).__name__):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=10000,
+                        entry_price=4000,
+                        stop_loss=3990,
+                        risk_percent=0.5,
+                        side="BUY",
+                        current_open_risk=invalid,
+                    )
+
     def test_risk_above_one_percent_is_rejected(self):
         with self.assertRaises(RiskError):
             calculate_position_size(
