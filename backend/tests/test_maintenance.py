@@ -4572,5 +4572,97 @@ class DailyMaintenanceTests(unittest.TestCase):
 
 
 
+
+    def test_partial_restore_marker_empty_file_is_manual_review_only(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_bytes(b"")
+        before = marker.read_bytes()
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertEqual(marker.read_bytes(), before)
+        self.assertTrue(result["marker_present"])
+
+    def test_partial_restore_marker_truncated_json_is_not_repaired(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_bytes(b'{"plan_id":"aaaaaaaa')
+        before = marker.read_bytes()
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_partial_restore_marker_invalid_utf8_is_preserved(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_bytes(bytes([255, 254, 123]))
+        before = marker.read_bytes()
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_partial_restore_marker_duplicate_json_keys_is_not_accepted(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_text('{"plan_id":"' + "a" * 32 + '","plan_id":"' + "b" * 32 + '","pid":1,"created_at":"2026-11-20T00:00:00+02:00"}', encoding="utf-8")
+        before = marker.read_bytes()
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_partial_restore_marker_json_scalar_is_not_accepted(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_text("[]", encoding="utf-8")
+        before = marker.read_bytes()
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_partial_restore_marker_oversize_is_not_read_or_removed(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_bytes(b"x" * 65537)
+        before = marker.read_bytes()
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_partial_restore_marker_recovery_requires_valid_abandoned_state(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_bytes(b'{"plan_id":')
+        before = marker.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "not confirmed abandoned"):
+            recover_abandoned_restore_lock("operator@example.com", "INC-PARTIAL-01", confirm=True, audit_path=Path(self.temp_dir.name) / "partial-audit.jsonl")
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_partial_restore_marker_recovery_does_not_create_audit(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_bytes(b'{"plan_id":')
+        audit = Path(self.temp_dir.name) / "partial-audit.jsonl"
+        with self.assertRaises(RuntimeError):
+            recover_abandoned_restore_lock("operator@example.com", "INC-PARTIAL-02", confirm=True, audit_path=audit)
+        self.assertFalse(audit.exists())
+        self.assertTrue(marker.exists())
+
+    def test_partial_restore_marker_blocks_new_restore_lock_attempt(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_bytes(b'{"interrupted":')
+        before = marker.read_bytes()
+        with self.assertRaises(OSError):
+            acquire_restore_lock("c" * 32, timeout_seconds=0)
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_partial_restore_marker_keeps_database_and_sidecars_unchanged(self):
+        marker = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        marker.write_bytes(b'{"truncated":')
+        live_before = database.DB_PATH.read_bytes()
+        sidecars = []
+        for suffix in ("-wal", "-shm"):
+            path = Path(str(database.DB_PATH) + suffix)
+            if path.exists():
+                sidecars.append((path, path.read_bytes()))
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertEqual(database.DB_PATH.read_bytes(), live_before)
+        for path, contents in sidecars:
+            self.assertEqual(path.read_bytes(), contents)
+        self.assertTrue(marker.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
