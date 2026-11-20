@@ -1,9 +1,16 @@
 """Run ten backup-retention lifecycle checks sequentially."""
+import importlib.util
 import sys
+from pathlib import Path
 import unittest
 
-from tests.test_maintenance import DailyMaintenanceTests
-
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+spec = importlib.util.spec_from_file_location(
+    "backup_retention_lifecycle", ROOT / "tests" / "test_maintenance.py"
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
 
 TESTS = [
     "test_backup_retention_dry_run_then_deletes_only_expired_verified_files",
@@ -20,14 +27,17 @@ TESTS = [
 
 
 def main():
-    suite = unittest.TestSuite(
-        DailyMaintenanceTests(name) for name in TESTS
-    )
+    suite = unittest.TestSuite(module.DailyMaintenanceTests(name) for name in TESTS)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if not result.wasSuccessful():
-        raise SystemExit(1)
-    print(f"BACKUP RETENTION GROUP: {result.testsRun}/{len(TESTS)} sequential checks passed")
+    if not result.wasSuccessful() or result.testsRun != 10:
+        print(
+            f"BACKUP RETENTION LIFECYCLE: {result.testsRun}/10; "
+            f"failures={len(result.failures)}, errors={len(result.errors)}"
+        )
+        return 1
+    print("TAIMOBOT BACKUP RETENTION LIFECYCLE: 10/10 PASSED SEQUENTIALLY.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
