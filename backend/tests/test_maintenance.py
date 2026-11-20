@@ -1976,6 +1976,146 @@ class DailyMaintenanceTests(unittest.TestCase):
             "RESTORE_JOURNAL_INVALID",
         )
 
+    def test_restore_lock_fsyncs_parent_directory_before_reporting_acquired(self):
+        real_fsync = os.fsync
+        observed = {"directory_synced": False}
+        def inspect_fsync(fd):
+            if maintenance_module.stat.S_ISDIR(os.fstat(fd).st_mode):
+                observed["directory_synced"] = True
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=inspect_fsync):
+            lock = acquire_restore_lock("1" * 32)
+        self.assertTrue(observed["directory_synced"])
+        self.assertTrue(Path(lock["lock_file"]).is_file())
+        release_restore_lock(lock["lock_token"])
+
+    def test_restore_lock_directory_publish_sync_failure_removes_exact_marker(self):
+        real_fsync = os.fsync
+        calls = {"count": 0}
+        def fail_publish_sync(fd):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("publish directory sync failed")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_publish_sync):
+            with self.assertRaisesRegex(OSError, "publish directory sync failed"):
+                acquire_restore_lock("2" * 32)
+        self.assertGreaterEqual(calls["count"], 3)
+        self.assertFalse(maintenance_module.restore_lock_path().exists())
+        self.assertFalse(is_restore_lock_active())
+
+    def test_restore_lock_marker_file_sync_failure_never_reports_success(self):
+        real_fsync = os.fsync
+        calls = {"count": 0}
+        def fail_marker_sync(fd):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("marker file sync failed")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_marker_sync):
+            with self.assertRaisesRegex(OSError, "marker file sync failed"):
+                acquire_restore_lock("3" * 32)
+        self.assertFalse(maintenance_module.restore_lock_path().exists())
+        self.assertFalse(is_restore_lock_active())
+
+    def test_restore_lock_preexisting_marker_is_never_overwritten(self):
+        marker = maintenance_module.restore_lock_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        original = json.dumps({"plan_id": "4" * 32, "lock_token": "5" * 32, "pid": 1, "created_at": "2026-11-20T00:00:00+02:00"}).encode()
+        marker.write_bytes(original)
+        with self.assertRaises(FileExistsError):
+            acquire_restore_lock("6" * 32)
+        self.assertEqual(marker.read_bytes(), original)
+
+    def test_restore_lock_marker_symlink_collision_preserves_target(self):
+        marker = maintenance_module.restore_lock_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        target = Path(self.temp_dir.name) / "marker-target"
+        target.write_bytes(b"untouched")
+        marker.symlink_to(target)
+        with self.assertRaises(FileExistsError):
+            acquire_restore_lock("7" * 32)
+        self.assertEqual(target.read_bytes(), b"untouched")
+        self.assertTrue(marker.is_symlink())
+
+    def test_restore_lock_process_guard_is_held_during_publish_directory_sync(self):
+        real_fsync = os.fsync
+        checked = {"blocked": False}
+        def check_guard(fd):
+            if maintenance_module.stat.S_ISDIR(os.fstat(fd).st_mode):
+                with self.assertRaisesRegex(RuntimeError, "connections remain active"):
+                    acquire_restore_lock("8" * 32, timeout_seconds=0)
+                checked["blocked"] = True
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=check_guard):
+            lock = acquire_restore_lock("9" * 32)
+        self.assertTrue(checked["blocked"])
+        release_restore_lock(lock["lock_token"])
+
+    def test_restore_lock_failed_publication_does_not_change_database(self):
+        before = database.DB_PATH.read_bytes()
+        real_fsync = os.fsync
+        calls = {"count": 0}
+        def fail_directory(fd):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("directory persistence unavailable")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_directory):
+            with self.assertRaises(OSError):
+                acquire_restore_lock("a" * 32)
+        self.assertEqual(database.DB_PATH.read_bytes(), before)
+
+    def test_restore_lock_failed_publication_preserves_sqlite_sidecars(self):
+        wal = Path(str(database.DB_PATH) + "-wal")
+        shm = Path(str(database.DB_PATH) + "-shm")
+        wal.write_bytes(b"wal-evidence")
+        shm.write_bytes(b"shm-evidence")
+        real_fsync = os.fsync
+        calls = {"count": 0}
+        def fail_directory(fd):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("directory persistence unavailable")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_directory):
+            with self.assertRaises(OSError):
+                acquire_restore_lock("b" * 32)
+        self.assertEqual(wal.read_bytes(), b"wal-evidence")
+        self.assertEqual(shm.read_bytes(), b"shm-evidence")
+
+    def test_restore_lock_failed_publication_releases_guard_for_new_attempt(self):
+        real_fsync = os.fsync
+        calls = {"count": 0}
+        def fail_directory(fd):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("directory persistence unavailable")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_directory):
+            with self.assertRaises(OSError):
+                acquire_restore_lock("c" * 32)
+        self.assertFalse(is_restore_lock_active())
+        next_lock = acquire_restore_lock("d" * 32)
+        self.assertTrue(is_restore_lock_active())
+        release_restore_lock(next_lock["lock_token"])
+
+    def test_restore_lock_publish_directory_sync_precedes_sidecar_inventory(self):
+        real_inspect = maintenance_module.inspect_sqlite_sidecars
+        observed = {"synced": False}
+        real_fsync = os.fsync
+        def track_fsync(fd):
+            if maintenance_module.stat.S_ISDIR(os.fstat(fd).st_mode):
+                observed["synced"] = True
+            return real_fsync(fd)
+        def inspect_after_sync(path):
+            self.assertTrue(observed["synced"])
+            return real_inspect(path)
+        with patch("app.maintenance.os.fsync", side_effect=track_fsync):
+            with patch("app.maintenance.inspect_sqlite_sidecars", side_effect=inspect_after_sync):
+                lock = acquire_restore_lock("e" * 32)
+        release_restore_lock(lock["lock_token"])
+
     def test_restore_lock_preserves_wal_and_shm_and_does_not_claim_external_quiescence(self):
         external = sqlite3.connect(database.DB_PATH, timeout=5)
         try:
