@@ -1937,12 +1937,34 @@ def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(str(artifact_path), flags)
     try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
+        metadata_before = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata_before.st_mode):
             raise OSError("Recovery artifact is not a regular file.")
+        def identity(value):
+            return (
+                value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+            )
+        initial_identity = identity(metadata_before)
+        bytes_read = 0
         with os.fdopen(descriptor, "rb", closefd=False) as artifact:
-            for chunk in iter(lambda: artifact.read(chunk_size), b""):
+            while True:
+                chunk = artifact.read(chunk_size)
+                if not chunk:
+                    break
                 digest.update(chunk)
+                bytes_read += len(chunk)
+        metadata_after = os.fstat(descriptor)
+        try:
+            path_after = os.stat(artifact_path, follow_symlinks=False)
+        except OSError as error:
+            raise OSError("Recovery artifact path changed while its digest was computed.") from error
+        if (
+            identity(metadata_after) != initial_identity
+            or identity(path_after) != initial_identity
+            or bytes_read != metadata_before.st_size
+        ):
+            raise OSError("Recovery artifact changed while its digest was computed.")
     finally:
         os.close(descriptor)
     return digest.hexdigest()
