@@ -1310,6 +1310,11 @@ def inspect_recovery_artifact_inventory(
                     item["issues"].append("NOT_A_REGULAR_NON_SYMLINK_FILE")
                     artifacts.append(item)
                     continue
+                if path.resolve() == Path(database.DB_PATH).resolve():
+                    item["status"] = "PROTECTED_LIVE_DATABASE"
+                    item["issues"].append("LIVE_DATABASE_IS_NOT_A_BACKUP_ARTIFACT")
+                    artifacts.append(item)
+                    continue
                 stat = path.stat(follow_symlinks=False)
                 inode = (stat.st_dev, stat.st_ino)
                 previous = seen_inodes.get(inode)
@@ -1351,10 +1356,10 @@ def inspect_recovery_artifact_inventory(
                         if expected and item["sha256"] != expected:
                             item["issues"].append("RESTORE_PLAN_FINGERPRINT_MISMATCH")
                             issues.append("RESTORE_PLAN_FINGERPRINT_MISMATCH")
-                if not item["references"]:
-                    item["status"] = "ORPHANED"
-                elif item["issues"]:
+                if item["issues"]:
                     item["status"] = "REVIEW_REQUIRED"
+                elif not item["references"]:
+                    item["status"] = "ORPHANED"
                 else:
                     item["status"] = "REFERENCED"
                 artifacts.append(item)
@@ -1395,7 +1400,7 @@ def inspect_recovery_artifact_inventory(
         issues.append("RESTORE_EXECUTION_JOURNAL_CHANGED_DURING_INVENTORY")
 
     orphaned = [item for item in artifacts if item.get("status") == "ORPHANED"]
-    blocked = bool(issues) or any(item.get("status") in ("UNSAFE", "REVIEW_REQUIRED", "INCOMPLETE") for item in artifacts)
+    blocked = bool(issues) or any(item.get("status") in ("UNSAFE", "REVIEW_REQUIRED", "INCOMPLETE", "PROTECTED_LIVE_DATABASE") for item in artifacts)
     return {
         **result_base,
         "status": "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED" if blocked or orphaned else "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
