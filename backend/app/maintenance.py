@@ -1076,6 +1076,341 @@ def cleanup_expired_backups(
 
 
 
+
+def inspect_recovery_artifact_inventory(
+    backup_dir: Path | None = None,
+    *,
+    journal_path: Path | None = None,
+) -> dict:
+    """Read-only cross-check of managed recovery files against persisted references.
+
+    This diagnostic reports orphaned, missing, unsafe, and fingerprint-conflicting
+    artifacts. It never deletes, repairs, renames, or stages recovery files.
+    """
+    root = Path(backup_dir or BACKUP_DIR)
+    staging = root / "recovery-staging"
+    journal = Path(
+        journal_path
+        or (Path(database.DB_PATH).parent / "restore-execution.audit.jsonl")
+    )
+    result_base = {
+        "read_only": True,
+        "automatic_deletion": False,
+        "automatic_repair": False,
+        "live_database_replaced": False,
+    }
+    if not root.exists():
+        return {
+            **result_base,
+            "status": "NO_BACKUP_DIRECTORY",
+            "artifacts": [],
+            "orphaned_artifacts": [],
+            "missing_references": [],
+            "issues": [],
+        }
+    if root.is_symlink() or not root.is_dir():
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "artifacts": [],
+            "orphaned_artifacts": [],
+            "missing_references": [],
+            "issues": ["BACKUP_DIRECTORY_UNSAFE"],
+        }
+
+    # A journal with an invalid hash chain or lifecycle semantics cannot be
+    # used to decide that an artifact is unreferenced.
+    journal_verification = verify_restore_execution_journal(
+        journal, include_records=True
+    )
+    if journal_verification.get("status") not in (
+        "RESTORE_JOURNAL_EMPTY", "RESTORE_JOURNAL_VERIFIED"
+    ):
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": journal_verification.get("status"),
+            "artifacts": [],
+            "orphaned_artifacts": [],
+            "missing_references": [],
+            "issues": ["RESTORE_EXECUTION_JOURNAL_UNTRUSTED"],
+        }
+    execution_state = inspect_restore_execution_state(journal)
+    if execution_state.get("status") in (
+        "RESTORE_EXECUTION_INSPECTION_BLOCKED",
+        "RESTORE_JOURNAL_SEMANTIC_INVALID",
+    ):
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": execution_state.get("status"),
+            "artifacts": [],
+            "orphaned_artifacts": [],
+            "missing_references": [],
+            "issues": ["RESTORE_EXECUTION_LIFECYCLE_UNTRUSTED"],
+        }
+
+    references: dict[str, list[dict]] = {}
+    expected_hashes: dict[tuple[str, str], str] = {}
+    database_plan_ids: set[str] = set()
+    issues: list[str] = []
+    missing_references: list[dict] = []
+    try:
+        with database.get_connection() as connection:
+            tables = {
+                row["name"] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+
+            def add_reference(raw_path, source, plan_id=None):
+                if not raw_path:
+                    return
+                candidate = Path(str(raw_path))
+                try:
+                    resolved = candidate.resolve(strict=False)
+                    resolved_root = root.resolve()
+                    resolved_staging = staging.resolve()
+                    if resolved != resolved_root and resolved_root not in resolved.parents:
+                        if resolved != resolved_staging and resolved_staging not in resolved.parents:
+                            issues.append("REFERENCE_OUTSIDE_MANAGED_BACKUP_DIRECTORIES")
+                            missing_references.append({
+                                "source": source, "path": str(raw_path),
+                                "status": "OUTSIDE_MANAGED_DIRECTORY",
+                            })
+                            return
+                    key = str(resolved)
+                    references.setdefault(key, []).append({
+                        "source": source, "plan_id": plan_id,
+                    })
+                except (OSError, RuntimeError, ValueError):
+                    issues.append("REFERENCE_PATH_UNRESOLVABLE")
+                    missing_references.append({
+                        "source": source, "path": str(raw_path),
+                        "status": "UNRESOLVABLE",
+                    })
+
+            for table, required in (
+                ("maintenance_runs", {"backup_file"}),
+                ("maintenance_run_attempts", {"backup_file"}),
+                ("maintenance_restore_plans", {
+                    "plan_id", "backup_file", "staging_file",
+                    "pre_restore_backup_file",
+                }),
+                ("maintenance_restore_artifacts", {
+                    "plan_id", "source_sha256", "staged_sha256", "rollback_sha256",
+                }),
+            ):
+                if table not in tables:
+                    continue
+                actual = {
+                    row["name"] for row in connection.execute(
+                        f"PRAGMA table_info({table})"
+                    )
+                }
+                if not required.issubset(actual):
+                    raise sqlite3.DatabaseError(
+                        f"{table} schema is incomplete for recovery inventory"
+                    )
+
+            for table in ("maintenance_runs", "maintenance_run_attempts"):
+                if table in tables:
+                    rows = connection.execute(
+                        f"SELECT backup_file FROM {table} WHERE backup_file IS NOT NULL"
+                    ).fetchall()
+                    for row in rows:
+                        add_reference(row["backup_file"], table)
+
+            if "maintenance_restore_plans" in tables:
+                plans = connection.execute(
+                    """
+                    SELECT plan_id, backup_file, staging_file, pre_restore_backup_file, status
+                    FROM maintenance_restore_plans
+                    """
+                ).fetchall()
+                for plan in plans:
+                    database_plan_ids.add(str(plan["plan_id"]))
+                    add_reference(plan["backup_file"], "maintenance_restore_plans.source", plan["plan_id"])
+                    add_reference(plan["staging_file"], "maintenance_restore_plans.staged", plan["plan_id"])
+                    add_reference(plan["pre_restore_backup_file"], "maintenance_restore_plans.rollback", plan["plan_id"])
+
+            if "maintenance_restore_artifacts" in tables:
+                rows = connection.execute(
+                    """
+                    SELECT plan_id, source_sha256, staged_sha256, rollback_sha256
+                    FROM maintenance_restore_artifacts
+                    """
+                ).fetchall()
+                for row in rows:
+                    for role, field in (
+                        ("source", "source_sha256"),
+                        ("staged", "staged_sha256"),
+                        ("rollback", "rollback_sha256"),
+                    ):
+                        value = row[field]
+                        if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value):
+                            expected_hashes[(str(row["plan_id"]), role)] = value
+                        else:
+                            issues.append("RESTORE_ARTIFACT_FINGERPRINT_INVALID")
+    except (sqlite3.Error, OSError, ValueError) as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": journal_verification.get("status"),
+            "artifacts": [],
+            "orphaned_artifacts": [],
+            "missing_references": [],
+            "issues": ["MAINTENANCE_METADATA_UNREADABLE", str(error)[:180]],
+        }
+
+    journal_plan_ids = {
+        str(record.get("plan_id"))
+        for record in journal_verification.get("records", [])
+        if record.get("plan_id")
+    }
+    for plan_id in sorted(journal_plan_ids - database_plan_ids):
+        issues.append("JOURNAL_PLAN_WITHOUT_DATABASE_PLAN")
+        missing_references.append({
+            "source": "restore_execution_journal",
+            "plan_id": plan_id,
+            "status": "DATABASE_PLAN_MISSING",
+        })
+
+    artifacts: list[dict] = []
+    seen_inodes: dict[tuple[int, int], str] = {}
+    try:
+        directories = [(root, "BACKUP")]
+        if staging.exists():
+            if staging.is_symlink() or not staging.is_dir():
+                raise OSError("recovery-staging directory is unsafe")
+            directories.append((staging, "STAGED"))
+        for directory, artifact_type in directories:
+            for path in sorted(directory.iterdir(), key=lambda item: item.name):
+                if path == staging and artifact_type == "BACKUP":
+                    continue
+                if path.is_dir() and not path.is_symlink():
+                    continue
+                relevant = (
+                    (artifact_type == "BACKUP" and path.name.startswith("taimobot-") and path.name.endswith(".sqlite3"))
+                    or (artifact_type == "STAGED" and path.name.endswith(".sqlite3"))
+                    or path.name.startswith(".taimobot-")
+                )
+                if not relevant:
+                    continue
+                item = {
+                    "file_name": path.name,
+                    "artifact_type": artifact_type if path.name.endswith(".sqlite3") else "INCOMPLETE_TEMPORARY",
+                    "references": [],
+                    "issues": [],
+                    "sha256": None,
+                    "integrity_check": "not_checked",
+                }
+                if path.is_symlink() or not path.is_file():
+                    item["status"] = "UNSAFE"
+                    item["issues"].append("NOT_A_REGULAR_NON_SYMLINK_FILE")
+                    artifacts.append(item)
+                    continue
+                stat = path.stat(follow_symlinks=False)
+                inode = (stat.st_dev, stat.st_ino)
+                previous = seen_inodes.get(inode)
+                if previous:
+                    item["issues"].append("HARD_LINK_ALIAS")
+                    issues.append("DUPLICATE_ARTIFACT_IDENTITY")
+                else:
+                    seen_inodes[inode] = str(path)
+                resolved = str(path.resolve())
+                item["references"] = references.get(resolved, [])
+                if not path.name.endswith(".sqlite3"):
+                    item["status"] = "INCOMPLETE"
+                    item["issues"].append("TEMPORARY_BACKUP_ARTIFACT")
+                    artifacts.append(item)
+                    continue
+                try:
+                    item["sha256"] = sha256_file(path)
+                    with sqlite3.connect(
+                        f"file:{path.resolve()}?mode=ro", uri=True, timeout=10
+                    ) as check:
+                        row = check.execute("PRAGMA integrity_check").fetchone()
+                    item["integrity_check"] = row[0] if row else "no_result"
+                    if item["integrity_check"] != "ok":
+                        item["issues"].append("SQLITE_INTEGRITY_FAILED")
+                except (sqlite3.Error, OSError, ValueError):
+                    item["issues"].append("ARTIFACT_UNREADABLE")
+
+                roles = {
+                    reference.get("source", "").rsplit(".", 1)[-1]
+                    for reference in item["references"]
+                    if reference.get("plan_id")
+                }
+                for reference in item["references"]:
+                    plan_id = reference.get("plan_id")
+                    source = reference.get("source", "")
+                    role = source.rsplit(".", 1)[-1]
+                    if plan_id and role in ("source", "staged", "rollback"):
+                        expected = expected_hashes.get((str(plan_id), role))
+                        if expected and item["sha256"] != expected:
+                            item["issues"].append("RESTORE_PLAN_FINGERPRINT_MISMATCH")
+                            issues.append("RESTORE_PLAN_FINGERPRINT_MISMATCH")
+                if not item["references"]:
+                    item["status"] = "ORPHANED"
+                elif item["issues"]:
+                    item["status"] = "REVIEW_REQUIRED"
+                else:
+                    item["status"] = "REFERENCED"
+                artifacts.append(item)
+    except (OSError, ValueError) as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": journal_verification.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["ARTIFACT_DIRECTORY_UNREADABLE", str(error)[:180]])),
+        }
+
+    present = {
+        str((directory / item["file_name"]).resolve())
+        for directory, kind in directories
+        for item in artifacts
+        if item["artifact_type"] != "INCOMPLETE_TEMPORARY"
+        and item["artifact_type"] == kind
+    }
+    for key, refs in references.items():
+        if key not in present:
+            for reference in refs:
+                missing_references.append({
+                    **reference, "path": key, "status": "REFERENCED_FILE_MISSING",
+                })
+                issues.append("REFERENCED_RECOVERY_ARTIFACT_MISSING")
+
+    # Re-verify the journal after filesystem inspection so a concurrent append
+    # cannot make an artifact appear orphaned based on a stale journal snapshot.
+    final_journal = verify_restore_execution_journal(journal, include_records=True)
+    if (
+        final_journal.get("status") != journal_verification.get("status")
+        or final_journal.get("record_count") != journal_verification.get("record_count")
+        or final_journal.get("last_record_sha256") != journal_verification.get("last_record_sha256")
+    ):
+        issues.append("RESTORE_EXECUTION_JOURNAL_CHANGED_DURING_INVENTORY")
+
+    orphaned = [item for item in artifacts if item.get("status") == "ORPHANED"]
+    blocked = bool(issues) or any(item.get("status") in ("UNSAFE", "REVIEW_REQUIRED", "INCOMPLETE") for item in artifacts)
+    return {
+        **result_base,
+        "status": "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED" if blocked or orphaned else "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+        "journal_status": journal_verification.get("status"),
+        "database_plan_count": len(database_plan_ids),
+        "journal_plan_count": len(journal_plan_ids),
+        "artifact_count": len(artifacts),
+        "orphaned_count": len(orphaned),
+        "artifacts": artifacts,
+        "orphaned_artifacts": orphaned,
+        "missing_references": missing_references,
+        "issues": list(dict.fromkeys(issues)),
+    }
+
+
 def inspect_recovery_candidates(backup_dir: Path | None = None) -> dict:
     """Read-only inventory of managed backups with integrity and schema checks.
 
