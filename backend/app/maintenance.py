@@ -1118,6 +1118,32 @@ def inspect_recovery_artifact_inventory(
             "issues": ["BACKUP_DIRECTORY_UNSAFE"],
         }
 
+    def directory_identity(path: Path):
+        metadata = path.stat(follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("managed recovery directory was replaced or is unsafe")
+        return (metadata.st_dev, metadata.st_ino)
+
+    try:
+        root_identity = directory_identity(root)
+        staging_identity = directory_identity(staging) if staging.exists() or staging.is_symlink() else None
+    except OSError as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "artifacts": [],
+            "orphaned_artifacts": [],
+            "missing_references": [],
+            "issues": ["BACKUP_DIRECTORY_UNSAFE", str(error)[:180]],
+        }
+
+    def assert_managed_directories_unchanged():
+        if directory_identity(root) != root_identity:
+            raise OSError("backup directory identity changed during inventory")
+        current_staging = directory_identity(staging) if staging.exists() or staging.is_symlink() else None
+        if current_staging != staging_identity:
+            raise OSError("recovery staging directory identity changed during inventory")
+
     # A journal with an invalid hash chain or lifecycle semantics cannot be
     # used to decide that an artifact is unreferenced.
     journal_verification = verify_restore_execution_journal(
@@ -1285,7 +1311,9 @@ def inspect_recovery_artifact_inventory(
                 raise OSError("recovery-staging directory is unsafe")
             directories.append((staging, "STAGED"))
         for directory, artifact_type in directories:
+            assert_managed_directories_unchanged()
             for path in sorted(directory.iterdir(), key=lambda item: item.name):
+                assert_managed_directories_unchanged()
                 if path == staging and artifact_type == "BACKUP":
                     continue
                 if path.is_dir() and not path.is_symlink():
@@ -1331,12 +1359,24 @@ def inspect_recovery_artifact_inventory(
                     artifacts.append(item)
                     continue
                 try:
+                    file_before = path.stat(follow_symlinks=False)
                     item["sha256"] = sha256_file(path)
+                    assert_managed_directories_unchanged()
                     with sqlite3.connect(
                         f"file:{path.resolve()}?mode=ro", uri=True, timeout=10
                     ) as check:
                         row = check.execute("PRAGMA integrity_check").fetchone()
                     item["integrity_check"] = row[0] if row else "no_result"
+                    file_after = path.stat(follow_symlinks=False)
+                    if (
+                        file_after.st_dev != file_before.st_dev
+                        or file_after.st_ino != file_before.st_ino
+                        or file_after.st_size != file_before.st_size
+                        or file_after.st_mtime_ns != file_before.st_mtime_ns
+                    ):
+                        item["issues"].append("ARTIFACT_CHANGED_DURING_INVENTORY")
+                        issues.append("ARTIFACT_CHANGED_DURING_INVENTORY")
+                    assert_managed_directories_unchanged()
                     if item["integrity_check"] != "ok":
                         item["issues"].append("SQLITE_INTEGRITY_FAILED")
                 except (sqlite3.Error, OSError, ValueError):
@@ -1372,6 +1412,19 @@ def inspect_recovery_artifact_inventory(
             "orphaned_artifacts": [],
             "missing_references": missing_references,
             "issues": list(dict.fromkeys(issues + ["ARTIFACT_DIRECTORY_UNREADABLE", str(error)[:180]])),
+        }
+
+    try:
+        assert_managed_directories_unchanged()
+    except OSError as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": journal_verification.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["ARTIFACT_DIRECTORY_CHANGED_DURING_INVENTORY", str(error)[:180]])),
         }
 
     present = {
