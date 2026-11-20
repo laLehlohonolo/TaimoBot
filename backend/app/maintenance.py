@@ -1488,7 +1488,7 @@ def _restore_lock_recovery_record_digest(record: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _verify_restore_lock_recovery_audit_fd(descriptor: int) -> dict:
+def _verify_restore_lock_recovery_audit_fd(descriptor: int, *, allow_unmatched_started: bool = False) -> dict:
     """Verify the recovery audit hash chain from an already-open file descriptor."""
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode):
@@ -1549,11 +1549,127 @@ def _verify_restore_lock_recovery_audit_fd(descriptor: int) -> dict:
                 if any(record.get(field) != pending.get(field) for field in identity_fields):
                     raise ValueError("recovery COMPLETE identity does not match STARTED")
                 pending = None
-        if pending is not None:
+        if pending is not None and not allow_unmatched_started:
             raise ValueError("unmatched STARTED recovery requires operator review")
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError) as error:
         raise RuntimeError(f"Restore lock recovery audit integrity verification failed: {str(error)[:160]}") from error
-    return {"record_count": count, "last_record_sha256": previous}
+    pending_summary = None
+    if pending is not None:
+        pending_summary = {
+            field: pending[field]
+            for field in ("operator_id", "incident_ref", "plan_id", "marker_sha256", "marker_file", "timestamp")
+        }
+    return {
+        "record_count": count,
+        "last_record_sha256": previous,
+        "pending_recovery": pending_summary,
+    }
+
+
+def inspect_restore_lock_recovery_audit(audit_path: Path | None = None) -> dict:
+    """Read-only inspection of recovery audit consistency and any interrupted transaction.
+
+    This diagnostic never creates, truncates, repairs, or appends to the audit,
+    restore marker, database, or SQLite sidecars.
+    """
+    audit_file = Path(
+        audit_path
+        or (Path(database.DB_PATH).parent / "restore-lock-recovery.audit.jsonl")
+    )
+    try:
+        descriptor = os.open(str(audit_file), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return {
+            "status": "NO_RECOVERY_AUDIT",
+            "audit_file": str(audit_file),
+            "record_count": 0,
+            "pending_recovery": None,
+            "marker_state": "NOT_CHECKED",
+            "read_only": True,
+            "automatic_repair": False,
+        }
+    except OSError as error:
+        return {
+            "status": "RECOVERY_AUDIT_UNREADABLE",
+            "audit_file": str(audit_file),
+            "error": str(error)[:160],
+            "read_only": True,
+            "automatic_repair": False,
+        }
+
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError("Recovery audit destination is not a regular file.")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {
+                "status": "RECOVERY_AUDIT_BUSY",
+                "audit_file": str(audit_file),
+                "read_only": True,
+                "automatic_repair": False,
+            }
+        try:
+            audit_state = _verify_restore_lock_recovery_audit_fd(
+                descriptor, allow_unmatched_started=True
+            )
+        except RuntimeError as error:
+            return {
+                "status": "RECOVERY_AUDIT_INVALID",
+                "audit_file": str(audit_file),
+                "error": str(error)[:200],
+                "read_only": True,
+                "automatic_repair": False,
+            }
+
+        pending = audit_state["pending_recovery"]
+        marker_state = "NOT_CHECKED"
+        if pending is not None:
+            lock_path = restore_lock_path()
+            marker_fd = None
+            try:
+                marker_fd = os.open(
+                    str(lock_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                )
+                marker_meta = os.fstat(marker_fd)
+                if not stat.S_ISREG(marker_meta.st_mode) or marker_meta.st_size > 65536:
+                    marker_state = "UNREADABLE"
+                else:
+                    marker_bytes = os.read(marker_fd, 65537)
+                    if len(marker_bytes) > 65536:
+                        marker_state = "UNREADABLE"
+                    elif hashlib.sha256(marker_bytes).hexdigest() == pending["marker_sha256"]:
+                        marker_state = "MATCHES_INTERRUPTED_RECOVERY"
+                    else:
+                        marker_state = "DIFFERENT_MARKER_PRESENT"
+            except FileNotFoundError:
+                marker_state = "MARKER_ABSENT"
+            except OSError:
+                marker_state = "UNREADABLE"
+            finally:
+                if marker_fd is not None:
+                    os.close(marker_fd)
+        else:
+            marker_state = "PRESENT_WITHOUT_PENDING_RECOVERY" if restore_lock_path().exists() else "NO_MARKER"
+
+        status = "RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW" if pending else (
+            "RECOVERY_AUDIT_EMPTY" if audit_state["record_count"] == 0 else "RECOVERY_AUDIT_VALID"
+        )
+        return {
+            "status": status,
+            "audit_file": str(audit_file),
+            "record_count": audit_state["record_count"],
+            "last_record_sha256": audit_state["last_record_sha256"],
+            "pending_recovery": pending,
+            "marker_state": marker_state,
+            "read_only": True,
+            "automatic_repair": False,
+            "database_changed": False,
+            "sidecars_changed": False,
+        }
+    finally:
+        os.close(descriptor)
 
 
 def recover_abandoned_restore_lock(
