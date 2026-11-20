@@ -8082,3 +8082,125 @@ _REAL_INVENTORY_HASH_TO_SQLITE_OPEN_RACE_CASES = [
 ]
 for _test_name, _scenario in _REAL_INVENTORY_HASH_TO_SQLITE_OPEN_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_hash_to_sqlite_open_race_test(_scenario))
+
+
+class RecoveryArtifactStreamingHashRaceTests(unittest.TestCase):
+    """Deterministically mutate a real file while sha256_file streams it."""
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.path = self.root / "streamed.sqlite3"
+        self.original = b"TAIMOBOT-RECOVERY-ARTIFACT-" * 512
+        self.path.write_bytes(self.original)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _mutate(self, scenario):
+        if scenario == "append":
+            with self.path.open("ab") as handle: handle.write(b"late")
+        elif scenario == "truncate":
+            self.path.write_bytes(b"short")
+        elif scenario == "same_size_rewrite":
+            self.path.write_bytes(b"X" * len(self.original))
+        elif scenario == "touch":
+            os.utime(self.path, None)
+        elif scenario == "chmod":
+            self.path.chmod(0o600)
+        elif scenario == "unlink":
+            self.path.unlink()
+        elif scenario == "rename":
+            self.path.rename(self.root / "renamed.sqlite3")
+        elif scenario == "replace":
+            replacement = self.root / "replacement.sqlite3"
+            replacement.write_bytes(self.original)
+            replacement.replace(self.path)
+        elif scenario == "symlink":
+            self.path.unlink()
+            self.path.symlink_to(self.root / "missing-target")
+        elif scenario == "hardlink":
+            os.link(self.path, self.root / "second-link.sqlite3")
+        elif scenario == "directory":
+            self.path.unlink()
+            self.path.mkdir()
+        elif scenario == "replace_same_bytes":
+            replacement = self.root / "same-bytes.sqlite3"
+            replacement.write_bytes(self.original)
+            replacement.replace(self.path)
+        elif scenario == "write_restore":
+            with self.path.open("r+b") as handle:
+                handle.seek(0); handle.write(b"Z" * 64); handle.flush()
+                handle.seek(0); handle.write(self.original[:64]); handle.flush()
+        elif scenario == "append_then_truncate":
+            with self.path.open("ab") as handle: handle.write(b"temporary")
+            with self.path.open("r+b") as handle: handle.truncate(len(self.original))
+        elif scenario == "replace_external":
+            external = self.root / "external.sqlite3"
+            external.write_bytes(b"E" * len(self.original))
+            external.replace(self.path)
+        elif scenario == "symlink_external":
+            external = self.root / "external.sqlite3"
+            external.write_bytes(self.original)
+            self.path.unlink(); self.path.symlink_to(external)
+        elif scenario == "hardlink_replace":
+            os.link(self.path, self.root / "alias.sqlite3")
+            replacement = self.root / "replacement.sqlite3"
+            replacement.write_bytes(self.original); replacement.replace(self.path)
+        elif scenario == "atomic_swap_twice":
+            first = self.root / "first.sqlite3"; first.write_bytes(b"A" * len(self.original)); first.replace(self.path)
+            second = self.root / "second.sqlite3"; second.write_bytes(b"B" * len(self.original)); second.replace(self.path)
+        elif scenario == "utime_restore":
+            before = self.path.stat()
+            os.utime(self.path, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000))
+            os.utime(self.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        elif scenario == "hardlink_create_remove":
+            alias = self.root / "temporary-link.sqlite3"
+            os.link(self.path, alias); alias.unlink()
+        elif scenario == "truncate_restore":
+            with self.path.open("r+b") as handle:
+                handle.truncate(len(self.original) // 2)
+                handle.truncate(len(self.original))
+
+    def _assert_stream_mutation_rejected(self, scenario):
+        real_fdopen = os.fdopen
+        calls = {"read": 0, "mutated": False}
+        self_outer = self
+        class MutatingReader:
+            def __init__(self, stream): self.stream = stream
+            def __enter__(self): return self
+            def __exit__(self, *args): return self.stream.__exit__(*args)
+            def read(self, size=-1):
+                chunk = self.stream.read(size)
+                calls["read"] += 1
+                if calls["read"] == 1 and not calls["mutated"]:
+                    calls["mutated"] = True
+                    self_outer._mutate(scenario)
+                return chunk
+        def wrapped_fdopen(fd, *args, **kwargs):
+            return MutatingReader(real_fdopen(fd, *args, **kwargs))
+        with patch.object(maintenance_module.os, "fdopen", side_effect=wrapped_fdopen):
+            with self.assertRaises(OSError, msg=scenario):
+                sha256_file(self.path, chunk_size=64)
+        self.assertTrue(calls["mutated"], scenario)
+        self.assertGreaterEqual(calls["read"], 1)
+
+    def test_stream_append_rejected(self): self._assert_stream_mutation_rejected("append")
+    def test_stream_truncate_rejected(self): self._assert_stream_mutation_rejected("truncate")
+    def test_stream_same_size_rewrite_rejected(self): self._assert_stream_mutation_rejected("same_size_rewrite")
+    def test_stream_touch_rejected(self): self._assert_stream_mutation_rejected("touch")
+    def test_stream_chmod_rejected(self): self._assert_stream_mutation_rejected("chmod")
+    def test_stream_unlink_rejected(self): self._assert_stream_mutation_rejected("unlink")
+    def test_stream_rename_rejected(self): self._assert_stream_mutation_rejected("rename")
+    def test_stream_replace_rejected(self): self._assert_stream_mutation_rejected("replace")
+    def test_stream_symlink_rejected(self): self._assert_stream_mutation_rejected("symlink")
+    def test_stream_hardlink_rejected(self): self._assert_stream_mutation_rejected("hardlink")
+    def test_stream_directory_rejected(self): self._assert_stream_mutation_rejected("directory")
+    def test_stream_replace_same_bytes_rejected(self): self._assert_stream_mutation_rejected("replace_same_bytes")
+    def test_stream_write_restore_rejected(self): self._assert_stream_mutation_rejected("write_restore")
+    def test_stream_append_then_truncate_rejected(self): self._assert_stream_mutation_rejected("append_then_truncate")
+    def test_stream_external_replace_rejected(self): self._assert_stream_mutation_rejected("replace_external")
+    def test_stream_external_symlink_rejected(self): self._assert_stream_mutation_rejected("symlink_external")
+    def test_stream_hardlink_replace_rejected(self): self._assert_stream_mutation_rejected("hardlink_replace")
+    def test_stream_atomic_swap_twice_rejected(self): self._assert_stream_mutation_rejected("atomic_swap_twice")
+    def test_stream_utime_restore_rejected(self): self._assert_stream_mutation_rejected("utime_restore")
+    def test_stream_hardlink_create_remove_rejected(self): self._assert_stream_mutation_rejected("hardlink_create_remove")
