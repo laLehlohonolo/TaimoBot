@@ -2204,7 +2204,8 @@ class DailyMaintenanceTests(unittest.TestCase):
             acquire_restore_lock("a" * 32)
         self.assertEqual(target.read_bytes(), b"do-not-modify")
         self.assertTrue(guard_path.is_symlink())
-        self.assertFalse(restore_lock_path().exists())
+        marker_path = database.DB_PATH.with_name(database.DB_PATH.name + ".restore.lock")
+        self.assertFalse(marker_path.exists())
 
     def test_restore_lock_rejects_invalid_plan_and_release_tokens(self):
         with self.assertRaisesRegex(ValueError, "plan ID"):
