@@ -7589,3 +7589,134 @@ _REAL_INVENTORY_POSTCHECK_METADATA_RACE_CASES = [
 ]
 for _test_name, _scenario in _REAL_INVENTORY_POSTCHECK_METADATA_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_postcheck_metadata_race_test(_scenario))
+
+def _make_real_inventory_combined_final_window_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("combined-final-window-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-combined.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                (str(backup),),
+            )
+        original_verify = maintenance_module.verify_restore_execution_journal
+        calls = {"count": 0}
+        def mutate(*args, **kwargs):
+            result = original_verify(*args, **kwargs)
+            calls["count"] += 1
+            if calls["count"] == 3:
+                with database.get_connection() as connection:
+                    if scenario == "add":
+                        self._make_inventory_backup(root, "taimobot-added.sqlite3")
+                    elif scenario == "remove":
+                        backup.unlink()
+                        connection.execute("DELETE FROM maintenance_runs WHERE run_date='2026-11-20'")
+                    elif scenario == "rename":
+                        moved = root / "taimobot-moved.sqlite3"
+                        backup.rename(moved)
+                        connection.execute("UPDATE maintenance_runs SET backup_file=? WHERE run_date='2026-11-20'", (str(moved),))
+                    elif scenario == "replace":
+                        replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "replacement", "taimobot-replacement.sqlite3")
+                        replacement.replace(backup)
+                    elif scenario == "edit":
+                        with sqlite3.connect(backup) as db:
+                            db.execute("CREATE TABLE late_change (value TEXT)")
+                    elif scenario == "temp_add":
+                        (root / ".taimobot-late.tmp").write_text("partial")
+                    elif scenario == "symlink":
+                        backup.unlink()
+                        backup.symlink_to(root / "missing-target.sqlite3")
+                    elif scenario == "nested":
+                        (root / "late-directory").mkdir()
+                    elif scenario == "same_name_swap":
+                        replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "replacement-same", "taimobot-new.sqlite3")
+                        replacement.replace(backup)
+                    elif scenario == "staging_add":
+                        staging = root / "recovery-staging"
+                        staging.mkdir()
+                        self._make_inventory_backup(staging, "late-stage.sqlite3")
+                    elif scenario == "staging_remove":
+                        staging = root / "recovery-staging"
+                        staging.mkdir()
+                        self._make_inventory_backup(staging, "staged.sqlite3")
+                        for child in staging.iterdir(): child.unlink()
+                        staging.rmdir()
+                    elif scenario == "staging_replace":
+                        staging = root / "recovery-staging"
+                        staging.mkdir()
+                        staged = self._make_inventory_backup(staging, "staged.sqlite3")
+                        replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "stage-replacement", "new-stage.sqlite3")
+                        replacement.replace(staged)
+                    elif scenario == "staging_edit":
+                        staging = root / "recovery-staging"
+                        staging.mkdir()
+                        staged = self._make_inventory_backup(staging, "staged.sqlite3")
+                        with sqlite3.connect(staged) as db: db.execute("CREATE TABLE late_change (value TEXT)")
+                    elif scenario == "db_update":
+                        connection.execute("UPDATE maintenance_runs SET completed_at='changed' WHERE run_date='2026-11-20'")
+                    elif scenario == "db_delete":
+                        connection.execute("DELETE FROM maintenance_runs WHERE run_date='2026-11-20'")
+                    elif scenario == "db_insert":
+                        connection.execute("INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-19','FAILED','s','e',?)", (str(backup),))
+                    elif scenario == "db_and_add":
+                        self._make_inventory_backup(root, "taimobot-db-add.sqlite3")
+                        connection.execute("UPDATE maintenance_runs SET completed_at='both' WHERE run_date='2026-11-20'")
+                    elif scenario == "db_and_remove":
+                        backup.unlink()
+                        connection.execute("DELETE FROM maintenance_runs WHERE run_date='2026-11-20'")
+                    elif scenario == "db_and_staging":
+                        staging = root / "recovery-staging"
+                        staging.mkdir()
+                        self._make_inventory_backup(staging, "paired-stage.sqlite3")
+                        connection.execute("UPDATE maintenance_runs SET completed_at='both-staging' WHERE run_date='2026-11-20'")
+                    elif scenario == "file_permission":
+                        backup.chmod(0o600)
+                        connection.execute("UPDATE maintenance_runs SET completed_at='permission' WHERE run_date='2026-11-20'")
+                    elif scenario == "multi_replace":
+                        replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "replacement-many", "taimobot-many.sqlite3")
+                        replacement.replace(backup)
+                        connection.execute("UPDATE maintenance_runs SET completed_at='multi' WHERE run_date='2026-11-20'")
+            return result
+        with patch.object(maintenance_module, "verify_restore_execution_journal", side_effect=mutate):
+            response = self._call_real_inventory_api(root)
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls["count"], 3)
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertEqual(payload["orphaned_artifacts"], [])
+        self.assertTrue(
+            any(code in payload["issues"] for code in (
+                "ARTIFACT_DIRECTORY_CHANGED_DURING_INVENTORY",
+                "ARTIFACT_CHANGED_DURING_FINAL_CHECK",
+                "MAINTENANCE_METADATA_CHANGED_BEFORE_RESPONSE",
+            )),
+            payload["issues"],
+        )
+    return test
+
+
+_REAL_INVENTORY_COMBINED_FINAL_WINDOW_RACE_CASES = [
+    ("test_combined_final_window_add", "add"),
+    ("test_combined_final_window_remove", "remove"),
+    ("test_combined_final_window_rename", "rename"),
+    ("test_combined_final_window_replace", "replace"),
+    ("test_combined_final_window_edit", "edit"),
+    ("test_combined_final_window_temp_add", "temp_add"),
+    ("test_combined_final_window_symlink", "symlink"),
+    ("test_combined_final_window_nested", "nested"),
+    ("test_combined_final_window_same_name_swap", "same_name_swap"),
+    ("test_combined_final_window_staging_add", "staging_add"),
+    ("test_combined_final_window_staging_remove", "staging_remove"),
+    ("test_combined_final_window_staging_replace", "staging_replace"),
+    ("test_combined_final_window_staging_edit", "staging_edit"),
+    ("test_combined_final_window_db_update", "db_update"),
+    ("test_combined_final_window_db_delete", "db_delete"),
+    ("test_combined_final_window_db_insert", "db_insert"),
+    ("test_combined_final_window_db_and_add", "db_and_add"),
+    ("test_combined_final_window_db_and_remove", "db_and_remove"),
+    ("test_combined_final_window_db_and_staging", "db_and_staging"),
+    ("test_combined_final_window_file_permission", "file_permission"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_COMBINED_FINAL_WINDOW_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_combined_final_window_race_test(_scenario))
