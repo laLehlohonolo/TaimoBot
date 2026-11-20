@@ -5563,5 +5563,129 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertTrue(marker.exists())
 
 
+    def _is_audit_fd_for_test(self, fd, audit):
+        try:
+            return audit.exists() and os.path.samefile(audit, f"/proc/self/fd/{fd}")
+        except OSError:
+            return False
+
+    def test_started_fsync_failure_keeps_marker_and_unmatched_audit(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"started-barrier.jsonl"; real=os.fsync
+        def fail(fd):
+            if self._is_audit_fd_for_test(fd,audit): raise OSError("STARTED barrier failed")
+            return real(fd)
+        with patch("app.maintenance.os.fsync",side_effect=fail), self.assertRaisesRegex(OSError,"STARTED barrier"):
+            recover_abandoned_restore_lock("operator","INC-START-BARRIER",confirm=True,audit_path=audit)
+        self.assertTrue(marker.exists())
+        with audit.open("rb") as f:
+            with self.assertRaisesRegex(RuntimeError,"unmatched STARTED"): maintenance_module._verify_restore_lock_recovery_audit_fd(f.fileno())
+
+    def test_started_fsync_failure_blocks_retry_without_audit_mutation(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"started-retry-barrier.jsonl"; real=os.fsync
+        def fail(fd):
+            if self._is_audit_fd_for_test(fd,audit): raise OSError("STARTED sync failed")
+            return real(fd)
+        with patch("app.maintenance.os.fsync",side_effect=fail), self.assertRaises(OSError):
+            recover_abandoned_restore_lock("operator","INC-START-RETRY-BARRIER",confirm=True,audit_path=audit)
+        before=audit.read_bytes()
+        with self.assertRaisesRegex(RuntimeError,"integrity verification failed"):
+            recover_abandoned_restore_lock("operator","INC-START-RETRY-BARRIER-2",confirm=True,audit_path=audit)
+        self.assertEqual(audit.read_bytes(),before); self.assertTrue(marker.exists())
+
+    def test_started_fsync_precedes_marker_unlink(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"started-order-fsync.jsonl"; events=[]; real=os.fsync; unlink=Path.unlink
+        def fs(fd):
+            if self._is_audit_fd_for_test(fd,audit): events.append("audit-fsync")
+            return real(fd)
+        def un(path,*a,**k):
+            if path==marker: events.append("marker-unlink")
+            return unlink(path,*a,**k)
+        with patch("app.maintenance.os.fsync",side_effect=fs),patch.object(Path,"unlink",un):
+            recover_abandoned_restore_lock("operator","INC-START-ORDER-FSYNC",confirm=True,audit_path=audit)
+        self.assertLess(events.index("audit-fsync"),events.index("marker-unlink"))
+
+    def test_marker_directory_fsync_precedes_complete_append(self):
+        marker=self._write_abandoned_restore_marker(); d=Path(self.temp_dir.name)/"audit-dir"; d.mkdir(); audit=d/"events.jsonl"; md=marker.parent.stat(); events=[]; fs=os.fsync; wr=os.write
+        def sync(fd):
+            st=os.fstat(fd)
+            if maintenance_module.stat.S_ISDIR(st.st_mode) and (st.st_dev,st.st_ino)==(md.st_dev,md.st_ino): events.append("marker-dir-sync")
+            return fs(fd)
+        def write(fd,data):
+            if self._is_audit_fd_for_test(fd,audit) and b'"event": "RESTORE_LOCK_RECOVERY_COMPLETE"' in bytes(data): events.append("complete-write")
+            return wr(fd,data)
+        with patch("app.maintenance.os.fsync",side_effect=sync),patch("app.maintenance.os.write",side_effect=write):
+            recover_abandoned_restore_lock("operator","INC-MARKER-DIR-ORDER",confirm=True,audit_path=audit)
+        self.assertLess(events.index("marker-dir-sync"),events.index("complete-write"))
+
+    def test_complete_fsync_is_final_barrier_before_success_return(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"complete-order-fsync.jsonl"; events=[]; real=os.fsync
+        def fs(fd):
+            if self._is_audit_fd_for_test(fd,audit): events.append("audit-fsync")
+            return real(fd)
+        with patch("app.maintenance.os.fsync",side_effect=fs):
+            result=recover_abandoned_restore_lock("operator","INC-COMPLETE-ORDER-FSYNC",confirm=True,audit_path=audit); events.append("return")
+        self.assertEqual(events,["audit-fsync","audit-fsync","return"]); self.assertEqual(result["status"],"ABANDONED_RESTORE_LOCK_RECOVERED"); self.assertFalse(marker.exists())
+
+    def test_started_fsync_failure_preserves_database_and_sidecars(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"started-preserve.jsonl"; wal=Path(str(database.DB_PATH)+"-wal"); shm=Path(str(database.DB_PATH)+"-shm"); wal.write_bytes(b"wal"); shm.write_bytes(b"shm"); before=database.DB_PATH.read_bytes(); real=os.fsync
+        def fs(fd):
+            if self._is_audit_fd_for_test(fd,audit): raise OSError("STARTED sync fault")
+            return real(fd)
+        with patch("app.maintenance.os.fsync",side_effect=fs),self.assertRaises(OSError):
+            recover_abandoned_restore_lock("operator","INC-START-PRESERVE",confirm=True,audit_path=audit)
+        self.assertTrue(marker.exists()); self.assertEqual(database.DB_PATH.read_bytes(),before); self.assertEqual(wal.read_bytes(),b"wal"); self.assertEqual(shm.read_bytes(),b"shm")
+
+    def test_complete_fsync_failure_preserves_database_and_sidecars(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"complete-preserve.jsonl"; wal=Path(str(database.DB_PATH)+"-wal"); shm=Path(str(database.DB_PATH)+"-shm"); wal.write_bytes(b"wal"); shm.write_bytes(b"shm"); before=database.DB_PATH.read_bytes(); real=os.fsync; n={"v":0}
+        def fs(fd):
+            if self._is_audit_fd_for_test(fd,audit):
+                n["v"]+=1
+                if n["v"]==2: raise OSError("COMPLETE sync fault")
+            return real(fd)
+        with patch("app.maintenance.os.fsync",side_effect=fs),self.assertRaisesRegex(OSError,"COMPLETE sync fault"):
+            recover_abandoned_restore_lock("operator","INC-COMPLETE-PRESERVE",confirm=True,audit_path=audit)
+        self.assertFalse(marker.exists()); self.assertEqual(database.DB_PATH.read_bytes(),before); self.assertEqual(wal.read_bytes(),b"wal"); self.assertEqual(shm.read_bytes(),b"shm")
+
+    def test_complete_fsync_failure_never_returns_success(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"complete-no-success.jsonl"; real=os.fsync; n={"v":0}; returned=[]
+        def fs(fd):
+            if self._is_audit_fd_for_test(fd,audit):
+                n["v"]+=1
+                if n["v"]==2: raise OSError("COMPLETE durability unknown")
+            return real(fd)
+        with patch("app.maintenance.os.fsync",side_effect=fs):
+            with self.assertRaisesRegex(OSError,"durability unknown"):
+                returned.append(recover_abandoned_restore_lock("operator","INC-COMPLETE-NO-SUCCESS",confirm=True,audit_path=audit))
+        self.assertEqual(returned,[]); self.assertFalse(marker.exists())
+
+    def test_complete_fsync_failure_cannot_be_automatically_retried_or_repaired(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"complete-no-repair.jsonl"; real=os.fsync; n={"v":0}
+        def fs(fd):
+            if self._is_audit_fd_for_test(fd,audit):
+                n["v"]+=1
+                if n["v"]==2: raise OSError("COMPLETE fsync failed")
+            return real(fd)
+        with patch("app.maintenance.os.fsync",side_effect=fs),self.assertRaises(OSError):
+            recover_abandoned_restore_lock("operator","INC-COMPLETE-NO-REPAIR",confirm=True,audit_path=audit)
+        before=audit.read_bytes()
+        with self.assertRaisesRegex(RuntimeError,"not confirmed abandoned"):
+            recover_abandoned_restore_lock("operator","INC-COMPLETE-NO-REPAIR-RETRY",confirm=True,audit_path=audit)
+        self.assertEqual(audit.read_bytes(),before); self.assertFalse(marker.exists())
+
+    def test_unsynced_complete_record_loss_is_detected_as_unmatched_started(self):
+        marker=self._write_abandoned_restore_marker(); audit=Path(self.temp_dir.name)/"complete-loss.jsonl"; real=os.fsync; n={"v":0}
+        def fs(fd):
+            if self._is_audit_fd_for_test(fd,audit):
+                n["v"]+=1
+                if n["v"]==2: raise OSError("simulated power-loss boundary")
+            return real(fd)
+        with patch("app.maintenance.os.fsync",side_effect=fs),self.assertRaises(OSError):
+            recover_abandoned_restore_lock("operator","INC-COMPLETE-LOSS",confirm=True,audit_path=audit)
+        self.assertFalse(marker.exists()); raw=audit.read_bytes(); end=raw.find(b"\n")+1; self.assertGreater(end,0); audit.write_bytes(raw[:end])
+        with audit.open("rb") as f:
+            with self.assertRaisesRegex(RuntimeError,"unmatched STARTED"): maintenance_module._verify_restore_lock_recovery_audit_fd(f.fileno())
+
+
+
 if __name__ == "__main__":
     unittest.main()
