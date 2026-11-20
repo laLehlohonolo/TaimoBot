@@ -5411,6 +5411,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             if not is_audit:
                 return real_write(fd, data)
             if mode == "short":
+                state["triggered"] = True
                 return real_write(fd, payload[:max(1, len(payload) // 3)])
             if not state["triggered"] and ('"event": "' + target_event + '"').encode() in payload:
                 state["triggered"] = True
