@@ -7107,6 +7107,144 @@ for _test_name, _scenario in _REAL_INVENTORY_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_race_test(_scenario))
 
 
+def _make_real_inventory_metadata_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("metadata-race-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-metadata-race.sqlite3")
+        self._create_inventory_metadata_tables()
+        baseline_hash = maintenance_module.sha256_file(backup)
+        plan_id = "a" * 32
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-19','COMPLETE','start','end',?)",
+                (str(backup),),
+            )
+            connection.execute(
+                "INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('baseline-attempt','2026-11-19','FAILED','start','end',?)",
+                (str(backup),),
+            )
+            connection.execute(
+                "INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','2026-11-20','operator')",
+                (plan_id, str(backup), str(backup), str(backup)),
+            )
+            connection.execute(
+                "INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)",
+                (plan_id, baseline_hash, baseline_hash, baseline_hash),
+            )
+
+        def mutate_metadata():
+            with database.get_connection() as connection:
+                if scenario == "insert_run":
+                    connection.execute(
+                        "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                        (str(backup),),
+                    )
+                elif scenario == "insert_attempt":
+                    connection.execute(
+                        "INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('new-attempt','2026-11-20','FAILED','start','end',?)",
+                        (str(backup),),
+                    )
+                elif scenario == "update_run_status":
+                    connection.execute("UPDATE maintenance_runs SET status='FAILED' WHERE run_date='2026-11-19'")
+                elif scenario == "delete_run":
+                    connection.execute("DELETE FROM maintenance_runs WHERE run_date='2026-11-19'")
+                elif scenario == "change_run_path":
+                    connection.execute("UPDATE maintenance_runs SET backup_file=? WHERE run_date='2026-11-19'", (str(root / "other.sqlite3"),))
+                elif scenario == "insert_plan":
+                    connection.execute(
+                        "INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','2026-11-20','operator')",
+                        ("b" * 32, str(backup), str(backup), str(backup)),
+                    )
+                elif scenario == "update_plan_status":
+                    connection.execute("UPDATE maintenance_restore_plans SET status='FAILED' WHERE plan_id=?", (plan_id,))
+                elif scenario == "delete_plan":
+                    connection.execute("DELETE FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,))
+                elif scenario == "change_plan_path":
+                    connection.execute("UPDATE maintenance_restore_plans SET backup_file=? WHERE plan_id=?", (str(root / "other.sqlite3"), plan_id))
+                elif scenario == "insert_artifact":
+                    connection.execute(
+                        "INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)",
+                        ("b" * 32, baseline_hash, baseline_hash, baseline_hash),
+                    )
+                elif scenario == "update_artifact_hash":
+                    connection.execute("UPDATE maintenance_restore_artifacts SET source_sha256=? WHERE plan_id=?", ("b" * 64, plan_id))
+                elif scenario == "delete_artifact":
+                    connection.execute("DELETE FROM maintenance_restore_artifacts WHERE plan_id=?", (plan_id,))
+                elif scenario == "insert_superseded_attempt":
+                    connection.execute(
+                        "INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('superseded-attempt','2026-11-18','SUPERSEDED','start','end',?)",
+                        (str(backup),),
+                    )
+                elif scenario == "update_attempt_status":
+                    connection.execute("UPDATE maintenance_run_attempts SET status='COMPLETE' WHERE attempt_token='baseline-attempt'")
+                elif scenario == "delete_attempt":
+                    connection.execute("DELETE FROM maintenance_run_attempts WHERE attempt_token='baseline-attempt'")
+                elif scenario == "change_attempt_path":
+                    connection.execute("UPDATE maintenance_run_attempts SET backup_file=? WHERE attempt_token='baseline-attempt'", (str(root / "other.sqlite3"),))
+                elif scenario == "update_run_timestamp":
+                    connection.execute("UPDATE maintenance_runs SET completed_at='changed' WHERE run_date='2026-11-19'")
+                elif scenario == "update_plan_operator":
+                    connection.execute("UPDATE maintenance_restore_plans SET created_by='changed-operator' WHERE plan_id=?", (plan_id,))
+                elif scenario == "insert_second_run":
+                    connection.execute(
+                        "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-18','SUPERSEDED','start','end',?)",
+                        (str(backup),),
+                    )
+                elif scenario == "insert_plan_and_artifacts":
+                    new_plan = "c" * 32
+                    connection.execute(
+                        "INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','2026-11-20','operator')",
+                        (new_plan, str(backup), str(backup), str(backup)),
+                    )
+                    connection.execute(
+                        "INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)",
+                        (new_plan, baseline_hash, baseline_hash, baseline_hash),
+                    )
+
+        original_hash = maintenance_module.sha256_file
+        changed = {"done": False}
+        def mutate_during_scan(path):
+            digest = original_hash(path)
+            if Path(path) == backup and not changed["done"]:
+                changed["done"] = True
+                mutate_metadata()
+            return digest
+
+        with patch.object(maintenance_module, "sha256_file", side_effect=mutate_during_scan):
+            payload = self._call_real_inventory_api(root).json()
+        self.assertTrue(changed["done"])
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertIn("MAINTENANCE_METADATA_CHANGED_DURING_INVENTORY", payload["issues"])
+        self.assertEqual(payload["orphaned_artifacts"], [])
+    return test
+
+
+_REAL_INVENTORY_METADATA_RACE_CASES = [
+    ("test_metadata_race_insert_completed_run", "insert_run"),
+    ("test_metadata_race_insert_failed_attempt", "insert_attempt"),
+    ("test_metadata_race_update_run_status", "update_run_status"),
+    ("test_metadata_race_delete_run_reference", "delete_run"),
+    ("test_metadata_race_change_run_backup_path", "change_run_path"),
+    ("test_metadata_race_insert_restore_plan", "insert_plan"),
+    ("test_metadata_race_update_restore_plan_status", "update_plan_status"),
+    ("test_metadata_race_delete_restore_plan", "delete_plan"),
+    ("test_metadata_race_change_restore_plan_path", "change_plan_path"),
+    ("test_metadata_race_insert_restore_artifact_fingerprints", "insert_artifact"),
+    ("test_metadata_race_update_restore_artifact_fingerprint", "update_artifact_hash"),
+    ("test_metadata_race_delete_restore_artifact_fingerprints", "delete_artifact"),
+    ("test_metadata_race_insert_superseded_attempt", "insert_superseded_attempt"),
+    ("test_metadata_race_update_attempt_status", "update_attempt_status"),
+    ("test_metadata_race_delete_attempt_reference", "delete_attempt"),
+    ("test_metadata_race_change_attempt_backup_path", "change_attempt_path"),
+    ("test_metadata_race_update_run_completion_timestamp", "update_run_timestamp"),
+    ("test_metadata_race_update_restore_plan_operator", "update_plan_operator"),
+    ("test_metadata_race_insert_second_maintenance_run", "insert_second_run"),
+    ("test_metadata_race_insert_plan_and_artifact_atomically", "insert_plan_and_artifacts"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_METADATA_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_metadata_race_test(_scenario))
+
+
 
 
 
