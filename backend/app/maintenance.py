@@ -1257,9 +1257,25 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
                 raise RuntimeError(
                     "Restore lock refused: application database connections remain open."
                 )
+            guard_path = database.restore_guard_path()
             guard_fd = os.open(
-                str(database.restore_guard_path()), os.O_CREAT | os.O_RDWR, 0o600
+                str(guard_path),
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
             )
+            if not stat.S_ISREG(os.fstat(guard_fd).st_mode):
+                raise RuntimeError("Restore guard is not a regular file; lock acquisition refused.")
+            try:
+                guard_path_stat = guard_path.lstat()
+            except OSError as error:
+                raise RuntimeError("Restore guard path cannot be verified safely.") from error
+            guard_fd_stat = os.fstat(guard_fd)
+            if (
+                stat.S_ISLNK(guard_path_stat.st_mode)
+                or (guard_path_stat.st_dev, guard_path_stat.st_ino)
+                != (guard_fd_stat.st_dev, guard_fd_stat.st_ino)
+            ):
+                raise RuntimeError("Restore guard changed during acquisition; lock refused.")
             deadline = time.monotonic() + float(timeout_seconds)
             while True:
                 try:
