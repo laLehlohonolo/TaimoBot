@@ -1499,7 +1499,11 @@ def _verify_restore_lock_recovery_audit_fd(descriptor: int, *, allow_unmatched_s
     if len(raw) != metadata.st_size:
         raise RuntimeError("Restore lock recovery audit changed or was truncated during verification.")
     if not raw:
-        return {"record_count": 0, "last_record_sha256": "0" * 64}
+        return {
+            "record_count": 0,
+            "last_record_sha256": "0" * 64,
+            "pending_recovery": None,
+        }
     if not raw.endswith(b"\n"):
         raise RuntimeError("Restore lock recovery audit has an incomplete final record.")
     previous = "0" * 64
