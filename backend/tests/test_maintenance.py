@@ -5820,6 +5820,102 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(audit.read_bytes(), snapshots["audit"])
 
 
+    def _consistency_inputs(self, *, audit_status="RECOVERY_AUDIT_VALID",
+                             pending=None, marker_state="NO_MARKER",
+                             marker_status="NO_RESTORE_LOCK", marker_plan=None,
+                             execution_status="NO_RECORDED_RESTORE_EXECUTION",
+                             executions=None):
+        audit = {"status": audit_status, "pending_recovery": pending,
+                 "marker_state": marker_state, "read_only": True}
+        execution = {"status": execution_status, "executions": executions or [],
+                     "automatic_action": "NONE", "live_database_replaced": False}
+        marker = {"status": marker_status, "plan_id": marker_plan}
+        return audit, execution, marker
+
+    def _run_consistency(self, values):
+        audit, execution, marker = values
+        with patch("app.maintenance.inspect_restore_lock_recovery_audit", return_value=audit), \
+             patch("app.maintenance.inspect_restore_execution_state", return_value=execution), \
+             patch("app.maintenance.inspect_restore_lock", return_value=marker):
+            return maintenance_module.inspect_restore_recovery_consistency()
+
+    def test_consistency_clean_completed_histories_need_no_action(self):
+        result = self._run_consistency(self._consistency_inputs())
+        self.assertEqual(result["decision"], "NO_ACTION")
+        self.assertEqual(result["status"], "RESTORE_RECOVERY_CONSISTENT")
+
+    def test_consistency_pending_started_with_matching_marker_blocks_retry(self):
+        pending = {"plan_id": "a" * 32}
+        result = self._run_consistency(self._consistency_inputs(
+            audit_status="RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW",
+            pending=pending, marker_state="MATCHES_INTERRUPTED_RECOVERY",
+            marker_status="ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW",
+            marker_plan="a" * 32))
+        self.assertEqual(result["decision"], "OPERATOR_REVIEW_REQUIRED")
+        self.assertIn("DO_NOT_RETRY", result["recommended_action"])
+
+    def test_consistency_pending_started_with_absent_marker_never_auto_completes(self):
+        result = self._run_consistency(self._consistency_inputs(
+            audit_status="RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW",
+            pending={"plan_id": "a" * 32}, marker_state="MARKER_ABSENT"))
+        self.assertEqual(result["decision"], "OPERATOR_REVIEW_REQUIRED")
+        self.assertFalse(result["automatic_resume"])
+
+    def test_consistency_replacement_marker_plan_conflict_is_reported(self):
+        result = self._run_consistency(self._consistency_inputs(
+            audit_status="RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW",
+            pending={"plan_id": "a" * 32}, marker_state="DIFFERENT_MARKER_PRESENT",
+            marker_status="ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW",
+            marker_plan="b" * 32))
+        self.assertTrue(any("conflicts" in reason for reason in result["reasons"]))
+
+    def test_consistency_nonterminal_execution_requires_operator_review(self):
+        result = self._run_consistency(self._consistency_inputs(
+            execution_status="RESTORE_EXECUTION_REVIEW_REQUIRED",
+            executions=[{"plan_id": "a" * 32, "terminal": False}]))
+        self.assertEqual(result["decision"], "OPERATOR_REVIEW_REQUIRED")
+
+    def test_consistency_terminal_execution_still_requires_reconciliation(self):
+        result = self._run_consistency(self._consistency_inputs(
+            execution_status="RESTORE_EXECUTION_TERMINAL_EVENTS_RECORDED",
+            executions=[{"plan_id": "a" * 32, "terminal": True}]))
+        self.assertEqual(result["decision"], "OPERATOR_REVIEW_REQUIRED")
+        self.assertTrue(any("reconciliation" in reason for reason in result["reasons"]))
+
+    def test_consistency_same_plan_in_both_journals_is_explicit_conflict(self):
+        result = self._run_consistency(self._consistency_inputs(
+            audit_status="RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW",
+            pending={"plan_id": "a" * 32}, marker_state="MATCHES_INTERRUPTED_RECOVERY",
+            marker_status="ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW",
+            marker_plan="a" * 32,
+            executions=[{"plan_id": "a" * 32, "terminal": False}],
+            execution_status="RESTORE_EXECUTION_REVIEW_REQUIRED"))
+        self.assertTrue(any("both histories" in reason for reason in result["reasons"]))
+
+    def test_consistency_invalid_audit_and_journal_fail_closed(self):
+        result = self._run_consistency(self._consistency_inputs(
+            audit_status="RECOVERY_AUDIT_INVALID",
+            execution_status="RESTORE_EXECUTION_INSPECTION_BLOCKED"))
+        self.assertEqual(result["decision"], "OPERATOR_REVIEW_REQUIRED")
+
+    def test_consistency_unsafe_marker_fails_closed(self):
+        result = self._run_consistency(self._consistency_inputs(
+            marker_status="RESTORE_LOCK_UNSAFE_MARKER"))
+        self.assertEqual(result["decision"], "OPERATOR_REVIEW_REQUIRED")
+
+    def test_consistency_is_read_only_and_never_authorizes_repair(self):
+        result = self._run_consistency(self._consistency_inputs(
+            audit_status="RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW",
+            pending={"plan_id": "a" * 32}, marker_state="MARKER_ABSENT"))
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["automatic_repair"])
+        self.assertFalse(result["automatic_resume"])
+        self.assertFalse(result["database_changed"])
+        self.assertFalse(result["sidecars_changed"])
+
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
