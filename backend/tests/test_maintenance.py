@@ -6830,8 +6830,9 @@ class DailyMaintenanceTests(unittest.TestCase):
         root = Path(self.temp_dir.name) / "api-missing-staged"
         source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
         rollback = self._make_inventory_backup(root, "taimobot-rollback.sqlite3")
-        staged = root / "recovery-staging" / "taimobot-missing-stage.sqlite3"
+        staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-stage-to-remove.sqlite3")
         self._insert_inventory_restore_plan(source, staged, rollback)
+        staged.unlink()
         payload = self._call_real_inventory_api(root).json()
         self.assertTrue(any(x["status"] == "REFERENCED_FILE_MISSING" and x["source"] == "maintenance_restore_plans.staged" for x in payload["missing_references"]))
 
@@ -6839,8 +6840,9 @@ class DailyMaintenanceTests(unittest.TestCase):
         root = Path(self.temp_dir.name) / "api-missing-rollback"
         source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
         staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-staged.sqlite3")
-        rollback = root / "taimobot-missing-rollback.sqlite3"
+        rollback = self._make_inventory_backup(root, "taimobot-rollback-to-remove.sqlite3")
         self._insert_inventory_restore_plan(source, staged, rollback)
+        rollback.unlink()
         payload = self._call_real_inventory_api(root).json()
         self.assertTrue(any(x["status"] == "REFERENCED_FILE_MISSING" and x["source"] == "maintenance_restore_plans.rollback" for x in payload["missing_references"]))
 
