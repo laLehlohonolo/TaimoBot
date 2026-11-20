@@ -1414,6 +1414,7 @@ def inspect_restore_lock() -> dict:
             )
             or isinstance(process_id, bool)
             or not isinstance(process_id, int)
+            or process_id <= 0
             or not isinstance(created_at, str)
         ):
             raise ValueError("invalid restore marker metadata")
