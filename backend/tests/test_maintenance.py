@@ -15,6 +15,7 @@ from app.maintenance import (
     create_verified_backup,
     is_maintenance_window,
     inspect_recovery_candidates,
+    inspect_recovery_artifact_inventory,
     verify_restore_candidate,
     verify_restore_execution_readiness,
     verify_restore_execution_readiness_under_lock,
@@ -99,6 +100,307 @@ class DailyMaintenanceTests(unittest.TestCase):
             "lock_token": "b" * 32,
         }), encoding="utf-8")
         return lock_path
+
+
+    def _make_inventory_backup(self, directory, name):
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        with sqlite3.connect(database.DB_PATH) as source, sqlite3.connect(path) as target:
+            source.backup(target)
+        return path
+
+    def _create_inventory_metadata_tables(self):
+        with database.get_connection() as connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS maintenance_runs (
+                    run_date TEXT PRIMARY KEY, status TEXT NOT NULL,
+                    started_at TEXT NOT NULL, completed_at TEXT,
+                    backup_file TEXT, error_summary TEXT, run_token TEXT
+                );
+                CREATE TABLE IF NOT EXISTS maintenance_run_attempts (
+                    attempt_token TEXT PRIMARY KEY, run_date TEXT NOT NULL,
+                    status TEXT NOT NULL, started_at TEXT NOT NULL,
+                    completed_at TEXT, backup_file TEXT, error_summary TEXT
+                );
+                CREATE TABLE IF NOT EXISTS maintenance_restore_plans (
+                    plan_id TEXT PRIMARY KEY, backup_file TEXT NOT NULL,
+                    staging_file TEXT NOT NULL, pre_restore_backup_file TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS maintenance_restore_artifacts (
+                    plan_id TEXT PRIMARY KEY, source_sha256 TEXT NOT NULL,
+                    staged_sha256 TEXT NOT NULL, rollback_sha256 TEXT NOT NULL
+                );
+            """)
+
+    def _insert_inventory_restore_plan(self, source, staged, rollback, plan_id="a" * 32):
+        self._create_inventory_metadata_tables()
+        hashes = [maintenance_module.sha256_file(item) for item in (source, staged, rollback)]
+        with database.get_connection() as connection:
+            connection.execute(
+                """INSERT INTO maintenance_restore_plans
+                   (plan_id, backup_file, staging_file, pre_restore_backup_file,
+                    status, created_at, created_by)
+                   VALUES (?, ?, ?, ?, 'PREPARED', ?, 'operator')""",
+                (plan_id, str(source), str(staged), str(rollback), "2026-11-20T00:00:00+02:00"),
+            )
+            connection.execute(
+                """INSERT INTO maintenance_restore_artifacts
+                   (plan_id, source_sha256, staged_sha256, rollback_sha256)
+                   VALUES (?, ?, ?, ?)""",
+                (plan_id, *hashes),
+            )
+        return hashes
+
+    def test_recovery_artifact_inventory_reports_empty_directory(self):
+        root = Path(self.temp_dir.name) / "empty-backups"
+        root.mkdir()
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["status"], "RECOVERY_ARTIFACT_INVENTORY_COMPLETE")
+        self.assertEqual(result["artifact_count"], 0)
+        self.assertTrue(result["read_only"])
+
+    def test_recovery_artifact_inventory_reports_valid_orphan_without_deleting(self):
+        root = Path(self.temp_dir.name) / "orphan-backups"
+        orphan = self._make_inventory_backup(root, "taimobot-orphan.sqlite3")
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["orphaned_count"], 1)
+        self.assertEqual(result["orphaned_artifacts"][0]["file_name"], orphan.name)
+        self.assertTrue(orphan.exists())
+
+    def test_recovery_artifact_inventory_matches_maintenance_run_references(self):
+        root = Path(self.temp_dir.name) / "run-backups"
+        backup = self._make_inventory_backup(root, "taimobot-run.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                """INSERT INTO maintenance_runs
+                   (run_date, status, started_at, completed_at, backup_file)
+                   VALUES ('2026-11-20', 'COMPLETE', '2026-11-20', '2026-11-20', ?)""",
+                (str(backup),),
+            )
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["orphaned_count"], 0)
+        self.assertEqual(result["artifacts"][0]["status"], "REFERENCED")
+
+    def test_recovery_artifact_inventory_matches_failed_attempt_references(self):
+        root = Path(self.temp_dir.name) / "attempt-backups"
+        backup = self._make_inventory_backup(root, "taimobot-failed.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                """INSERT INTO maintenance_run_attempts
+                   (attempt_token, run_date, status, started_at, completed_at, backup_file)
+                   VALUES ('attempt-1', '2026-11-20', 'FAILED', '2026-11-20',
+                           '2026-11-20', ?)""",
+                (str(backup),),
+            )
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["orphaned_count"], 0)
+        self.assertEqual(result["artifacts"][0]["status"], "REFERENCED")
+
+    def test_recovery_artifact_inventory_matches_all_restore_plan_roles(self):
+        root = Path(self.temp_dir.name) / "plan-backups"
+        staging_dir = root / "recovery-staging"
+        source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
+        rollback = self._make_inventory_backup(root, "taimobot-rollback.sqlite3")
+        staged = self._make_inventory_backup(staging_dir, "taimobot-staged.sqlite3")
+        self._insert_inventory_restore_plan(source, staged, rollback)
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["orphaned_count"], 0)
+        self.assertEqual(result["artifact_count"], 3)
+        self.assertTrue(all(item["status"] == "REFERENCED" for item in result["artifacts"]))
+
+    def test_recovery_artifact_inventory_reports_missing_maintenance_run_file(self):
+        root = Path(self.temp_dir.name) / "missing-run"
+        root.mkdir()
+        missing = root / "taimobot-missing.sqlite3"
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                """INSERT INTO maintenance_runs
+                   (run_date, status, started_at, completed_at, backup_file)
+                   VALUES ('2026-11-20', 'COMPLETE', '2026-11-20', '2026-11-20', ?)""",
+                (str(missing),),
+            )
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertIn("REFERENCED_RECOVERY_ARTIFACT_MISSING", result["issues"])
+        self.assertEqual(result["missing_references"][0]["status"], "REFERENCED_FILE_MISSING")
+
+    def test_recovery_artifact_inventory_reports_missing_restore_plan_files(self):
+        root = Path(self.temp_dir.name) / "missing-plan"
+        root.mkdir()
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                """INSERT INTO maintenance_restore_plans
+                   (plan_id, backup_file, staging_file, pre_restore_backup_file,
+                    status, created_at, created_by)
+                   VALUES (?, ?, ?, ?, 'PREPARED', '2026-11-20', 'operator')""",
+                ("b" * 32, str(root / "taimobot-source.sqlite3"),
+                 str(root / "recovery-staging" / "taimobot-staged.sqlite3"),
+                 str(root / "taimobot-rollback.sqlite3")),
+            )
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(len(result["missing_references"]), 3)
+        self.assertIn("REFERENCED_RECOVERY_ARTIFACT_MISSING", result["issues"])
+
+    def test_recovery_artifact_inventory_detects_restore_plan_fingerprint_mismatch(self):
+        root = Path(self.temp_dir.name) / "hash-mismatch"
+        source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
+        rollback = self._make_inventory_backup(root, "taimobot-rollback.sqlite3")
+        staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-staged.sqlite3")
+        self._insert_inventory_restore_plan(source, staged, rollback)
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE extra_evidence (value TEXT)")
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertIn("RESTORE_PLAN_FINGERPRINT_MISMATCH", result["issues"])
+        self.assertTrue(any("RESTORE_PLAN_FINGERPRINT_MISMATCH" in item["issues"] for item in result["artifacts"]))
+
+    def test_recovery_artifact_inventory_accepts_matching_restore_plan_fingerprints(self):
+        root = Path(self.temp_dir.name) / "hash-match"
+        source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
+        rollback = self._make_inventory_backup(root, "taimobot-rollback.sqlite3")
+        staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-staged.sqlite3")
+        self._insert_inventory_restore_plan(source, staged, rollback)
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertNotIn("RESTORE_PLAN_FINGERPRINT_MISMATCH", result["issues"])
+        self.assertEqual(result["orphaned_count"], 0)
+
+    def test_recovery_artifact_inventory_marks_corrupt_orphan_for_review(self):
+        root = Path(self.temp_dir.name) / "corrupt-orphan"
+        root.mkdir()
+        corrupt = root / "taimobot-corrupt.sqlite3"
+        corrupt.write_bytes(b"not sqlite")
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["artifacts"][0]["status"], "REVIEW_REQUIRED")
+        self.assertIn("ARTIFACT_UNREADABLE", result["artifacts"][0]["issues"])
+        self.assertEqual(result["orphaned_count"], 0)
+
+    def test_recovery_artifact_inventory_marks_symlink_as_unsafe(self):
+        root = Path(self.temp_dir.name) / "symlink-artifact"
+        root.mkdir()
+        target = self._make_inventory_backup(root, "target.sqlite3")
+        link = root / "taimobot-link.sqlite3"
+        link.symlink_to(target)
+        result = inspect_recovery_artifact_inventory(root)
+        link_record = next(item for item in result["artifacts"] if item["file_name"] == link.name)
+        self.assertEqual(link_record["status"], "UNSAFE")
+        self.assertTrue(target.exists())
+
+    def test_recovery_artifact_inventory_reports_temporary_files_as_incomplete(self):
+        root = Path(self.temp_dir.name) / "temporary-artifact"
+        root.mkdir()
+        temporary = root / ".taimobot-backup-in-progress.tmp"
+        temporary.write_bytes(b"partial")
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["artifacts"][0]["status"], "INCOMPLETE")
+        self.assertEqual(result["artifacts"][0]["artifact_type"], "INCOMPLETE_TEMPORARY")
+
+    def test_recovery_artifact_inventory_detects_orphaned_staging_candidate(self):
+        root = Path(self.temp_dir.name) / "staged-orphan"
+        staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-stage.sqlite3")
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["orphaned_count"], 1)
+        self.assertEqual(result["orphaned_artifacts"][0]["artifact_type"], "STAGED")
+        self.assertTrue(staged.exists())
+
+    def test_recovery_artifact_inventory_blocks_invalid_execution_journal(self):
+        root = Path(self.temp_dir.name) / "invalid-journal-backups"
+        root.mkdir()
+        journal = Path(self.temp_dir.name) / "invalid-restore-journal.jsonl"
+        journal.write_text('{"broken":true}\n', encoding="utf-8")
+        result = inspect_recovery_artifact_inventory(root, journal_path=journal)
+        self.assertEqual(result["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertIn("RESTORE_EXECUTION_JOURNAL_UNTRUSTED", result["issues"])
+
+    def test_recovery_artifact_inventory_reports_journal_plan_without_database_plan(self):
+        root = Path(self.temp_dir.name) / "journal-plan"
+        root.mkdir()
+        journal = Path(self.temp_dir.name) / "journal-plan.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "c" * 32, "d" * 32,
+            "operator", "incident-1", details={}, journal_path=journal,
+        )
+        result = inspect_recovery_artifact_inventory(root, journal_path=journal)
+        self.assertIn("JOURNAL_PLAN_WITHOUT_DATABASE_PLAN", result["issues"])
+        self.assertEqual(result["missing_references"][0]["status"], "DATABASE_PLAN_MISSING")
+
+    def test_recovery_artifact_inventory_blocks_incomplete_metadata_schema(self):
+        root = Path(self.temp_dir.name) / "bad-metadata"
+        root.mkdir()
+        with database.get_connection() as connection:
+            connection.execute("CREATE TABLE maintenance_runs (run_date TEXT)")
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertEqual(result["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertIn("MAINTENANCE_METADATA_UNREADABLE", result["issues"])
+
+    def test_recovery_artifact_inventory_detects_hard_link_aliases(self):
+        root = Path(self.temp_dir.name) / "hardlink-inventory"
+        first = self._make_inventory_backup(root, "taimobot-first.sqlite3")
+        second = root / "taimobot-second.sqlite3"
+        os.link(first, second)
+        result = inspect_recovery_artifact_inventory(root)
+        self.assertIn("DUPLICATE_ARTIFACT_IDENTITY", result["issues"])
+        self.assertTrue(any("HARD_LINK_ALIAS" in item["issues"] for item in result["artifacts"]))
+
+    def test_recovery_artifact_inventory_detects_journal_append_during_scan(self):
+        root = Path(self.temp_dir.name) / "journal-race"
+        self._make_inventory_backup(root, "taimobot-race.sqlite3")
+        journal = Path(self.temp_dir.name) / "journal-race.jsonl"
+        original_hash = maintenance_module.sha256_file
+        appended = {"done": False}
+        def hash_and_append(path):
+            digest = original_hash(path)
+            if not appended["done"]:
+                appended["done"] = True
+                append_restore_execution_event(
+                    "RESTORE_EXECUTION_STARTED", "e" * 32, "f" * 32,
+                    "operator", "incident-race", details={}, journal_path=journal,
+                )
+            return digest
+        with patch("app.maintenance.sha256_file", side_effect=hash_and_append):
+            result = inspect_recovery_artifact_inventory(root, journal_path=journal)
+        self.assertIn("RESTORE_EXECUTION_JOURNAL_CHANGED_DURING_INVENTORY", result["issues"])
+
+    def test_recovery_artifact_inventory_protects_live_database_path(self):
+        root = Path(self.temp_dir.name) / "live-db-inventory"
+        root.mkdir()
+        live = root / "taimobot-live.sqlite3"
+        old_db = database.DB_PATH
+        database.DB_PATH = live
+        try:
+            init_db()
+            result = inspect_recovery_artifact_inventory(root)
+            self.assertEqual(result["artifacts"][0]["status"], "PROTECTED_LIVE_DATABASE")
+            self.assertTrue(live.exists())
+        finally:
+            database.DB_PATH = old_db
+
+    def test_recovery_artifact_inventory_does_not_mutate_files_database_or_journal(self):
+        root = Path(self.temp_dir.name) / "read-only-inventory"
+        backup = self._make_inventory_backup(root, "taimobot-read-only.sqlite3")
+        journal = Path(self.temp_dir.name) / "read-only-journal.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "1" * 32, "2" * 32,
+            "operator", "incident-read-only", details={}, journal_path=journal,
+        )
+        before_file = backup.read_bytes()
+        before_db = database.DB_PATH.read_bytes()
+        before_journal = journal.read_bytes()
+        inspect_recovery_artifact_inventory(root, journal_path=journal)
+        self.assertEqual(backup.read_bytes(), before_file)
+        self.assertEqual(database.DB_PATH.read_bytes(), before_db)
+        self.assertEqual(journal.read_bytes(), before_journal)
+
+    def test_recovery_artifact_inventory_blocks_symlinked_backup_directory(self):
+        real = Path(self.temp_dir.name) / "real-backups"
+        real.mkdir()
+        link = Path(self.temp_dir.name) / "linked-backups"
+        link.symlink_to(real, target_is_directory=True)
+        result = inspect_recovery_artifact_inventory(link)
+        self.assertEqual(result["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertIn("BACKUP_DIRECTORY_UNSAFE", result["issues"])
 
     def test_maintenance_window_uses_south_african_time(self):
         zone = ZoneInfo("Africa/Johannesburg")
