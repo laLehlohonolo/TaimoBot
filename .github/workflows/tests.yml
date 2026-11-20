@@ -87,6 +87,8 @@ jobs:
         run: python scripts/run_recovery_inventory_api_real_artifacts.py
       - name: Run twenty recovery inventory filesystem race checks sequentially
         run: python scripts/run_recovery_inventory_filesystem_races.py
+      - name: Run twenty recovery inventory metadata race checks sequentially
+        run: python scripts/run_recovery_inventory_metadata_races.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
