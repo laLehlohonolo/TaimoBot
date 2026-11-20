@@ -6733,6 +6733,246 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["automatic_action"], "NONE")
 
 
+    def _call_real_inventory_api(self, root, user=None):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.auth_routes import current_user
+        previous = dict(app.dependency_overrides)
+        app.dependency_overrides[current_user] = lambda: user or {
+            "user_id": "inventory-admin", "email": "ops@example.com"
+        }
+        try:
+            with patch.dict(os.environ, {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
+                with patch.object(maintenance_module, "BACKUP_DIR", Path(root)):
+                    with TestClient(app) as client:
+                        return client.get("/maintenance/recovery-artifact-inventory")
+        finally:
+            app.dependency_overrides.clear()
+            app.dependency_overrides.update(previous)
+
+    def test_real_inventory_api_reports_actual_orphan_backup(self):
+        root = Path(self.temp_dir.name) / "api-real-orphan"
+        backup = self._make_inventory_backup(root, "taimobot-orphan.sqlite3")
+        response = self._call_real_inventory_api(root)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["orphaned_count"], 1)
+        self.assertEqual(payload["orphaned_artifacts"][0]["file_name"], backup.name)
+        self.assertEqual(payload["orphaned_artifacts"][0]["integrity_check"], "ok")
+
+    def test_real_inventory_api_recognizes_completed_maintenance_reference(self):
+        root = Path(self.temp_dir.name) / "api-completed-run"
+        backup = self._make_inventory_backup(root, "taimobot-complete.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                (str(backup),),
+            )
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["artifacts"] if x["file_name"] == backup.name)
+        self.assertEqual(item["status"], "REFERENCED")
+        self.assertEqual(item["references"][0]["source"], "maintenance_runs")
+
+    def test_real_inventory_api_reports_missing_completed_backup(self):
+        root = Path(self.temp_dir.name) / "api-missing-completed"
+        root.mkdir()
+        missing = root / "taimobot-missing.sqlite3"
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                (str(missing),),
+            )
+        payload = self._call_real_inventory_api(root).json()
+        self.assertIn("REFERENCED_RECOVERY_ARTIFACT_MISSING", payload["issues"])
+        self.assertTrue(any(x["status"] == "REFERENCED_FILE_MISSING" for x in payload["missing_references"]))
+
+    def test_real_inventory_api_recognizes_failed_attempt_backup(self):
+        root = Path(self.temp_dir.name) / "api-failed-attempt"
+        backup = self._make_inventory_backup(root, "taimobot-failed-attempt.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('attempt-real','2026-11-20','FAILED','start','end',?)",
+                (str(backup),),
+            )
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["artifacts"] if x["file_name"] == backup.name)
+        self.assertEqual(item["status"], "REFERENCED")
+
+    def test_real_inventory_api_recognizes_superseded_attempt_backup(self):
+        root = Path(self.temp_dir.name) / "api-superseded"
+        backup = self._make_inventory_backup(root, "taimobot-superseded.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('attempt-old','2026-11-19','SUPERSEDED','start','end',?)",
+                (str(backup),),
+            )
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["artifacts"] if x["file_name"] == backup.name)
+        self.assertEqual(item["status"], "REFERENCED")
+
+    def test_real_inventory_api_recognizes_all_prepared_restore_artifact_roles(self):
+        root = Path(self.temp_dir.name) / "api-restore-roles"
+        source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
+        rollback = self._make_inventory_backup(root, "taimobot-rollback.sqlite3")
+        staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-staged.sqlite3")
+        self._insert_inventory_restore_plan(source, staged, rollback)
+        payload = self._call_real_inventory_api(root).json()
+        self.assertEqual(payload["artifact_count"], 3)
+        self.assertTrue(all(x["status"] == "REFERENCED" for x in payload["artifacts"]))
+        self.assertEqual(payload["orphaned_count"], 0)
+
+    def test_real_inventory_api_reports_missing_staged_candidate(self):
+        root = Path(self.temp_dir.name) / "api-missing-staged"
+        source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
+        rollback = self._make_inventory_backup(root, "taimobot-rollback.sqlite3")
+        staged = root / "recovery-staging" / "taimobot-missing-stage.sqlite3"
+        self._insert_inventory_restore_plan(source, staged, rollback)
+        payload = self._call_real_inventory_api(root).json()
+        self.assertTrue(any(x["status"] == "REFERENCED_FILE_MISSING" and x["source"] == "maintenance_restore_plans.staged" for x in payload["missing_references"]))
+
+    def test_real_inventory_api_reports_missing_rollback_backup(self):
+        root = Path(self.temp_dir.name) / "api-missing-rollback"
+        source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
+        staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-staged.sqlite3")
+        rollback = root / "taimobot-missing-rollback.sqlite3"
+        self._insert_inventory_restore_plan(source, staged, rollback)
+        payload = self._call_real_inventory_api(root).json()
+        self.assertTrue(any(x["status"] == "REFERENCED_FILE_MISSING" and x["source"] == "maintenance_restore_plans.rollback" for x in payload["missing_references"]))
+
+    def test_real_inventory_api_detects_changed_restore_source_fingerprint(self):
+        root = Path(self.temp_dir.name) / "api-fingerprint-change"
+        source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
+        rollback = self._make_inventory_backup(root, "taimobot-rollback.sqlite3")
+        staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-staged.sqlite3")
+        self._insert_inventory_restore_plan(source, staged, rollback)
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE changed_after_plan (value TEXT)")
+        payload = self._call_real_inventory_api(root).json()
+        self.assertIn("RESTORE_PLAN_FINGERPRINT_MISMATCH", payload["issues"])
+        item = next(x for x in payload["artifacts"] if x["file_name"] == source.name)
+        self.assertEqual(item["status"], "REVIEW_REQUIRED")
+
+    def test_real_inventory_api_classifies_corrupt_sqlite_as_review_not_orphan(self):
+        root = Path(self.temp_dir.name) / "api-corrupt"
+        root.mkdir()
+        corrupt = root / "taimobot-corrupt.sqlite3"
+        corrupt.write_bytes(b"not a sqlite database")
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["artifacts"] if x["file_name"] == corrupt.name)
+        self.assertEqual(item["status"], "REVIEW_REQUIRED")
+        self.assertIn("ARTIFACT_UNREADABLE", item["issues"])
+        self.assertEqual(payload["orphaned_count"], 0)
+
+    def test_real_inventory_api_classifies_symlink_as_unsafe_without_following(self):
+        root = Path(self.temp_dir.name) / "api-symlink"
+        target = self._make_inventory_backup(root, "taimobot-target.sqlite3")
+        link = root / "taimobot-link.sqlite3"
+        link.symlink_to(target)
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["artifacts"] if x["file_name"] == link.name)
+        self.assertEqual(item["status"], "UNSAFE")
+        self.assertTrue(target.is_file())
+
+    def test_real_inventory_api_detects_hardlink_alias_identity(self):
+        root = Path(self.temp_dir.name) / "api-hardlink"
+        first = self._make_inventory_backup(root, "taimobot-first.sqlite3")
+        second = root / "taimobot-second.sqlite3"
+        os.link(first, second)
+        payload = self._call_real_inventory_api(root).json()
+        self.assertIn("DUPLICATE_ARTIFACT_IDENTITY", payload["issues"])
+        self.assertTrue(any("HARD_LINK_ALIAS" in x["issues"] for x in payload["artifacts"]))
+
+    def test_real_inventory_api_reports_orphaned_staging_candidate(self):
+        root = Path(self.temp_dir.name) / "api-staging-orphan"
+        staged = self._make_inventory_backup(root / "recovery-staging", "taimobot-unreferenced-stage.sqlite3")
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["orphaned_artifacts"] if x["file_name"] == staged.name)
+        self.assertEqual(item["artifact_type"], "STAGED")
+
+    def test_real_inventory_api_reports_incomplete_temporary_artifact(self):
+        root = Path(self.temp_dir.name) / "api-temp"
+        root.mkdir()
+        temporary = root / ".taimobot-backup-in-progress.tmp"
+        temporary.write_bytes(b"partial")
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["artifacts"] if x["file_name"] == temporary.name)
+        self.assertEqual(item["status"], "INCOMPLETE")
+        self.assertEqual(item["artifact_type"], "INCOMPLETE_TEMPORARY")
+
+    def test_real_inventory_api_blocks_invalid_restore_journal(self):
+        root = Path(self.temp_dir.name) / "api-invalid-journal"
+        root.mkdir()
+        journal = database.DB_PATH.with_name("restore-execution.audit.jsonl")
+        journal.write_text('{"invalid":true}\\n', encoding="utf-8")
+        payload = self._call_real_inventory_api(root).json()
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertIn("RESTORE_EXECUTION_JOURNAL_UNTRUSTED", payload["issues"])
+
+    def test_real_inventory_api_orders_artifacts_deterministically(self):
+        root = Path(self.temp_dir.name) / "api-order"
+        self._make_inventory_backup(root, "taimobot-zeta.sqlite3")
+        self._make_inventory_backup(root, "taimobot-alpha.sqlite3")
+        payload = self._call_real_inventory_api(root).json()
+        self.assertEqual([x["file_name"] for x in payload["artifacts"]], ["taimobot-alpha.sqlite3", "taimobot-zeta.sqlite3"])
+
+    def test_real_inventory_api_protects_live_database_when_inside_backup_root(self):
+        root = Path(self.temp_dir.name) / "api-live-db"
+        root.mkdir()
+        live = root / "taimobot-live.sqlite3"
+        original = database.DB_PATH
+        shutil.copy2(original, live)
+        try:
+            database.DB_PATH = live
+            payload = self._call_real_inventory_api(root).json()
+        finally:
+            database.DB_PATH = original
+        item = next(x for x in payload["artifacts"] if x["file_name"] == live.name)
+        self.assertEqual(item["status"], "PROTECTED_LIVE_DATABASE")
+        self.assertFalse(payload["live_database_replaced"])
+
+    def test_real_inventory_api_repeated_requests_preserve_database_backup_and_journal(self):
+        root = Path(self.temp_dir.name) / "api-readonly-repeat"
+        backup = self._make_inventory_backup(root, "taimobot-readonly.sqlite3")
+        journal = database.DB_PATH.with_name("restore-execution.audit.jsonl")
+        journal.write_text("", encoding="utf-8")
+        before = (database.DB_PATH.read_bytes(), backup.read_bytes(), journal.read_bytes())
+        first = self._call_real_inventory_api(root)
+        second = self._call_real_inventory_api(root)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual((database.DB_PATH.read_bytes(), backup.read_bytes(), journal.read_bytes()), before)
+
+    def test_real_inventory_api_flags_reference_outside_managed_root(self):
+        root = Path(self.temp_dir.name) / "api-outside-root"
+        root.mkdir()
+        outside = Path(self.temp_dir.name) / "outside.sqlite3"
+        outside.write_bytes(b"external")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                (str(outside),),
+            )
+        payload = self._call_real_inventory_api(root).json()
+        self.assertIn("REFERENCE_OUTSIDE_MANAGED_BACKUP_DIRECTORIES", payload["issues"])
+        self.assertTrue(any(x["status"] == "OUTSIDE_MANAGED_DIRECTORY" for x in payload["missing_references"]))
+
+    def test_real_inventory_api_keeps_orphan_and_issue_classification_separate(self):
+        root = Path(self.temp_dir.name) / "api-mixed-classification"
+        valid = self._make_inventory_backup(root, "taimobot-valid-orphan.sqlite3")
+        corrupt = root / "taimobot-corrupt.sqlite3"
+        corrupt.write_bytes(b"broken")
+        payload = self._call_real_inventory_api(root).json()
+        self.assertIn(valid.name, [x["file_name"] for x in payload["orphaned_artifacts"]])
+        corrupt_item = next(x for x in payload["artifacts"] if x["file_name"] == corrupt.name)
+        self.assertEqual(corrupt_item["status"], "REVIEW_REQUIRED")
+        self.assertNotIn(corrupt.name, [x["file_name"] for x in payload["orphaned_artifacts"]])
+
+
 
 
 
