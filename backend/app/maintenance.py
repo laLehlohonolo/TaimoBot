@@ -1297,6 +1297,18 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
                 lock_file.flush()
                 os.fsync(lock_file.fileno())
 
+            # Persist the directory entry as well as the marker contents before
+            # reporting acquisition. A file fsync alone does not guarantee the
+            # newly-created name survives a host crash.
+            marker_directory_fd = os.open(
+                str(lock_path.parent),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(marker_directory_fd)
+            finally:
+                os.close(marker_directory_fd)
+
         _RESTORE_GUARD_FDS[token] = guard_fd
         guard_fd = None
 
@@ -1327,7 +1339,17 @@ def acquire_restore_lock(plan_id: str, *, timeout_seconds: float = 1.0) -> dict:
                 current = json.loads(lock_path.read_text(encoding="utf-8"))
                 if current.get("lock_token") == token:
                     lock_path.unlink()
+                    cleanup_directory_fd = os.open(
+                        str(lock_path.parent),
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                    try:
+                        os.fsync(cleanup_directory_fd)
+                    finally:
+                        os.close(cleanup_directory_fd)
         except (OSError, ValueError, json.JSONDecodeError):
+            # An uncertain cleanup remains fail-closed: a surviving marker
+            # blocks new restore work and requires operator inspection.
             pass
         raise
 
