@@ -8339,8 +8339,8 @@ def _make_real_inventory_post_terminal_metadata_fs_race_test(scenario):
         backup = self._make_inventory_backup(root, "taimobot-post-terminal.sqlite3")
         staging = root / "recovery-staging"
         self._create_inventory_metadata_tables()
-        original_fingerprint = maintenance_module.metadata_state_fingerprint
-        calls = {"fingerprints": 0, "mutated": False}
+        original_get_connection = database.get_connection
+        calls = {"connections": 0, "mutated": False}
 
         def mutate():
             if scenario == "append":
@@ -8396,18 +8396,19 @@ def _make_real_inventory_post_terminal_metadata_fs_race_test(scenario):
                 (root / "late-nested-terminal").mkdir()
             calls["mutated"] = True
 
-        def fingerprint_with_last_window_mutation(connection):
-            value = original_fingerprint(connection)
-            calls["fingerprints"] += 1
-            if calls["fingerprints"] == 6 and not calls["mutated"]:
+        @contextmanager
+        def connection_with_last_window_mutation(*args, **kwargs):
+            calls["connections"] += 1
+            with original_get_connection(*args, **kwargs) as connection:
+                yield connection
+            if calls["connections"] == 5 and not calls["mutated"]:
                 mutate()
-            return value
 
-        with patch.object(maintenance_module, "metadata_state_fingerprint", side_effect=fingerprint_with_last_window_mutation):
+        with patch.object(database, "get_connection", side_effect=connection_with_last_window_mutation):
             response = self._call_real_inventory_api(root)
         payload = response.json()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(calls["fingerprints"], 6, calls)
+        self.assertEqual(calls["connections"], 5, calls)
         self.assertTrue(calls["mutated"], calls)
         self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED", payload)
         self.assertEqual(payload["orphaned_artifacts"], [])
