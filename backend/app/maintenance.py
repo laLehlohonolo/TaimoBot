@@ -1181,6 +1181,38 @@ def inspect_recovery_artifact_inventory(
     database_plan_ids: set[str] = set()
     issues: list[str] = []
     missing_references: list[dict] = []
+    metadata_table_names = (
+        "maintenance_runs",
+        "maintenance_run_attempts",
+        "maintenance_restore_plans",
+        "maintenance_restore_artifacts",
+    )
+
+    def metadata_state_fingerprint(connection):
+        present = {
+            row["name"] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        state = {}
+        for table in metadata_table_names:
+            if table not in present:
+                state[table] = None
+                continue
+            columns = [
+                row["name"] for row in connection.execute(
+                    f"PRAGMA table_info({table})"
+                )
+            ]
+            rows = connection.execute(f"SELECT * FROM {table}").fetchall()
+            serialized_rows = sorted(
+                json.dumps(dict(row), sort_keys=True, default=str)
+                for row in rows
+            )
+            state[table] = {"columns": columns, "rows": serialized_rows}
+        encoded = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
     try:
         with database.get_connection() as connection:
             tables = {
@@ -1238,6 +1270,8 @@ def inspect_recovery_artifact_inventory(
                     raise sqlite3.DatabaseError(
                         f"{table} schema is incomplete for recovery inventory"
                     )
+
+            initial_metadata_fingerprint = metadata_state_fingerprint(connection)
 
             for table in ("maintenance_runs", "maintenance_run_attempts"):
                 if table in tables:
@@ -1443,6 +1477,33 @@ def inspect_recovery_artifact_inventory(
                     **reference, "path": key, "status": "REFERENCED_FILE_MISSING",
                 })
                 issues.append("REFERENCED_RECOVERY_ARTIFACT_MISSING")
+
+    # Re-read maintenance metadata after filesystem inspection. A concurrent
+    # plan/run/attempt update must never make an artifact appear orphaned using
+    # a stale reference snapshot.
+    try:
+        with database.get_connection() as connection:
+            final_metadata_fingerprint = metadata_state_fingerprint(connection)
+    except (sqlite3.Error, OSError, ValueError) as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": journal_verification.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["MAINTENANCE_METADATA_UNREADABLE_DURING_INVENTORY", str(error)[:180]])),
+        }
+    if final_metadata_fingerprint != initial_metadata_fingerprint:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": journal_verification.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["MAINTENANCE_METADATA_CHANGED_DURING_INVENTORY"])),
+        }
 
     # Re-verify the journal after filesystem inspection so a concurrent append
     # cannot make an artifact appear orphaned based on a stale journal snapshot.
