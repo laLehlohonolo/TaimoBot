@@ -79,6 +79,8 @@ jobs:
         run: python scripts/run_restore_artifact_evidence_cross_checks.py
       - name: Run ten backup retention lifecycle checks sequentially
         run: python scripts/run_backup_retention_lifecycle.py
+      - name: Run twenty recovery artifact inventory checks sequentially
+        run: python scripts/run_recovery_artifact_inventory.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
