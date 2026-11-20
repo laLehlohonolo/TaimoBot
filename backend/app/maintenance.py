@@ -1343,8 +1343,8 @@ def inspect_recovery_artifact_inventory(
                     item["issues"].append("LIVE_DATABASE_IS_NOT_A_BACKUP_ARTIFACT")
                     artifacts.append(item)
                     continue
-                stat = path.stat(follow_symlinks=False)
-                inode = (stat.st_dev, stat.st_ino)
+                path_metadata = path.stat(follow_symlinks=False)
+                inode = (path_metadata.st_dev, path_metadata.st_ino)
                 previous = seen_inodes.get(inode)
                 if previous:
                     item["issues"].append("HARD_LINK_ALIAS")
