@@ -5,6 +5,7 @@ import sqlite3
 import shutil
 import multiprocessing
 import tempfile
+from contextlib import contextmanager
 import unittest
 from unittest.mock import patch
 from datetime import datetime
@@ -7851,3 +7852,126 @@ _REAL_INVENTORY_FINAL_CONSISTENCY_FENCE_CASES = [
 ]
 for _test_name, _scenario in _REAL_INVENTORY_FINAL_CONSISTENCY_FENCE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_final_consistency_fence_test(_scenario))
+
+def _make_real_inventory_terminal_fence_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("terminal-fence-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-terminal.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                (str(backup),),
+            )
+        original_get_connection = database.get_connection
+        original_sha256_file = maintenance_module.sha256_file
+        calls = {"connections": 0, "hashes": 0, "changed": False}
+
+        def mutate_database(connection):
+            if scenario == "db_update":
+                connection.execute("UPDATE maintenance_runs SET completed_at='terminal-update' WHERE run_date='2026-11-20'")
+            elif scenario == "db_delete":
+                connection.execute("DELETE FROM maintenance_runs WHERE run_date='2026-11-20'")
+            elif scenario == "db_insert":
+                connection.execute("INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-19','FAILED','s','e',?)", (str(backup),))
+            elif scenario == "db_path":
+                connection.execute("UPDATE maintenance_runs SET backup_file=? WHERE run_date='2026-11-20'", (str(root / "other.sqlite3"),))
+            elif scenario == "db_status":
+                connection.execute("UPDATE maintenance_runs SET status='FAILED' WHERE run_date='2026-11-20'")
+            elif scenario == "db_timestamp":
+                connection.execute("UPDATE maintenance_runs SET started_at='changed' WHERE run_date='2026-11-20'")
+            elif scenario == "db_multi":
+                connection.execute("UPDATE maintenance_runs SET status='SUPERSEDED',completed_at='multi' WHERE run_date='2026-11-20'")
+            elif scenario == "db_second_row":
+                connection.execute("INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-18','COMPLETE','s','e',?)", (str(backup),))
+            elif scenario == "db_clear_path":
+                connection.execute("UPDATE maintenance_runs SET backup_file=NULL WHERE run_date='2026-11-20'")
+            elif scenario == "db_schema":
+                connection.execute("ALTER TABLE maintenance_runs ADD COLUMN terminal_marker TEXT")
+            calls["changed"] = True
+
+        @contextmanager
+        def connection_with_terminal_mutation(*args, **kwargs):
+            calls["connections"] += 1
+            with original_get_connection(*args, **kwargs) as connection:
+                yield connection
+            # The third connection is the last metadata read before the
+            # terminal filesystem fence. Mutating here models a writer landing
+            # immediately after that snapshot.
+            if scenario.startswith("fs_") and calls["connections"] == 3 and not calls["changed"]:
+                if scenario == "fs_append":
+                    with backup.open("ab") as handle: handle.write(b"late append")
+                elif scenario == "fs_replace":
+                    replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "terminal-replace", "replacement.sqlite3")
+                    replacement.replace(backup)
+                elif scenario == "fs_delete":
+                    backup.unlink()
+                elif scenario == "fs_touch":
+                    os.utime(backup, None)
+                elif scenario == "fs_add":
+                    self._make_inventory_backup(root, "late-added.sqlite3")
+                elif scenario == "fs_symlink":
+                    backup.unlink()
+                    backup.symlink_to(root / "missing-terminal-target.sqlite3")
+                elif scenario == "fs_chmod":
+                    backup.chmod(0o600)
+                elif scenario == "fs_nested":
+                    (root / "late-nested").mkdir()
+                elif scenario == "fs_rename":
+                    backup.rename(root / "renamed-terminal.sqlite3")
+                elif scenario == "fs_staging":
+                    staging = root / "recovery-staging"
+                    staging.mkdir()
+                    self._make_inventory_backup(staging, "late-stage.sqlite3")
+                calls["changed"] = True
+
+        def sha256_with_database_mutation(path, *args, **kwargs):
+            result = original_sha256_file(path, *args, **kwargs)
+            calls["hashes"] += 1
+            # One scanned artifact: calls 1-3 are the original scan and the
+            # first two fences; call 4 is the terminal filesystem fence.
+            if scenario.startswith("db_") and calls["hashes"] == 4 and not calls["changed"]:
+                with original_get_connection() as connection:
+                    mutate_database(connection)
+            return result
+
+        patches = [
+            patch.object(database, "get_connection", side_effect=connection_with_terminal_mutation),
+            patch.object(maintenance_module, "sha256_file", side_effect=sha256_with_database_mutation),
+        ]
+        with patches[0], patches[1]:
+            response = self._call_real_inventory_api(root)
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(calls["changed"], f"mutation did not run: {calls}")
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertEqual(payload["orphaned_artifacts"], [])
+        expected = "ARTIFACT_CHANGED_DURING_FINAL_CHECK" if scenario.startswith("fs_") else "MAINTENANCE_METADATA_CHANGED_BEFORE_RESPONSE"
+        self.assertIn(expected, payload["issues"], payload["issues"])
+    return test
+
+
+_REAL_INVENTORY_TERMINAL_FENCE_RACE_CASES = [
+    ("test_terminal_fence_fs_append", "fs_append"),
+    ("test_terminal_fence_fs_replace", "fs_replace"),
+    ("test_terminal_fence_fs_delete", "fs_delete"),
+    ("test_terminal_fence_fs_touch", "fs_touch"),
+    ("test_terminal_fence_fs_add", "fs_add"),
+    ("test_terminal_fence_fs_symlink", "fs_symlink"),
+    ("test_terminal_fence_fs_chmod", "fs_chmod"),
+    ("test_terminal_fence_fs_nested", "fs_nested"),
+    ("test_terminal_fence_fs_rename", "fs_rename"),
+    ("test_terminal_fence_fs_staging", "fs_staging"),
+    ("test_terminal_fence_db_update", "db_update"),
+    ("test_terminal_fence_db_delete", "db_delete"),
+    ("test_terminal_fence_db_insert", "db_insert"),
+    ("test_terminal_fence_db_path", "db_path"),
+    ("test_terminal_fence_db_status", "db_status"),
+    ("test_terminal_fence_db_timestamp", "db_timestamp"),
+    ("test_terminal_fence_db_multi", "db_multi"),
+    ("test_terminal_fence_db_second_row", "db_second_row"),
+    ("test_terminal_fence_db_clear_path", "db_clear_path"),
+    ("test_terminal_fence_db_schema", "db_schema"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_TERMINAL_FENCE_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_terminal_fence_race_test(_scenario))
