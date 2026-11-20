@@ -75,6 +75,8 @@ jobs:
         run: python scripts/run_restore_audit_diagnostics.py
       - name: Run ten restore operator reconciliation checks sequentially
         run: python scripts/run_restore_operator_reconciliation.py
+      - name: Run ten restore artifact evidence cross-checks sequentially
+        run: python scripts/run_restore_artifact_evidence_cross_checks.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
