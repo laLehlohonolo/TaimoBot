@@ -7395,3 +7395,81 @@ _REAL_INVENTORY_JOURNAL_RACE_CASES = [
 ]
 for _test_name, _scenario in _REAL_INVENTORY_JOURNAL_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_journal_race_test(_scenario))
+
+
+def _make_real_inventory_database_identity_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("database-identity-race-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-db-identity.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                (str(backup),),
+            )
+
+        db_path = Path(database.DB_PATH)
+        original_hash = maintenance_module.sha256_file
+        changed = {"done": False}
+
+        def replace_database_during_scan(path):
+            digest = original_hash(path)
+            if Path(path) == backup and not changed["done"]:
+                changed["done"] = True
+                replacement = db_path.with_name(db_path.name + ".identity-replacement")
+                replacement.write_bytes(db_path.read_bytes())
+                if scenario == "symlink_swap":
+                    displaced = db_path.with_name(db_path.name + ".identity-original")
+                    os.replace(db_path, displaced)
+                    db_path.symlink_to(displaced)
+                elif scenario == "rename_replacement":
+                    os.replace(replacement, db_path.with_name(db_path.name + ".identity-next"))
+                    os.replace(db_path.with_name(db_path.name + ".identity-next"), db_path)
+                elif scenario == "replace_twice":
+                    os.replace(replacement, db_path)
+                    second = db_path.with_name(db_path.name + ".identity-second")
+                    second.write_bytes(db_path.read_bytes())
+                    os.replace(second, db_path)
+                else:
+                    os.replace(replacement, db_path)
+            return digest
+
+        with patch.object(maintenance_module, "sha256_file", side_effect=replace_database_during_scan):
+            response = self._call_real_inventory_api(root)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(changed["done"])
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertEqual(payload["orphaned_artifacts"], [])
+        self.assertTrue(
+            "LIVE_DATABASE_IDENTITY_CHANGED_DURING_INVENTORY" in payload["issues"]
+            or "LIVE_DATABASE_IDENTITY_UNSAFE_DURING_INVENTORY" in payload["issues"]
+        )
+        self.assertTrue(backup.exists())
+    return test
+
+
+_REAL_INVENTORY_DATABASE_IDENTITY_RACE_CASES = [
+    ("test_database_identity_race_atomic_replace_01", "atomic_replace_01"),
+    ("test_database_identity_race_atomic_replace_02", "atomic_replace_02"),
+    ("test_database_identity_race_atomic_replace_03", "atomic_replace_03"),
+    ("test_database_identity_race_atomic_replace_04", "atomic_replace_04"),
+    ("test_database_identity_race_atomic_replace_05", "atomic_replace_05"),
+    ("test_database_identity_race_atomic_replace_06", "atomic_replace_06"),
+    ("test_database_identity_race_atomic_replace_07", "atomic_replace_07"),
+    ("test_database_identity_race_atomic_replace_08", "atomic_replace_08"),
+    ("test_database_identity_race_atomic_replace_09", "atomic_replace_09"),
+    ("test_database_identity_race_atomic_replace_10", "atomic_replace_10"),
+    ("test_database_identity_race_atomic_replace_11", "atomic_replace_11"),
+    ("test_database_identity_race_atomic_replace_12", "atomic_replace_12"),
+    ("test_database_identity_race_atomic_replace_13", "atomic_replace_13"),
+    ("test_database_identity_race_atomic_replace_14", "atomic_replace_14"),
+    ("test_database_identity_race_atomic_replace_15", "atomic_replace_15"),
+    ("test_database_identity_race_atomic_replace_16", "atomic_replace_16"),
+    ("test_database_identity_race_atomic_replace_17", "atomic_replace_17"),
+    ("test_database_identity_race_atomic_replace_18", "atomic_replace_18"),
+    ("test_database_identity_race_atomic_replace_19", "atomic_replace_19"),
+    ("test_database_identity_race_symlink_swap", "symlink_swap"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_DATABASE_IDENTITY_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_database_identity_race_test(_scenario))
