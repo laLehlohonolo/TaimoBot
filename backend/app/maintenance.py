@@ -427,6 +427,17 @@ def reconcile_restore_execution_artifacts(
             "automatic_action": "NONE",
             "live_database_replaced": False,
         }
+    execution_state = inspect_restore_execution_state(journal_path)
+    if execution_state.get("status") == "RESTORE_JOURNAL_SEMANTIC_INVALID":
+        return {
+            "status": "RESTORE_EVIDENCE_RECONCILIATION_BLOCKED",
+            "journal_status": execution_state["status"],
+            "semantic_errors": execution_state.get("semantic_errors", []),
+            "artifacts": [],
+            "database_state_verified": False,
+            "automatic_action": "NONE",
+            "live_database_replaced": False,
+        }
     matching_records = [
         record for record in verification.get("records", [])
         if record.get("plan_id") == plan_id and record.get("execution_token") == execution_token
@@ -467,6 +478,7 @@ def reconcile_restore_execution_artifacts(
     live_sidecars = artifact_sidecars["live_database"]
 
     results = []
+    artifact_identities = {}
     all_verified = not conflicting and all(
         inventory["status"] == "SIDECARS_CLEAR"
         for inventory in artifact_sidecars.values()
@@ -491,6 +503,11 @@ def reconcile_restore_execution_artifacts(
                 if not __import__("stat").S_ISREG(metadata.st_mode):
                     raise ValueError("artifact is not a regular file")
                 identity = (metadata.st_dev, metadata.st_ino)
+                if identity in artifact_identities:
+                    raise ValueError(
+                        f"artifact aliases {artifact_identities[identity]} through the same filesystem object"
+                    )
+                artifact_identities[identity] = key
                 def hash_open_descriptor() -> str:
                     digest = hashlib.sha256()
                     offset = 0
@@ -525,6 +542,9 @@ def reconcile_restore_execution_artifacts(
                     with closing(sqlite3.connect(uri, uri=True, timeout=10)) as connection:
                         integrity = connection.execute("PRAGMA integrity_check").fetchone()
                         violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                    sidecars_after = inspect_sqlite_sidecars(path)
+                    if sidecars_after != artifact_sidecars[key]:
+                        raise ValueError("artifact sidecars changed during integrity inspection")
                     after_path = os.stat(path, follow_symlinks=False)
                     after_fd = os.fstat(descriptor)
                     if (
@@ -554,6 +574,16 @@ def reconcile_restore_execution_artifacts(
     # published database hash is intentionally distinct from the staged file
     # hash; only postcheck/terminal hashes may describe the installed live DB.
     lifecycle_issues = []
+    start_events = [record for record in matching_records if record.get("event") == "RESTORE_EXECUTION_STARTED"]
+    publish_events = [record for record in matching_records if record.get("event") == "RESTORE_SOURCE_PUBLISHED"]
+    rollback_start_events = [record for record in matching_records if record.get("event") == "RESTORE_ROLLBACK_STARTED"]
+    rollback_verified_events = [record for record in matching_records if record.get("event") == "RESTORE_ROLLBACK_VERIFIED"]
+    initial_artifacts = start_events[0].get("details", {}).get("artifacts", {}) if start_events else {}
+    if publish_events and start_events:
+        published_staged = publish_events[-1].get("details", {}).get("artifacts", {}).get("staged_candidate_sha256")
+        initial_staged = initial_artifacts.get("staged_candidate_sha256")
+        if published_staged != initial_staged:
+            lifecycle_issues.append("source-published staged-candidate fingerprint disagrees with execution-start evidence")
     postchecks = [
         record.get("details", {}).get("installed_database_sha256")
         for record in matching_records
@@ -574,8 +604,21 @@ def reconcile_restore_execution_artifacts(
         for record in matching_records
         if record.get("event") == "RESTORE_EXECUTION_ROLLED_BACK"
     ]
+    if postchecks and publish_events:
+        published_hash = publish_events[-1].get("details", {}).get("artifacts", {}).get("published_database_sha256")
+        if postchecks[-1] != published_hash:
+            lifecycle_issues.append("postcheck installed-database fingerprint disagrees with source-published evidence")
     if postchecks and completions and postchecks[-1] != completions[-1]:
         lifecycle_issues.append("postcheck and completion fingerprints describe different installed database bytes")
+    if rollback_start_events and start_events:
+        initial_rollback = initial_artifacts.get("rollback_backup_sha256")
+        rollback_start_hash = rollback_start_events[-1].get("details", {}).get("artifacts", {}).get("rollback_backup_sha256")
+        if rollback_start_hash != initial_rollback:
+            lifecycle_issues.append("rollback-start backup fingerprint disagrees with execution-start evidence")
+    if rollback_checks and rollback_start_events:
+        rollback_start_hash = rollback_start_events[-1].get("details", {}).get("artifacts", {}).get("rollback_backup_sha256")
+        if rollback_checks[-1] != rollback_start_hash:
+            lifecycle_issues.append("rollback verification fingerprint disagrees with rollback-backup evidence")
     if rollback_checks and rollback_completions and rollback_checks[-1] != rollback_completions[-1]:
         lifecycle_issues.append("rollback verification and rollback completion fingerprints disagree")
 
@@ -605,6 +648,15 @@ def reconcile_restore_execution_artifacts(
                 "event": record.get("event"),
                 "issues": missing_evidence,
             })
+    # Re-read the append-only journal after artifact inspection. A valid
+    # initial snapshot is insufficient if another writer changed the journal
+    # while the files were being fingerprinted.
+    final_verification = verify_restore_execution_journal(journal_path, include_records=True)
+    if (
+        final_verification.get("status") not in ("RESTORE_JOURNAL_EMPTY", "RESTORE_JOURNAL_VERIFIED")
+        or final_verification.get("records") != verification.get("records")
+    ):
+        lifecycle_issues.append("restore execution journal changed during artifact reconciliation")
     if lifecycle_issues or event_evidence_review:
         all_verified = False
 
