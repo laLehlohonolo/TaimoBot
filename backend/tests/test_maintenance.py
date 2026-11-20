@@ -6064,7 +6064,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         calls = {"count": 0}
         def add_sidecar_on_recheck(artifact):
             calls["count"] += 1
-            if calls["count"] == 2:
+            if calls["count"] == 5:
                 Path(str(artifact) + "-wal").write_bytes(b"appeared-during-read")
             return real_inspect(artifact)
         with patch("app.maintenance.inspect_sqlite_sidecars", side_effect=add_sidecar_on_recheck):
@@ -6085,6 +6085,18 @@ class DailyMaintenanceTests(unittest.TestCase):
             details={"artifacts": {"staged_candidate_sha256": hashes["staged_candidate_sha256"],
                                    "published_database_sha256": "f" * 64}},
             journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_POSTCHECK_PASSED", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"integrity_check": "ok", "foreign_key_violations": 0,
+                     "schema_check": "passed", "installed_database_sha256": "f" * 64},
+            journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_COMPLETE", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"final_database_sha256": "f" * 64}, journal_path=journal,
         )
         before = {name: artifact.read_bytes() for name, artifact in paths.items()}
         journal_before = journal.read_bytes()
