@@ -5006,5 +5006,186 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), content)
 
 
+
+    def test_dead_child_process_restore_lock_requires_explicit_recovery(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        worker = context.Process(target=_crash_after_acquiring_restore_lock, args=(ready,))
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(worker.exitcode, 0)
+        self.assertTrue(ready.is_set())
+        marker = database.restore_lock_path()
+        self.assertTrue(marker.exists())
+        self.assertEqual(inspect_restore_lock()["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW")
+        audit = Path(self.temp_dir.name) / "dead-child.audit.jsonl"
+        result = recover_abandoned_restore_lock("operator", "INC-DEAD-CHILD", confirm=True, audit_path=audit)
+        self.assertEqual(result["status"], "ABANDONED_RESTORE_LOCK_RECOVERED")
+        self.assertFalse(marker.exists())
+        self.assertEqual([json.loads(line)["event"] for line in audit.read_text().splitlines()], ["RESTORE_LOCK_RECOVERY_STARTED", "RESTORE_LOCK_RECOVERY_COMPLETE"])
+
+    def test_sigkill_releases_kernel_guard_but_keeps_marker_for_review(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        release = context.Event()
+        worker = context.Process(target=_hold_restore_lock_until_release, args=(ready, release))
+        worker.start()
+        self.assertTrue(ready.wait(5))
+        marker = database.restore_lock_path()
+        self.assertTrue(marker.exists())
+        worker.kill()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(marker.exists())
+        self.assertEqual(inspect_restore_lock()["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW")
+        with self.assertRaises(FileExistsError):
+            acquire_restore_lock("8" * 32, timeout_seconds=0.1)
+
+    def test_live_child_guard_blocks_operator_recovery(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        release = context.Event()
+        worker = context.Process(target=_hold_restore_lock_until_release, args=(ready, release))
+        worker.start()
+        audit = Path(self.temp_dir.name) / "live-child.audit.jsonl"
+        try:
+            self.assertTrue(ready.wait(5))
+            with self.assertRaisesRegex(RuntimeError, "not confirmed abandoned|guard is active"):
+                recover_abandoned_restore_lock("operator", "INC-LIVE-CHILD", confirm=True, audit_path=audit)
+            self.assertTrue(database.restore_lock_path().exists())
+            self.assertFalse(audit.exists())
+        finally:
+            release.set()
+            worker.join(5)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(5)
+        self.assertEqual(worker.exitcode, 0)
+
+    def test_child_process_normal_release_removes_marker_and_unlocks_database(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        release = context.Event()
+        worker = context.Process(target=_hold_restore_lock_until_release, args=(ready, release))
+        worker.start()
+        try:
+            self.assertTrue(ready.wait(5))
+            self.assertEqual(inspect_restore_lock()["status"], "RESTORE_LOCK_ACTIVE")
+            release.set()
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(worker.exitcode, 0)
+            self.assertFalse(database.restore_lock_path().exists())
+            self.assertEqual(inspect_restore_lock()["status"], "NO_RESTORE_LOCK")
+            connection = database.get_connection()
+            connection.close()
+        finally:
+            if worker.is_alive():
+                release.set()
+                worker.terminate()
+                worker.join(5)
+
+    def test_crash_after_marker_file_sync_leaves_recoverable_operator_review_state(self):
+        context = multiprocessing.get_context("fork")
+        worker = context.Process(target=_exit_during_restore_marker_directory_sync)
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(worker.exitcode, 73)
+        marker = database.restore_lock_path()
+        self.assertTrue(marker.exists())
+        self.assertEqual(inspect_restore_lock()["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW")
+        audit = Path(self.temp_dir.name) / "after-publish-crash.audit.jsonl"
+        result = recover_abandoned_restore_lock("operator", "INC-PUBLISH-CRASH", confirm=True, audit_path=audit)
+        self.assertTrue(result["marker_removed"])
+        self.assertEqual(len(audit.read_text().splitlines()), 2)
+
+    def test_process_death_recovery_writes_verifiable_hash_chained_audit(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        worker = context.Process(target=_crash_after_acquiring_restore_lock, args=(ready,))
+        worker.start()
+        worker.join(5)
+        self.assertEqual(worker.exitcode, 0)
+        audit = Path(self.temp_dir.name) / "death-chain.audit.jsonl"
+        recover_abandoned_restore_lock("operator", "INC-DEATH-CHAIN", confirm=True, audit_path=audit)
+        with audit.open("rb") as stream:
+            verified = maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+        self.assertEqual(verified["record_count"], 2)
+
+    def test_process_death_recovery_preserves_database_and_sqlite_sidecars(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        worker = context.Process(target=_crash_after_acquiring_restore_lock, args=(ready,))
+        worker.start()
+        worker.join(5)
+        self.assertEqual(worker.exitcode, 0)
+        wal = Path(str(database.DB_PATH) + "-wal")
+        shm = Path(str(database.DB_PATH) + "-shm")
+        wal.write_bytes(b"crash-recovery-wal")
+        shm.write_bytes(b"crash-recovery-shm")
+        db_before = database.DB_PATH.read_bytes()
+        recover_abandoned_restore_lock("operator", "INC-DEATH-SIDECARS", confirm=True, audit_path=Path(self.temp_dir.name) / "sidecars.audit.jsonl")
+        self.assertEqual(database.DB_PATH.read_bytes(), db_before)
+        self.assertEqual(wal.read_bytes(), b"crash-recovery-wal")
+        self.assertEqual(shm.read_bytes(), b"crash-recovery-shm")
+
+    def test_process_death_recovery_preserves_backup_staged_and_rollback_files(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        worker = context.Process(target=_crash_after_acquiring_restore_lock, args=(ready,))
+        worker.start()
+        worker.join(5)
+        self.assertEqual(worker.exitcode, 0)
+        artifacts = {}
+        for name in ("dead-source.sqlite3", "dead-staged.sqlite3", "dead-rollback.sqlite3"):
+            path = Path(self.temp_dir.name) / name
+            path.write_bytes(name.encode())
+            artifacts[path] = path.read_bytes()
+        recover_abandoned_restore_lock("operator", "INC-DEATH-ARTIFACTS", confirm=True, audit_path=Path(self.temp_dir.name) / "artifacts.audit.jsonl")
+        for path, expected in artifacts.items():
+            self.assertEqual(path.read_bytes(), expected)
+
+    def test_two_operator_recovery_processes_cannot_both_recover_same_marker(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        worker = context.Process(target=_crash_after_acquiring_restore_lock, args=(ready,))
+        worker.start()
+        worker.join(5)
+        self.assertEqual(worker.exitcode, 0)
+        audit = Path(self.temp_dir.name) / "concurrent-recovery.audit.jsonl"
+        results = context.Queue()
+        operators = [
+            context.Process(target=_attempt_restore_recovery, args=(results, f"operator-{index}", audit))
+            for index in range(2)
+        ]
+        for process in operators:
+            process.start()
+        for process in operators:
+            process.join(5)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+        outcomes = [results.get(timeout=2) for _ in range(2)]
+        self.assertEqual(sum(item[0] == "recovered" for item in outcomes), 1)
+        self.assertEqual(len(audit.read_text().splitlines()), 2)
+        self.assertFalse(database.restore_lock_path().exists())
+
+    def test_explicit_recovery_after_process_death_allows_new_lock_without_touching_db(self):
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        worker = context.Process(target=_crash_after_acquiring_restore_lock, args=(ready,))
+        worker.start()
+        worker.join(5)
+        self.assertEqual(worker.exitcode, 0)
+        before = database.DB_PATH.read_bytes()
+        recover_abandoned_restore_lock("operator", "INC-REACQUIRE", confirm=True, audit_path=Path(self.temp_dir.name) / "reacquire.audit.jsonl")
+        new_lock = acquire_restore_lock("9" * 32)
+        self.assertEqual(new_lock["status"], "RESTORE_LOCK_ACQUIRED")
+        self.assertEqual(database.DB_PATH.read_bytes(), before)
+        release_restore_lock(new_lock["lock_token"])
+
+
 if __name__ == "__main__":
     unittest.main()
