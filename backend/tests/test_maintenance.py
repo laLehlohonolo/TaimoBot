@@ -1446,6 +1446,14 @@ class DailyMaintenanceTests(unittest.TestCase):
             details={"artifacts": hashes}, journal_path=journal,
         )
         append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", plan_id, token,
+            "operator@example.com", "INC-EVIDENCE-INCOMPLETE",
+            details={"artifacts": {
+                "staged_candidate_sha256": hashes["staged_candidate_sha256"],
+                "published_database_sha256": hashes["live_database_sha256"],
+            }}, journal_path=journal,
+        )
+        append_restore_execution_event(
             "RESTORE_POSTCHECK_PASSED", plan_id, token,
             "operator@example.com", "INC-EVIDENCE-INCOMPLETE",
             details={"integrity_check": "ok", "foreign_key_violations": 0},
@@ -1482,6 +1490,14 @@ class DailyMaintenanceTests(unittest.TestCase):
             "RESTORE_EXECUTION_STARTED", plan_id, token,
             "operator@example.com", "INC-EVIDENCE-CONSISTENT",
             details={"artifacts": hashes}, journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", plan_id, token,
+            "operator@example.com", "INC-EVIDENCE-CONSISTENT",
+            details={"artifacts": {
+                "staged_candidate_sha256": hashes["staged_candidate_sha256"],
+                "published_database_sha256": live_hash,
+            }}, journal_path=journal,
         )
         append_restore_execution_event(
             "RESTORE_POSTCHECK_PASSED", plan_id, token,
@@ -1528,6 +1544,14 @@ class DailyMaintenanceTests(unittest.TestCase):
             "RESTORE_EXECUTION_STARTED", plan_id, token,
             "operator@example.com", "INC-EVIDENCE-TERMINAL",
             details={"artifacts": hashes}, journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", plan_id, token,
+            "operator@example.com", "INC-EVIDENCE-TERMINAL",
+            details={"artifacts": {
+                "staged_candidate_sha256": hashes["staged_candidate_sha256"],
+                "published_database_sha256": live_hash,
+            }}, journal_path=journal,
         )
         append_restore_execution_event(
             "RESTORE_POSTCHECK_PASSED", plan_id, token,
