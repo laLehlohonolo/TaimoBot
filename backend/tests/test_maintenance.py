@@ -8331,3 +8331,112 @@ class RecoveryArtifactRestoredMutationRaceTests(unittest.TestCase):
     def test_transient_double_link_roundtrip_rejected(self): self._assert_transient_change_rejected("link_count_roundtrip_twice")
     def test_transient_multi_chunk_rewrite_restore_rejected(self): self._assert_transient_change_rejected("rewrite_and_restore_multiple_chunks")
     def test_transient_metadata_roundtrip_rejected(self): self._assert_transient_change_rejected("metadata_only_roundtrip")
+
+
+def _make_real_inventory_post_terminal_metadata_fs_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("post-terminal-metadata-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-post-terminal.sqlite3")
+        staging = root / "recovery-staging"
+        self._create_inventory_metadata_tables()
+        original_fingerprint = maintenance_module.metadata_state_fingerprint
+        calls = {"fingerprints": 0, "mutated": False}
+
+        def mutate():
+            if scenario == "append":
+                with backup.open("ab") as handle: handle.write(b"late-after-terminal-metadata")
+            elif scenario == "replace":
+                replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "post-terminal-replacement", backup.name)
+                replacement.replace(backup)
+            elif scenario == "delete":
+                backup.unlink()
+            elif scenario == "touch":
+                os.utime(backup, None)
+            elif scenario == "chmod":
+                backup.chmod(0o600)
+            elif scenario == "symlink":
+                backup.unlink(); backup.symlink_to(root / "missing-after-terminal.sqlite3")
+            elif scenario == "same_bytes_replace":
+                replacement = Path(self.temp_dir.name) / "same-bytes-after-terminal.sqlite3"
+                replacement.write_bytes(backup.read_bytes()); replacement.replace(backup)
+            elif scenario == "rename":
+                backup.rename(root / "renamed-after-terminal.sqlite3")
+            elif scenario == "hardlink":
+                os.link(backup, root / "late-hardlink.sqlite3")
+            elif scenario == "directory":
+                backup.unlink(); backup.mkdir()
+            elif scenario == "temp_add":
+                (root / ".taimobot-late-terminal.tmp").write_text("partial")
+            elif scenario == "staging_add":
+                staging.mkdir(); self._make_inventory_backup(staging, "late-staged.sqlite3")
+            elif scenario == "staging_remove":
+                if staging.exists(): shutil.rmtree(staging)
+            elif scenario == "external_symlink":
+                external = self._make_inventory_backup(Path(self.temp_dir.name) / "external-post-terminal", "external.sqlite3")
+                backup.unlink(); backup.symlink_to(external)
+            elif scenario == "sidecar":
+                Path(str(backup) + "-wal").write_bytes(b"late wal")
+            elif scenario == "hardlink_then_replace":
+                os.link(backup, root / "pre-replacement-link.sqlite3")
+                replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "hardlink-replacement", backup.name)
+                replacement.replace(backup)
+            elif scenario == "directory_swap":
+                backup.rename(root / "moved-after-terminal.sqlite3")
+                replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "directory-swap-post-terminal", backup.name)
+                replacement.replace(backup)
+            elif scenario == "append_then_restore_size":
+                with backup.open("ab") as handle: handle.write(b"temporary")
+                with backup.open("r+b") as handle: handle.truncate(backup.stat().st_size - len(b"temporary"))
+            elif scenario == "replace_twice":
+                one = self._make_inventory_backup(Path(self.temp_dir.name) / "post-terminal-one", backup.name)
+                one.replace(backup)
+                two = self._make_inventory_backup(Path(self.temp_dir.name) / "post-terminal-two", backup.name)
+                two.replace(backup)
+            elif scenario == "nested_add":
+                (root / "late-nested-terminal").mkdir()
+            calls["mutated"] = True
+
+        def fingerprint_with_last_window_mutation(connection):
+            value = original_fingerprint(connection)
+            calls["fingerprints"] += 1
+            if calls["fingerprints"] == 6 and not calls["mutated"]:
+                mutate()
+            return value
+
+        with patch.object(maintenance_module, "metadata_state_fingerprint", side_effect=fingerprint_with_last_window_mutation):
+            response = self._call_real_inventory_api(root)
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls["fingerprints"], 6, calls)
+        self.assertTrue(calls["mutated"], calls)
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED", payload)
+        self.assertEqual(payload["orphaned_artifacts"], [])
+
+    return test
+
+
+_REAL_INVENTORY_POST_TERMINAL_METADATA_FS_RACE_CASES = [
+    ("test_post_terminal_fs_append", "append"),
+    ("test_post_terminal_fs_replace", "replace"),
+    ("test_post_terminal_fs_delete", "delete"),
+    ("test_post_terminal_fs_touch", "touch"),
+    ("test_post_terminal_fs_chmod", "chmod"),
+    ("test_post_terminal_fs_symlink", "symlink"),
+    ("test_post_terminal_fs_same_bytes_replace", "same_bytes_replace"),
+    ("test_post_terminal_fs_rename", "rename"),
+    ("test_post_terminal_fs_hardlink", "hardlink"),
+    ("test_post_terminal_fs_directory", "directory"),
+    ("test_post_terminal_fs_temp_add", "temp_add"),
+    ("test_post_terminal_fs_staging_add", "staging_add"),
+    ("test_post_terminal_fs_staging_remove", "staging_remove"),
+    ("test_post_terminal_fs_external_symlink", "external_symlink"),
+    ("test_post_terminal_fs_sidecar", "sidecar"),
+    ("test_post_terminal_fs_hardlink_replace", "hardlink_then_replace"),
+    ("test_post_terminal_fs_directory_swap", "directory_swap"),
+    ("test_post_terminal_fs_append_truncate", "append_then_restore_size"),
+    ("test_post_terminal_fs_replace_twice", "replace_twice"),
+    ("test_post_terminal_fs_nested_add", "nested_add"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_POST_TERMINAL_METADATA_FS_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_post_terminal_metadata_fs_race_test(_scenario))
+
