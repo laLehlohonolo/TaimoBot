@@ -7068,16 +7068,12 @@ def _make_real_inventory_race_test(scenario):
             self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
             self.assertEqual((outside / "important.txt").read_text(encoding="utf-8"), "untouched")
             return
+        self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertEqual(first.get("orphaned_count", 0), 0)
         if scenario in {"file_append", "file_touch", "staging_append", "staging_file_touch"}:
-            self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED")
-            self.assertEqual(first.get("orphaned_count", 0), 0)
+            self.assertIn("ARTIFACT_CHANGED_DURING_FINAL_CHECK", first["issues"])
         else:
-            self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
-            self.assertEqual(first.get("orphaned_count", 0), 0)
-        self.assertIn(
-            "ARTIFACT_DIRECTORY_CHANGED_DURING_INVENTORY",
-            first["issues"],
-        ) if scenario not in {"file_append", "file_touch", "staging_append", "staging_file_touch"} else None
+            self.assertIn("ARTIFACT_DIRECTORY_CHANGED_DURING_INVENTORY", first["issues"])
     return test
 
 
@@ -7594,6 +7590,10 @@ def _make_real_inventory_combined_final_window_race_test(scenario):
     def test(self):
         root = Path(self.temp_dir.name) / ("combined-final-window-" + scenario)
         backup = self._make_inventory_backup(root, "taimobot-combined.sqlite3")
+        if scenario == "staging_remove":
+            staging = root / "recovery-staging"
+            staging.mkdir()
+            self._make_inventory_backup(staging, "baseline-staged.sqlite3")
         self._create_inventory_metadata_tables()
         with database.get_connection() as connection:
             connection.execute(
@@ -7638,8 +7638,6 @@ def _make_real_inventory_combined_final_window_race_test(scenario):
                         self._make_inventory_backup(staging, "late-stage.sqlite3")
                     elif scenario == "staging_remove":
                         staging = root / "recovery-staging"
-                        staging.mkdir()
-                        self._make_inventory_backup(staging, "staged.sqlite3")
                         for child in staging.iterdir(): child.unlink()
                         staging.rmdir()
                     elif scenario == "staging_replace":
