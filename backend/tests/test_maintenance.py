@@ -4427,7 +4427,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertTrue(all(not worker.is_alive() for worker in workers), "recovery worker timed out")
         self.assertEqual([worker.exitcode for worker in workers], [0, 0])
         outcomes = [results.get(timeout=2) for _ in workers]
-        self.assertEqual(outcomes, [("ok", "RESTORE_LOCK_RECOVERED"), ("ok", "RESTORE_LOCK_RECOVERED")])
+        self.assertEqual(sorted(outcomes), [("ok", "ABANDONED_RESTORE_LOCK_RECOVERED"), ("ok", "ABANDONED_RESTORE_LOCK_RECOVERED")])
         self.assertTrue(all(not db.with_name(db.name + ".restore.lock").exists() for db in db_paths))
         with audit.open("rb") as stream:
             verified = maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
