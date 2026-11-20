@@ -7718,3 +7718,136 @@ _REAL_INVENTORY_COMBINED_FINAL_WINDOW_RACE_CASES = [
 ]
 for _test_name, _scenario in _REAL_INVENTORY_COMBINED_FINAL_WINDOW_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_combined_final_window_race_test(_scenario))
+
+
+def _make_real_inventory_final_consistency_fence_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("final-fence-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-fence.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                (str(backup),),
+            )
+
+        if scenario.startswith("fs_"):
+            original_get_connection = database.get_connection
+            calls = {"fingerprint_reads": 0, "changed": False}
+
+            class ConnectionProxy:
+                def __init__(self, connection):
+                    self.connection = connection
+                def __enter__(self):
+                    self.connection.__enter__()
+                    return self
+                def __exit__(self, *args):
+                    return self.connection.__exit__(*args)
+                def execute(self, sql, *args):
+                    cursor = self.connection.execute(sql, *args)
+                    if sql.strip() == "SELECT * FROM maintenance_runs":
+                        calls["fingerprint_reads"] += 1
+                        if calls["fingerprint_reads"] == 2 and not calls["changed"]:
+                            calls["changed"] = True
+                            if scenario == "fs_add":
+                                (root / "taimobot-late.sqlite3").write_bytes(backup.read_bytes())
+                            elif scenario == "fs_remove":
+                                backup.unlink()
+                            elif scenario == "fs_replace":
+                                replacement = self_test._make_inventory_backup(
+                                    Path(self_test.temp_dir.name) / "fence-replace", "replacement.sqlite3"
+                                )
+                                replacement.replace(backup)
+                            elif scenario == "fs_edit":
+                                with sqlite3.connect(backup) as db:
+                                    db.execute("CREATE TABLE fence_edit (value TEXT)")
+                            elif scenario == "fs_symlink":
+                                backup.unlink()
+                                backup.symlink_to(root / "missing.sqlite3")
+                            elif scenario == "fs_nested":
+                                (root / "late-directory").mkdir()
+                            elif scenario == "fs_chmod":
+                                backup.chmod(0o600)
+                            elif scenario == "fs_temp":
+                                (root / ".taimobot-partial.tmp").write_text("partial")
+                            elif scenario == "fs_rename":
+                                backup.rename(root / "taimobot-renamed.sqlite3")
+                            elif scenario == "fs_stage":
+                                staging = root / "recovery-staging"
+                                staging.mkdir()
+                                (staging / "late-stage.sqlite3").write_bytes(backup.read_bytes())
+                    return cursor
+                def __getattr__(self, name):
+                    return getattr(self.connection, name)
+
+            self_test = self
+            with patch.object(database, "get_connection", side_effect=lambda: ConnectionProxy(original_get_connection())):
+                response = self._call_real_inventory_api(root)
+            self.assertTrue(calls["changed"], f"final metadata fingerprint hook not reached: {calls}")
+        else:
+            original_hash = maintenance_module.sha256_file
+            calls = {"hash": 0, "changed": False}
+            def mutate_metadata_during_second_fence(path):
+                digest = original_hash(path)
+                calls["hash"] += 1
+                if calls["hash"] == 3 and not calls["changed"]:
+                    calls["changed"] = True
+                    with database.get_connection() as connection:
+                        if scenario == "db_update":
+                            connection.execute("UPDATE maintenance_runs SET completed_at='fence-update' WHERE run_date='2026-11-20'")
+                        elif scenario == "db_delete":
+                            connection.execute("DELETE FROM maintenance_runs WHERE run_date='2026-11-20'")
+                        elif scenario == "db_insert":
+                            connection.execute("INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-19','FAILED','s','e',?)", (str(backup),))
+                        elif scenario == "db_path":
+                            connection.execute("UPDATE maintenance_runs SET backup_file=? WHERE run_date='2026-11-20'", (str(root / "other.sqlite3"),))
+                        elif scenario == "db_attempt_insert":
+                            connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file,error_summary) VALUES ('attempt-fence','2026-11-20','FAILED','s','e',?,'x')", (str(backup),))
+                        elif scenario == "db_attempt_update":
+                            connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file,error_summary) VALUES ('attempt-fence','2026-11-20','FAILED','s','e',?,'x')", (str(backup),))
+                            connection.execute("UPDATE maintenance_run_attempts SET error_summary='updated' WHERE attempt_token='attempt-fence'")
+                        elif scenario == "db_schema":
+                            connection.execute("ALTER TABLE maintenance_runs ADD COLUMN fence_marker TEXT")
+                        elif scenario == "db_plan":
+                            connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?,?,?,'PREPARED','2026-11-20T00:00:00+02:00','operator')", (str(backup),str(root/'stage.sqlite3'),str(root/'rollback.sqlite3')))
+                        elif scenario == "db_artifact":
+                            connection.execute("INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES ('cccccccccccccccccccccccccccccccc',?,?,?)", ("a"*64,"b"*64,"c"*64))
+                        elif scenario == "db_batch":
+                            connection.execute("UPDATE maintenance_runs SET completed_at='batch' WHERE run_date='2026-11-20'")
+                            connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file,error_summary) VALUES ('attempt-batch','2026-11-20','FAILED','s','e',?,'x')", (str(backup),))
+                return digest
+            with patch.object(maintenance_module, "sha256_file", side_effect=mutate_metadata_during_second_fence):
+                response = self._call_real_inventory_api(root)
+            self.assertTrue(calls["changed"], f"second filesystem fence hash not reached: {calls}")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED", payload)
+        self.assertEqual(payload["orphaned_artifacts"], [])
+    return test
+
+
+_REAL_INVENTORY_FINAL_CONSISTENCY_FENCE_CASES = [
+    ("test_final_fence_fs_add", "fs_add"),
+    ("test_final_fence_fs_remove", "fs_remove"),
+    ("test_final_fence_fs_replace", "fs_replace"),
+    ("test_final_fence_fs_edit", "fs_edit"),
+    ("test_final_fence_fs_symlink", "fs_symlink"),
+    ("test_final_fence_fs_nested", "fs_nested"),
+    ("test_final_fence_fs_chmod", "fs_chmod"),
+    ("test_final_fence_fs_temp", "fs_temp"),
+    ("test_final_fence_fs_rename", "fs_rename"),
+    ("test_final_fence_fs_stage", "fs_stage"),
+    ("test_final_fence_db_update", "db_update"),
+    ("test_final_fence_db_delete", "db_delete"),
+    ("test_final_fence_db_insert", "db_insert"),
+    ("test_final_fence_db_path", "db_path"),
+    ("test_final_fence_db_attempt_insert", "db_attempt_insert"),
+    ("test_final_fence_db_attempt_update", "db_attempt_update"),
+    ("test_final_fence_db_schema", "db_schema"),
+    ("test_final_fence_db_plan", "db_plan"),
+    ("test_final_fence_db_artifact", "db_artifact"),
+    ("test_final_fence_db_batch", "db_batch"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_FINAL_CONSISTENCY_FENCE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_final_consistency_fence_test(_scenario))
