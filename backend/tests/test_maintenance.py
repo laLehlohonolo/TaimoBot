@@ -2195,6 +2195,8 @@ class DailyMaintenanceTests(unittest.TestCase):
     def test_restore_lock_rejects_symlinked_guard_without_touching_target(self):
         guard_path = database.restore_guard_path()
         guard_path.parent.mkdir(parents=True, exist_ok=True)
+        if guard_path.exists() or guard_path.is_symlink():
+            guard_path.unlink()
         target = Path(self.temp_dir.name) / "unrelated-guard-target"
         target.write_bytes(b"do-not-modify")
         guard_path.symlink_to(target)
