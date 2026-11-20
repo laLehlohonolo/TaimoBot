@@ -1723,55 +1723,69 @@ def recover_abandoned_restore_lock(
 
 
 def release_restore_lock(lock_token: str) -> dict:
-    """Release only the lock owned by the supplied unpredictable token.
+    """Release an owned restore lock only after marker absence is durable.
 
-    Keep the exclusive process-shared guard until the marker has been removed
-    and its parent directory synced. This prevents cooperating clients from
-    observing a released guard with a stale marker and makes marker replacement
-    or symlink substitution fail closed.
+    If a prior attempt unlinked this process's marker but could not sync the
+    parent directory, a retry may finish the directory sync while the same
+    in-process guard token is still registered. It never removes a replacement
+    marker and never resumes from a token without its original guard fd.
     """
     if not isinstance(lock_token, str) or not re.fullmatch(r"[a-f0-9]{32}", lock_token):
         raise ValueError("A valid restore lock token is required.")
+    guard_fd = _RESTORE_GUARD_FDS.get(lock_token)
+    if guard_fd is None:
+        raise RuntimeError("Restore process-shared lock ownership is unavailable; marker remains active.")
+
     lock_path = restore_lock_path()
     marker_fd = None
     directory_fd = None
     marker_unlinked = False
+    resumed_after_unlink = False
     try:
-        marker_fd = os.open(
-            str(lock_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        )
-        marker_stat = os.fstat(marker_fd)
-        if not __import__("stat").S_ISREG(marker_stat.st_mode):
-            raise RuntimeError("Restore lock marker is unsafe; lock remains active.")
-        marker_bytes = os.read(marker_fd, 65536)
-        if os.read(marker_fd, 1):
-            raise RuntimeError("Restore lock marker exceeds the inspection limit; lock remains active.")
         try:
-            payload = json.loads(marker_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
-            raise RuntimeError("Restore lock metadata is unreadable; lock remains active.") from error
-        if payload.get("lock_token") != lock_token:
-            raise RuntimeError("Restore lock ownership mismatch; lock remains active.")
-        guard_fd = _RESTORE_GUARD_FDS.get(lock_token)
-        if guard_fd is None:
-            raise RuntimeError("Restore process-shared lock ownership is unavailable; marker remains active.")
+            marker_fd = os.open(
+                str(lock_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            )
+        except FileNotFoundError:
+            # Only the process that still holds this exact token's guard may
+            # complete a prior unlink whose directory fsync failed.
+            resumed_after_unlink = True
+            marker_unlinked = True
+        if marker_fd is not None:
+            marker_stat = os.fstat(marker_fd)
+            if not stat.S_ISREG(marker_stat.st_mode):
+                raise RuntimeError("Restore lock marker is unsafe; lock remains active.")
+            marker_bytes = os.read(marker_fd, 65536)
+            if os.read(marker_fd, 1):
+                raise RuntimeError("Restore lock marker exceeds the inspection limit; lock remains active.")
+            try:
+                payload = json.loads(
+                    marker_bytes.decode("utf-8"),
+                    object_pairs_hook=_restore_journal_object_without_duplicate_keys,
+                    parse_constant=_reject_restore_journal_json_constant,
+                )
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+                raise RuntimeError("Restore lock metadata is unreadable; lock remains active.") from error
+            if not isinstance(payload, dict) or payload.get("lock_token") != lock_token:
+                raise RuntimeError("Restore lock ownership mismatch; lock remains active.")
 
-        current_stat = lock_path.lstat()
-        if (
-            __import__("stat").S_ISLNK(current_stat.st_mode)
-            or (current_stat.st_dev, current_stat.st_ino) != (marker_stat.st_dev, marker_stat.st_ino)
-        ):
-            raise RuntimeError("Restore lock marker changed during release; lock remains active.")
-        os.lseek(marker_fd, 0, os.SEEK_SET)
-        if os.read(marker_fd, 65536) != marker_bytes or os.read(marker_fd, 1):
-            raise RuntimeError("Restore lock marker changed during release; lock remains active.")
+            current_stat = lock_path.lstat()
+            if (
+                stat.S_ISLNK(current_stat.st_mode)
+                or (current_stat.st_dev, current_stat.st_ino) != (marker_stat.st_dev, marker_stat.st_ino)
+            ):
+                raise RuntimeError("Restore lock marker changed during release; lock remains active.")
+            os.lseek(marker_fd, 0, os.SEEK_SET)
+            if os.read(marker_fd, 65536) != marker_bytes or os.read(marker_fd, 1):
+                raise RuntimeError("Restore lock marker changed during release; lock remains active.")
 
         directory_fd = os.open(
             str(lock_path.parent),
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
         )
-        os.unlink(lock_path)
-        marker_unlinked = True
+        if marker_fd is not None:
+            os.unlink(lock_path)
+            marker_unlinked = True
         os.fsync(directory_fd)
     except OSError as error:
         state = (
@@ -1790,15 +1804,11 @@ def release_restore_lock(lock_token: str) -> dict:
             except OSError as error:
                 close_errors.append(error)
         if close_errors:
-            # Keep the process-shared guard registered and held whenever any
-            # release-phase descriptor cannot be closed cleanly.
             raise RuntimeError(
                 "Restore lock release could not close its inspection descriptors safely; "
                 "process guard remains held."
             ) from close_errors[0]
 
-    # Do not discard ownership bookkeeping until the OS confirms the guard
-    # descriptor has closed. If close fails, a retry can still find the fd.
     try:
         os.close(guard_fd)
     except OSError as error:
@@ -1812,6 +1822,7 @@ def release_restore_lock(lock_token: str) -> dict:
         "database_quiescent": False,
         "marker_removed": True,
         "directory_synced": True,
+        "resumed_after_unlink": resumed_after_unlink,
     }
 
 
