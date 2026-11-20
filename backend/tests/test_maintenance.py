@@ -4674,7 +4674,8 @@ class DailyMaintenanceTests(unittest.TestCase):
         lock = acquire_restore_lock("1" * 32)
         self._fail_restore_release_directory_sync_once(lock["lock_token"])
         self.assertFalse(Path(lock["lock_file"]).exists())
-        self.assertTrue(is_restore_lock_active())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
+            database.get_connection()
         released = release_restore_lock(lock["lock_token"])
         self.assertEqual(released["status"], "RESTORE_LOCK_RELEASED")
         self.assertTrue(released["directory_synced"])
@@ -4687,7 +4688,6 @@ class DailyMaintenanceTests(unittest.TestCase):
         with patch("app.maintenance.os.fsync", side_effect=OSError("second directory sync failure")):
             with self.assertRaisesRegex(RuntimeError, "marker removal was not confirmed durable"):
                 release_restore_lock(lock["lock_token"])
-        self.assertTrue(is_restore_lock_active())
         with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
             database.get_connection()
         released = release_restore_lock(lock["lock_token"])
@@ -4730,7 +4730,8 @@ class DailyMaintenanceTests(unittest.TestCase):
         self._fail_restore_release_directory_sync_once(lock["lock_token"])
         with self.assertRaisesRegex(RuntimeError, "ownership is unavailable"):
             release_restore_lock("8" * 32)
-        self.assertTrue(is_restore_lock_active())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
+            database.get_connection()
         release_restore_lock(lock["lock_token"])
 
     def test_restore_release_without_guard_never_releases_missing_marker(self):
@@ -4771,7 +4772,8 @@ class DailyMaintenanceTests(unittest.TestCase):
         observed = {"directory": False}
         def verify_sync(fd):
             if maintenance_module.stat.S_ISDIR(os.fstat(fd).st_mode):
-                self.assertTrue(is_restore_lock_active())
+                with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
+                    database.get_connection()
                 observed["directory"] = True
             return real_fsync(fd)
         with patch("app.maintenance.os.fsync", side_effect=verify_sync):
