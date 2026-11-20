@@ -2,6 +2,7 @@ import os
 import json
 import hashlib
 import sqlite3
+import shutil
 import multiprocessing
 import tempfile
 import unittest
