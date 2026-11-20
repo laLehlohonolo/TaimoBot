@@ -1213,7 +1213,16 @@ def inspect_recovery_artifact_inventory(
         encoded = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
+    database_path = Path(database.DB_PATH)
+
+    def database_file_identity():
+        metadata = os.stat(database_path, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise OSError("live database path was replaced or is unsafe")
+        return (metadata.st_dev, metadata.st_ino)
+
     try:
+        initial_database_identity = database_file_identity()
         with database.get_connection() as connection:
             tables = {
                 row["name"] for row in connection.execute(
@@ -1272,6 +1281,8 @@ def inspect_recovery_artifact_inventory(
                     )
 
             initial_metadata_fingerprint = metadata_state_fingerprint(connection)
+            if database_file_identity() != initial_database_identity:
+                raise sqlite3.DatabaseError("live database identity changed during metadata snapshot")
 
             for table in ("maintenance_runs", "maintenance_run_attempts"):
                 if table in tables:
@@ -1494,6 +1505,28 @@ def inspect_recovery_artifact_inventory(
             "missing_references": missing_references,
             "issues": list(dict.fromkeys(issues + ["MAINTENANCE_METADATA_UNREADABLE_DURING_INVENTORY", str(error)[:180]])),
         }
+    try:
+        if database_file_identity() != initial_database_identity:
+            return {
+                **result_base,
+                "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+                "journal_status": journal_verification.get("status"),
+                "artifacts": artifacts,
+                "orphaned_artifacts": [],
+                "missing_references": missing_references,
+                "issues": list(dict.fromkeys(issues + ["LIVE_DATABASE_IDENTITY_CHANGED_DURING_INVENTORY"])),
+            }
+    except OSError as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": journal_verification.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["LIVE_DATABASE_IDENTITY_UNSAFE_DURING_INVENTORY", str(error)[:180]])),
+        }
+
     if final_metadata_fingerprint != initial_metadata_fingerprint:
         return {
             **result_base,
