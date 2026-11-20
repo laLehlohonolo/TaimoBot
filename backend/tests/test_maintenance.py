@@ -5399,5 +5399,168 @@ class DailyMaintenanceTests(unittest.TestCase):
             release_restore_lock(lock["lock_token"])
 
 
+    def _inject_recovery_audit_write_fault(self, target_event, mode, audit):
+        real_write = os.write
+        state = {"target_started": False, "partial_written": False, "triggered": False}
+        def injected(fd, data):
+            try:
+                is_audit = audit.exists() and os.path.samefile(audit, f"/proc/self/fd/{fd}")
+            except (OSError, FileNotFoundError):
+                is_audit = False
+            payload = bytes(data)
+            if not is_audit:
+                return real_write(fd, data)
+            if mode == "short":
+                return real_write(fd, payload[:max(1, len(payload) // 3)])
+            if not state["triggered"] and ('"event": "' + target_event + '"').encode() in payload:
+                state["triggered"] = True
+                if mode == "zero":
+                    return 0
+                if mode == "partial":
+                    state["partial_written"] = True
+                    return real_write(fd, payload[:max(1, len(payload) // 3)])
+            if state["partial_written"]:
+                state["partial_written"] = False
+                raise OSError("simulated interrupted audit append")
+            return real_write(fd, data)
+        return injected, state
+
+    def test_recovery_audit_short_writes_loop_until_both_records_are_complete(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "short-write.jsonl"
+        injected, state = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_STARTED", "short", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            result = recover_abandoned_restore_lock("operator", "INC-SHORT-WRITES", confirm=True, audit_path=audit)
+        self.assertEqual(result["status"], "ABANDONED_RESTORE_LOCK_RECOVERED")
+        self.assertTrue(state["triggered"])
+        self.assertFalse(marker.exists())
+        with audit.open("rb") as stream:
+            self.assertEqual(maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())["record_count"], 2)
+
+    def test_started_partial_append_preserves_abandoned_marker(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "started-partial.jsonl"
+        injected, state = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_STARTED", "partial", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaisesRegex(OSError, "interrupted audit append"):
+                recover_abandoned_restore_lock("operator", "INC-START-PARTIAL", confirm=True, audit_path=audit)
+        self.assertTrue(state["triggered"])
+        self.assertTrue(marker.exists())
+        self.assertFalse(audit.read_bytes().endswith(b"\\n"))
+
+    def test_started_partial_append_is_detected_as_incomplete_record(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "started-incomplete.jsonl"
+        injected, _ = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_STARTED", "partial", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-START-INCOMPLETE", confirm=True, audit_path=audit)
+        with audit.open("rb") as stream:
+            with self.assertRaisesRegex(RuntimeError, "incomplete final record"):
+                maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+        self.assertTrue(marker.exists())
+
+    def test_started_partial_append_blocks_retry_without_truncation(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "started-retry.jsonl"
+        injected, _ = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_STARTED", "partial", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-START-RETRY", confirm=True, audit_path=audit)
+        before = audit.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "incomplete final record"):
+            recover_abandoned_restore_lock("operator", "INC-START-RETRY-2", confirm=True, audit_path=audit)
+        self.assertEqual(audit.read_bytes(), before)
+        self.assertTrue(marker.exists())
+
+    def test_zero_length_started_write_fails_closed(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "started-zero.jsonl"
+        injected, state = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_STARTED", "zero", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaisesRegex(OSError, "Could not complete recovery audit write"):
+                recover_abandoned_restore_lock("operator", "INC-START-ZERO", confirm=True, audit_path=audit)
+        self.assertTrue(state["triggered"])
+        self.assertTrue(marker.exists())
+        self.assertEqual(audit.read_bytes(), b"")
+
+    def test_complete_partial_append_leaves_marker_absent_and_tail_invalid(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "complete-partial.jsonl"
+        injected, state = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_COMPLETE", "partial", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaisesRegex(OSError, "interrupted audit append"):
+                recover_abandoned_restore_lock("operator", "INC-COMPLETE-PARTIAL", confirm=True, audit_path=audit)
+        self.assertTrue(state["triggered"])
+        self.assertFalse(marker.exists())
+        self.assertFalse(audit.read_bytes().endswith(b"\\n"))
+        with audit.open("rb") as stream:
+            with self.assertRaisesRegex(RuntimeError, "incomplete final record"):
+                maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+
+    def test_complete_partial_append_blocks_future_recovery_and_preserves_new_marker(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "complete-retry.jsonl"
+        injected, _ = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_COMPLETE", "partial", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-COMPLETE-RETRY", confirm=True, audit_path=audit)
+        self.assertFalse(marker.exists())
+        replacement = self._write_abandoned_restore_marker(plan_id="c" * 32)
+        damaged_audit = audit.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "incomplete final record"):
+            recover_abandoned_restore_lock("operator", "INC-COMPLETE-RETRY-2", confirm=True, audit_path=audit)
+        self.assertTrue(replacement.exists())
+        self.assertEqual(audit.read_bytes(), damaged_audit)
+
+    def test_started_partial_append_preserves_database_and_sqlite_sidecars(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "started-sidecars.jsonl"
+        wal = Path(str(database.DB_PATH) + "-wal")
+        shm = Path(str(database.DB_PATH) + "-shm")
+        wal.write_bytes(b"recovery-audit-wal")
+        shm.write_bytes(b"recovery-audit-shm")
+        db_before = database.DB_PATH.read_bytes()
+        injected, _ = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_STARTED", "partial", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-START-SIDECARS", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+        self.assertEqual(database.DB_PATH.read_bytes(), db_before)
+        self.assertEqual(wal.read_bytes(), b"recovery-audit-wal")
+        self.assertEqual(shm.read_bytes(), b"recovery-audit-shm")
+
+    def test_complete_partial_append_preserves_database_and_sqlite_sidecars(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "complete-sidecars.jsonl"
+        wal = Path(str(database.DB_PATH) + "-wal")
+        shm = Path(str(database.DB_PATH) + "-shm")
+        wal.write_bytes(b"recovery-audit-wal")
+        shm.write_bytes(b"recovery-audit-shm")
+        db_before = database.DB_PATH.read_bytes()
+        injected, _ = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_COMPLETE", "partial", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-COMPLETE-SIDECARS", confirm=True, audit_path=audit)
+        self.assertFalse(marker.exists())
+        self.assertEqual(database.DB_PATH.read_bytes(), db_before)
+        self.assertEqual(wal.read_bytes(), b"recovery-audit-wal")
+        self.assertEqual(shm.read_bytes(), b"recovery-audit-shm")
+
+    def test_partial_audit_tail_is_never_automatically_truncated_or_repaired(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "no-auto-repair.jsonl"
+        injected, _ = self._inject_recovery_audit_write_fault("RESTORE_LOCK_RECOVERY_STARTED", "partial", audit)
+        with patch("app.maintenance.os.write", side_effect=injected):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-NO-REPAIR", confirm=True, audit_path=audit)
+        before = audit.read_bytes()
+        with self.assertRaises(RuntimeError):
+            with audit.open("rb") as stream:
+                maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+        self.assertEqual(audit.read_bytes(), before)
+        self.assertTrue(marker.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
