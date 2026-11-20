@@ -1733,9 +1733,6 @@ def release_restore_lock(lock_token: str) -> dict:
     if not isinstance(lock_token, str) or not re.fullmatch(r"[a-f0-9]{32}", lock_token):
         raise ValueError("A valid restore lock token is required.")
     guard_fd = _RESTORE_GUARD_FDS.get(lock_token)
-    if guard_fd is None:
-        raise RuntimeError("Restore process-shared lock ownership is unavailable; marker remains active.")
-
     lock_path = restore_lock_path()
     marker_fd = None
     directory_fd = None
@@ -1749,6 +1746,8 @@ def release_restore_lock(lock_token: str) -> dict:
         except FileNotFoundError:
             # Only the process that still holds this exact token's guard may
             # complete a prior unlink whose directory fsync failed.
+            if guard_fd is None:
+                raise RuntimeError("Restore process-shared lock ownership is unavailable; marker remains active.")
             resumed_after_unlink = True
             marker_unlinked = True
         if marker_fd is not None:
@@ -1768,6 +1767,8 @@ def release_restore_lock(lock_token: str) -> dict:
                 raise RuntimeError("Restore lock metadata is unreadable; lock remains active.") from error
             if not isinstance(payload, dict) or payload.get("lock_token") != lock_token:
                 raise RuntimeError("Restore lock ownership mismatch; lock remains active.")
+            if guard_fd is None:
+                raise RuntimeError("Restore process-shared lock ownership is unavailable; marker remains active.")
 
             current_stat = lock_path.lstat()
             if (
