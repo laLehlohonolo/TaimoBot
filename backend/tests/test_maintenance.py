@@ -402,6 +402,305 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
         self.assertIn("BACKUP_DIRECTORY_UNSAFE", result["issues"])
 
+
+    def _call_recovery_inventory_api(self, user=None, admin_emails="ops@example.com", method="get"):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.auth_routes import current_user
+
+        previous = dict(app.dependency_overrides)
+        if user is not None:
+            app.dependency_overrides[current_user] = lambda: user
+        try:
+            with patch.dict(os.environ, {"TAIMOBOT_ADMIN_EMAILS": admin_emails}):
+                client = TestClient(app)
+                response = getattr(client, method)("/maintenance/recovery-artifact-inventory")
+                client.close()
+                return response
+        finally:
+            app.dependency_overrides.clear()
+            app.dependency_overrides.update(previous)
+
+    def test_recovery_inventory_api_requires_authentication(self):
+        response = self._call_recovery_inventory_api()
+        self.assertEqual(response.status_code, 401)
+
+    def test_recovery_inventory_api_rejects_invalid_bearer_token(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        client = TestClient(app)
+        response = client.get(
+            "/maintenance/recovery-artifact-inventory",
+            headers={"Authorization": "Bearer invalid-session-token"},
+        )
+        client.close()
+        self.assertEqual(response.status_code, 401)
+
+    def test_recovery_inventory_api_rejects_non_admin_user(self):
+        response = self._call_recovery_inventory_api(
+            {"user_id": "user-1", "email": "trader@example.com"}
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_recovery_inventory_api_requires_explicit_admin_allowlist(self):
+        response = self._call_recovery_inventory_api(
+            {"user_id": "admin-1", "email": "ops@example.com"},
+            admin_emails="",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_recovery_inventory_api_normalizes_admin_email_case(self):
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value={
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }) as inventory:
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "OPS@EXAMPLE.COM"},
+                admin_emails=" ops@example.com ",
+            )
+        self.assertEqual(response.status_code, 200)
+        inventory.assert_called_once_with()
+
+    def test_recovery_inventory_api_calls_inventory_once_for_admin(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload) as inventory:
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.status_code, 200)
+        inventory.assert_called_once_with()
+
+    def test_recovery_inventory_api_does_not_call_inventory_for_non_admin(self):
+        with patch("app.main.inspect_recovery_artifact_inventory") as inventory:
+            response = self._call_recovery_inventory_api(
+                {"user_id": "user-1", "email": "trader@example.com"}
+            )
+        self.assertEqual(response.status_code, 403)
+        inventory.assert_not_called()
+
+    def test_recovery_inventory_api_returns_inventory_status(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": ["REFERENCED_RECOVERY_ARTIFACT_MISSING"],
+            "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED")
+
+    def test_recovery_inventory_api_preserves_orphan_details(self):
+        orphan = {"file_name": "taimobot-orphan.sqlite3", "status": "ORPHANED"}
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED",
+            "artifacts": [orphan], "orphaned_artifacts": [orphan],
+            "missing_references": [], "issues": [], "read_only": True,
+            "automatic_deletion": False, "automatic_repair": False,
+            "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.json()["orphaned_artifacts"], [orphan])
+
+    def test_recovery_inventory_api_preserves_missing_reference_details(self):
+        missing = {"path": "/backup/missing.sqlite3", "status": "REFERENCED_FILE_MISSING"}
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED",
+            "artifacts": [], "orphaned_artifacts": [],
+            "missing_references": [missing], "issues": [], "read_only": True,
+            "automatic_deletion": False, "automatic_repair": False,
+            "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.json()["missing_references"], [missing])
+
+    def test_recovery_inventory_api_preserves_diagnostic_issues(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": ["RESTORE_EXECUTION_JOURNAL_UNTRUSTED"],
+            "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.json()["issues"], ["RESTORE_EXECUTION_JOURNAL_UNTRUSTED"])
+
+    def test_recovery_inventory_api_exposes_read_only_contract(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        body = response.json()
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["automatic_deletion"])
+        self.assertFalse(body["automatic_repair"])
+        self.assertFalse(body["live_database_replaced"])
+
+    def test_recovery_inventory_api_does_not_expose_restore_execution_controls(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        body = response.json()
+        for forbidden in ("delete", "repair", "restore", "execute", "approval_token"):
+            self.assertNotIn(forbidden, body)
+
+    def test_recovery_inventory_api_does_not_trigger_backup_creation(self):
+        from app import main as main_module
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value={
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }), patch.object(main_module, "create_verified_backup") as create_backup:
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.status_code, 200)
+        create_backup.assert_not_called()
+
+    def test_recovery_inventory_api_does_not_trigger_backup_cleanup(self):
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value={
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }), patch("app.maintenance.cleanup_expired_backups") as cleanup:
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.status_code, 200)
+        cleanup.assert_not_called()
+
+    def test_recovery_inventory_api_does_not_trigger_restore_recovery(self):
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value={
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }), patch("app.maintenance.recover_abandoned_restore_lock") as recover:
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.status_code, 200)
+        recover.assert_not_called()
+
+    def test_recovery_inventory_api_repeated_gets_are_read_only(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload) as inventory:
+            first = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+            second = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(inventory.call_count, 2)
+
+    def test_recovery_inventory_api_rejects_post_method(self):
+        response = self._call_recovery_inventory_api(
+            {"user_id": "admin-1", "email": "ops@example.com"}, method="post"
+        )
+        self.assertEqual(response.status_code, 405)
+
+    def test_recovery_inventory_api_returns_blocked_diagnostic_without_mutation(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": ["MAINTENANCE_METADATA_UNREADABLE"], "read_only": True,
+            "automatic_deletion": False, "automatic_repair": False,
+            "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload), patch(
+            "app.main.create_verified_backup"
+        ) as backup:
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        backup.assert_not_called()
+
+    def test_recovery_inventory_api_returns_json_and_expected_content_type(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.headers["content-type"], "application/json")
+        self.assertIsInstance(response.json(), dict)
+
+    def test_recovery_inventory_api_does_not_change_maintenance_database(self):
+        before = database.DB_PATH.read_bytes()
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(database.DB_PATH.read_bytes(), before)
+
+    def test_recovery_inventory_api_response_does_not_claim_live_database_replacement(self):
+        payload = {
+            "status": "RECOVERY_ARTIFACT_INVENTORY_COMPLETE",
+            "artifacts": [], "orphaned_artifacts": [], "missing_references": [],
+            "issues": [], "read_only": True, "automatic_deletion": False,
+            "automatic_repair": False, "live_database_replaced": False,
+        }
+        with patch("app.main.inspect_recovery_artifact_inventory", return_value=payload):
+            response = self._call_recovery_inventory_api(
+                {"user_id": "admin-1", "email": "ops@example.com"}
+            )
+        self.assertIs(response.json()["live_database_replaced"], False)
+
     def test_maintenance_window_uses_south_african_time(self):
         zone = ZoneInfo("Africa/Johannesburg")
         self.assertTrue(is_maintenance_window(datetime(2026, 11, 15, 23, 0, tzinfo=zone)))
