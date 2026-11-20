@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import sqlite3
 import multiprocessing
 import tempfile
@@ -5684,6 +5685,139 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(marker.exists()); raw=audit.read_bytes(); end=raw.find(b"\n")+1; self.assertGreater(end,0); audit.write_bytes(raw[:end])
         with audit.open("rb") as f:
             with self.assertRaisesRegex(RuntimeError,"unmatched STARTED"): maintenance_module._verify_restore_lock_recovery_audit_fd(f.fileno())
+
+
+
+    def _write_diagnostic_audit(self, audit, events, marker_bytes=None):
+        previous = "0" * 64
+        records = []
+        for sequence, event in enumerate(events, 1):
+            record = {
+                "sequence": sequence,
+                "previous_record_sha256": previous,
+                "event": event,
+                "timestamp": "2026-11-20T07:00:00+02:00",
+                "operator_id": "operator-test",
+                "incident_ref": "INC-DIAGNOSTIC-TEST",
+                "plan_id": "a" * 32,
+                "marker_sha256": hashlib.sha256(marker_bytes or b"original-marker").hexdigest(),
+                "marker_file": database.DB_PATH.name + ".restore.lock",
+                "database_changed": False,
+                "sidecars_changed": False,
+            }
+            record["record_sha256"] = maintenance_module._restore_lock_recovery_record_digest(record)
+            previous = record["record_sha256"]
+            records.append(record)
+        audit.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in records), encoding="utf-8")
+        return records
+
+    def test_diagnostic_missing_audit_does_not_create_file(self):
+        audit = Path(self.temp_dir.name) / "missing-diagnostic.jsonl"
+        result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        self.assertEqual(result["status"], "NO_RECOVERY_AUDIT")
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["automatic_repair"])
+        self.assertFalse(audit.exists())
+
+    def test_diagnostic_empty_audit_reports_empty_without_mutation(self):
+        audit = Path(self.temp_dir.name) / "empty-diagnostic.jsonl"
+        audit.write_bytes(b"")
+        before = audit.read_bytes()
+        result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        self.assertEqual(result["status"], "RECOVERY_AUDIT_EMPTY")
+        self.assertEqual(result["record_count"], 0)
+        self.assertEqual(audit.read_bytes(), before)
+
+    def test_diagnostic_valid_completed_history_reports_consistent(self):
+        audit = Path(self.temp_dir.name) / "valid-diagnostic.jsonl"
+        self._write_diagnostic_audit(audit, ["RESTORE_LOCK_RECOVERY_STARTED", "RESTORE_LOCK_RECOVERY_COMPLETE"])
+        result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        self.assertEqual(result["status"], "RECOVERY_AUDIT_VALID")
+        self.assertEqual(result["record_count"], 2)
+        self.assertIsNone(result["pending_recovery"])
+        self.assertEqual(result["marker_state"], "NO_MARKER")
+
+    def test_diagnostic_unmatched_started_matches_existing_marker(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "pending-same-marker.jsonl"
+        self._write_diagnostic_audit(audit, ["RESTORE_LOCK_RECOVERY_STARTED"], marker.read_bytes())
+        result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        self.assertEqual(result["status"], "RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW")
+        self.assertEqual(result["marker_state"], "MATCHES_INTERRUPTED_RECOVERY")
+        self.assertEqual(result["pending_recovery"]["incident_ref"], "INC-DIAGNOSTIC-TEST")
+
+    def test_diagnostic_unmatched_started_reports_missing_marker(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "pending-missing-marker.jsonl"
+        self._write_diagnostic_audit(audit, ["RESTORE_LOCK_RECOVERY_STARTED"], marker.read_bytes())
+        marker.unlink()
+        result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        self.assertEqual(result["status"], "RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW")
+        self.assertEqual(result["marker_state"], "MARKER_ABSENT")
+
+    def test_diagnostic_unmatched_started_never_confuses_replacement_marker(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "pending-replacement-marker.jsonl"
+        self._write_diagnostic_audit(audit, ["RESTORE_LOCK_RECOVERY_STARTED"], marker.read_bytes())
+        marker.write_text(json.dumps({"plan_id": "c" * 32, "pid": 999999, "created_at": "2026-11-17T10:00:00+02:00", "lock_token": "d" * 32}))
+        result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        self.assertEqual(result["marker_state"], "DIFFERENT_MARKER_PRESENT")
+        self.assertEqual(result["status"], "RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW")
+
+    def test_diagnostic_malformed_or_partial_audit_is_invalid_and_unchanged(self):
+        audit = Path(self.temp_dir.name) / "partial-diagnostic.jsonl"
+        audit.write_bytes(b'{"sequence":1')
+        before = audit.read_bytes()
+        result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        self.assertEqual(result["status"], "RECOVERY_AUDIT_INVALID")
+        self.assertEqual(audit.read_bytes(), before)
+
+    def test_diagnostic_rejects_symlink_without_touching_target(self):
+        target = Path(self.temp_dir.name) / "audit-target.jsonl"
+        target.write_text("sensitive target remains unchanged")
+        link = Path(self.temp_dir.name) / "audit-link.jsonl"
+        link.symlink_to(target)
+        before = target.read_bytes()
+        result = maintenance_module.inspect_restore_lock_recovery_audit(link)
+        self.assertEqual(result["status"], "RECOVERY_AUDIT_UNREADABLE")
+        self.assertEqual(target.read_bytes(), before)
+        self.assertTrue(link.is_symlink())
+
+    def test_diagnostic_returns_busy_when_writer_holds_exclusive_audit_lock(self):
+        audit = Path(self.temp_dir.name) / "busy-diagnostic.jsonl"
+        audit.write_bytes(b"")
+        writer_fd = os.open(str(audit), os.O_RDONLY)
+        try:
+            maintenance_module.fcntl.flock(writer_fd, maintenance_module.fcntl.LOCK_EX | maintenance_module.fcntl.LOCK_NB)
+            result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        finally:
+            os.close(writer_fd)
+        self.assertEqual(result["status"], "RECOVERY_AUDIT_BUSY")
+        self.assertTrue(result["read_only"])
+
+    def test_diagnostic_never_changes_database_sidecars_marker_or_audit(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "read-only-preservation.jsonl"
+        self._write_diagnostic_audit(audit, ["RESTORE_LOCK_RECOVERY_STARTED"], marker.read_bytes())
+        wal = Path(str(database.DB_PATH) + "-wal")
+        shm = Path(str(database.DB_PATH) + "-shm")
+        wal.write_bytes(b"diagnostic-wal")
+        shm.write_bytes(b"diagnostic-shm")
+        snapshots = {
+            "db": database.DB_PATH.read_bytes(),
+            "wal": wal.read_bytes(),
+            "shm": shm.read_bytes(),
+            "marker": marker.read_bytes(),
+            "audit": audit.read_bytes(),
+        }
+        result = maintenance_module.inspect_restore_lock_recovery_audit(audit)
+        self.assertEqual(result["status"], "RECOVERY_INTERRUPTED_REQUIRES_OPERATOR_REVIEW")
+        self.assertFalse(result["automatic_repair"])
+        self.assertEqual(database.DB_PATH.read_bytes(), snapshots["db"])
+        self.assertEqual(wal.read_bytes(), snapshots["wal"])
+        self.assertEqual(shm.read_bytes(), snapshots["shm"])
+        self.assertEqual(marker.read_bytes(), snapshots["marker"])
+        self.assertEqual(audit.read_bytes(), snapshots["audit"])
 
 
 
