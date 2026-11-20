@@ -57,6 +57,8 @@ jobs:
         run: python scripts/run_restore_marker_crash_boundaries.py
       - name: Run ten partial restore marker recovery checks sequentially
         run: python scripts/run_restore_partial_marker_recovery.py
+      - name: Run ten restore lock release retry checks sequentially
+        run: python scripts/run_restore_lock_release_retry.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
