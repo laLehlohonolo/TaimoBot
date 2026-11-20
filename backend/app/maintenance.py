@@ -71,6 +71,8 @@ def verify_restore_execution_journal(
         if include_records:
             result["records"] = []
         return result
+    except OSError as error:
+        return {"status": "RESTORE_JOURNAL_UNREADABLE", "reason": str(error)[:200], "record_count": 0}
     try:
         if lock_file:
             fcntl.flock(descriptor, fcntl.LOCK_SH)
