@@ -1349,6 +1349,7 @@ def inspect_recovery_artifact_inventory(
 
     artifacts: list[dict] = []
     seen_inodes: dict[tuple[int, int], str] = {}
+    artifact_snapshots: dict[tuple[str, str], tuple[int, int, int, int, int]] = {}
     try:
         directories = [(root, "BACKUP")]
         if staging.exists():
@@ -1370,6 +1371,11 @@ def inspect_recovery_artifact_inventory(
                 )
                 if not relevant:
                     continue
+                entry_metadata = path.stat(follow_symlinks=False)
+                artifact_snapshots[(artifact_type, path.name)] = (
+                    entry_metadata.st_dev, entry_metadata.st_ino, entry_metadata.st_mode,
+                    entry_metadata.st_size, entry_metadata.st_mtime_ns,
+                )
                 item = {
                     "file_name": path.name,
                     "artifact_type": artifact_type if path.name.endswith(".sqlite3") else "INCOMPLETE_TEMPORARY",
@@ -1388,7 +1394,7 @@ def inspect_recovery_artifact_inventory(
                     item["issues"].append("LIVE_DATABASE_IS_NOT_A_BACKUP_ARTIFACT")
                     artifacts.append(item)
                     continue
-                path_metadata = path.stat(follow_symlinks=False)
+                path_metadata = entry_metadata
                 inode = (path_metadata.st_dev, path_metadata.st_ino)
                 previous = seen_inodes.get(inode)
                 if previous:
@@ -1554,6 +1560,39 @@ def inspect_recovery_artifact_inventory(
         or final_journal.get("last_record_sha256") != journal_verification.get("last_record_sha256")
     ):
         issues.append("RESTORE_EXECUTION_JOURNAL_CHANGED_DURING_INVENTORY")
+
+    # Revalidate managed directory entries and every scanned file after journal
+    # verification, closing the final window for concurrent backup replacement.
+    try:
+        assert_managed_directories_unchanged()
+        for (artifact_type, file_name), expected_identity in artifact_snapshots.items():
+            managed_directory = staging if artifact_type == "STAGED" else root
+            candidate = managed_directory / file_name
+            current = candidate.stat(follow_symlinks=False)
+            current_identity = (
+                current.st_dev, current.st_ino, current.st_mode,
+                current.st_size, current.st_mtime_ns,
+            )
+            if current_identity != expected_identity:
+                raise OSError("recovery artifact identity changed after filesystem inspection")
+            if stat.S_ISREG(current.st_mode):
+                recorded = next(
+                    (item.get("sha256") for item in artifacts
+                     if item["file_name"] == file_name and item["artifact_type"] == artifact_type),
+                    None,
+                )
+                if recorded and sha256_file(candidate) != recorded:
+                    raise OSError("recovery artifact digest changed before inventory response")
+    except (OSError, ValueError) as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": final_journal.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["ARTIFACT_CHANGED_DURING_FINAL_CHECK", str(error)[:180]])),
+        }
 
     # Recheck after final journal verification: a metadata write during that
     # verification must not escape the inventory's last consistency check.
