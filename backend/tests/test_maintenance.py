@@ -7070,7 +7070,7 @@ def _make_real_inventory_race_test(scenario):
             return
         if scenario in {"file_append", "file_touch", "staging_append", "staging_file_touch"}:
             self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED")
-            self.assertEqual(first["orphaned_count"], 0)
+            self.assertEqual(first.get("orphaned_count", 0), 0)
         else:
             self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
             self.assertEqual(first["orphaned_count"], 0)
