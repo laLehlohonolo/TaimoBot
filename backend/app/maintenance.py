@@ -1391,7 +1391,13 @@ def inspect_restore_lock() -> dict:
         return {"status": "RESTORE_LOCK_METADATA_UNREADABLE", "marker_present": True}
 
     try:
-        payload = json.loads(marker_bytes.decode("utf-8"))
+        payload = json.loads(
+            marker_bytes.decode("utf-8"),
+            object_pairs_hook=_restore_journal_object_without_duplicate_keys,
+            parse_constant=_reject_restore_journal_json_constant,
+        )
+        if not isinstance(payload, dict):
+            raise ValueError("restore marker must be a JSON object")
         plan_id = payload.get("plan_id")
         process_id = payload.get("pid")
         created_at = payload.get("created_at")
