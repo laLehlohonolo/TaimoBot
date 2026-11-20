@@ -4664,5 +4664,136 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertTrue(marker.exists())
 
 
+
+    def _fail_restore_release_directory_sync_once(self, token):
+        with patch("app.maintenance.os.fsync", side_effect=OSError("simulated release directory sync failure")):
+            with self.assertRaisesRegex(RuntimeError, "marker removal was not confirmed durable"):
+                release_restore_lock(token)
+
+    def test_restore_release_retry_finishes_directory_sync_after_prior_unlink(self):
+        lock = acquire_restore_lock("1" * 32)
+        self._fail_restore_release_directory_sync_once(lock["lock_token"])
+        self.assertFalse(Path(lock["lock_file"]).exists())
+        self.assertTrue(is_restore_lock_active())
+        released = release_restore_lock(lock["lock_token"])
+        self.assertEqual(released["status"], "RESTORE_LOCK_RELEASED")
+        self.assertTrue(released["directory_synced"])
+        self.assertTrue(released["resumed_after_unlink"])
+        self.assertFalse(is_restore_lock_active())
+
+    def test_restore_release_retry_keeps_guard_when_directory_sync_fails_again(self):
+        lock = acquire_restore_lock("2" * 32)
+        self._fail_restore_release_directory_sync_once(lock["lock_token"])
+        with patch("app.maintenance.os.fsync", side_effect=OSError("second directory sync failure")):
+            with self.assertRaisesRegex(RuntimeError, "marker removal was not confirmed durable"):
+                release_restore_lock(lock["lock_token"])
+        self.assertTrue(is_restore_lock_active())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "quiescing"):
+            database.get_connection()
+        released = release_restore_lock(lock["lock_token"])
+        self.assertTrue(released["resumed_after_unlink"])
+        self.assertFalse(is_restore_lock_active())
+
+    def test_restore_release_retry_never_removes_replacement_marker(self):
+        lock = acquire_restore_lock("3" * 32)
+        self._fail_restore_release_directory_sync_once(lock["lock_token"])
+        marker = Path(lock["lock_file"])
+        replacement = json.dumps({
+            "plan_id": "4" * 32, "lock_token": "5" * 32,
+            "pid": 999999, "created_at": "2026-11-20T00:00:00+02:00",
+        })
+        marker.write_text(replacement, encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+            release_restore_lock(lock["lock_token"])
+        self.assertEqual(marker.read_text(encoding="utf-8"), replacement)
+        self.assertTrue(is_restore_lock_active())
+        marker.unlink()
+        release_restore_lock(lock["lock_token"])
+
+    def test_restore_release_retry_rejects_symlink_replacement(self):
+        lock = acquire_restore_lock("6" * 32)
+        self._fail_restore_release_directory_sync_once(lock["lock_token"])
+        marker = Path(lock["lock_file"])
+        target = Path(self.temp_dir.name) / "marker-target"
+        target.write_text("preserve-target", encoding="utf-8")
+        marker.symlink_to(target)
+        with self.assertRaisesRegex(RuntimeError, "release could not be completed safely"):
+            release_restore_lock(lock["lock_token"])
+        self.assertTrue(marker.is_symlink())
+        self.assertEqual(target.read_text(encoding="utf-8"), "preserve-target")
+        self.assertTrue(is_restore_lock_active())
+        marker.unlink()
+        release_restore_lock(lock["lock_token"])
+
+    def test_restore_release_retry_requires_original_in_process_guard_token(self):
+        lock = acquire_restore_lock("7" * 32)
+        self._fail_restore_release_directory_sync_once(lock["lock_token"])
+        with self.assertRaisesRegex(RuntimeError, "ownership is unavailable"):
+            release_restore_lock("8" * 32)
+        self.assertTrue(is_restore_lock_active())
+        release_restore_lock(lock["lock_token"])
+
+    def test_restore_release_without_guard_never_releases_missing_marker(self):
+        with self.assertRaisesRegex(RuntimeError, "ownership is unavailable"):
+            release_restore_lock("9" * 32)
+        self.assertFalse(maintenance_module.restore_lock_path().exists())
+
+    def test_restore_release_rejects_duplicate_json_keys_without_unlinking_marker(self):
+        lock = acquire_restore_lock("a" * 32)
+        marker = Path(lock["lock_file"])
+        original = marker.read_bytes()
+        payload = json.loads(original.decode("utf-8"))
+        tampered = json.dumps(payload)[:-1] + ',"lock_token":"' + "b" * 32 + '"}'
+        marker.write_text(tampered, encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "metadata is unreadable"):
+            release_restore_lock(lock["lock_token"])
+        self.assertEqual(marker.read_text(encoding="utf-8"), tampered)
+        self.assertTrue(is_restore_lock_active())
+        marker.write_bytes(original)
+        release_restore_lock(lock["lock_token"])
+
+    def test_restore_release_rejects_non_object_json_without_unlinking_marker(self):
+        lock = acquire_restore_lock("c" * 32)
+        marker = Path(lock["lock_file"])
+        original = marker.read_bytes()
+        marker.write_text("[]", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+            release_restore_lock(lock["lock_token"])
+        self.assertEqual(marker.read_text(encoding="utf-8"), "[]")
+        self.assertTrue(is_restore_lock_active())
+        marker.write_bytes(original)
+        release_restore_lock(lock["lock_token"])
+
+    def test_restore_release_retry_syncs_parent_directory_before_guard_release(self):
+        lock = acquire_restore_lock("d" * 32)
+        self._fail_restore_release_directory_sync_once(lock["lock_token"])
+        real_fsync = os.fsync
+        observed = {"directory": False}
+        def verify_sync(fd):
+            if maintenance_module.stat.S_ISDIR(os.fstat(fd).st_mode):
+                self.assertTrue(is_restore_lock_active())
+                observed["directory"] = True
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=verify_sync):
+            released = release_restore_lock(lock["lock_token"])
+        self.assertTrue(observed["directory"])
+        self.assertTrue(released["resumed_after_unlink"])
+        self.assertFalse(is_restore_lock_active())
+
+    def test_restore_release_retry_preserves_database_and_sqlite_sidecars(self):
+        lock = acquire_restore_lock("e" * 32)
+        wal = Path(str(database.DB_PATH) + "-wal")
+        shm = Path(str(database.DB_PATH) + "-shm")
+        wal.write_bytes(b"wal-preserve-on-release-retry")
+        shm.write_bytes(b"shm-preserve-on-release-retry")
+        database_before = database.DB_PATH.read_bytes()
+        self._fail_restore_release_directory_sync_once(lock["lock_token"])
+        release_restore_lock(lock["lock_token"])
+        self.assertEqual(database.DB_PATH.read_bytes(), database_before)
+        self.assertEqual(wal.read_bytes(), b"wal-preserve-on-release-retry")
+        self.assertEqual(shm.read_bytes(), b"shm-preserve-on-release-retry")
+        self.assertFalse(is_restore_lock_active())
+
+
 if __name__ == "__main__":
     unittest.main()
