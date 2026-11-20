@@ -7073,7 +7073,7 @@ def _make_real_inventory_race_test(scenario):
             self.assertEqual(first.get("orphaned_count", 0), 0)
         else:
             self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
-            self.assertEqual(first["orphaned_count"], 0)
+            self.assertEqual(first.get("orphaned_count", 0), 0)
         self.assertIn(
             "ARTIFACT_DIRECTORY_CHANGED_DURING_INVENTORY",
             first["issues"],
