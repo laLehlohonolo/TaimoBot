@@ -61,6 +61,8 @@ jobs:
         run: python scripts/run_restore_lock_release_retry.py
       - name: Run ten restore recovery crash durability checks sequentially
         run: python scripts/run_restore_recovery_crash_durability.py
+      - name: Run ten restore process-death recovery checks sequentially
+        run: python scripts/run_restore_process_death_recovery.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
