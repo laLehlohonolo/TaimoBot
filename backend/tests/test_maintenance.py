@@ -6976,6 +6976,135 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertNotIn(corrupt.name, [x["file_name"] for x in payload["orphaned_artifacts"]])
 
 
+def _make_real_inventory_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("race-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-race.sqlite3")
+        staging = root / "recovery-staging"
+        moved = root.with_name(root.name + "-held")
+        outside = Path(self.temp_dir.name) / ("outside-" + scenario)
+        outside.mkdir()
+        external = outside / "taimobot-external.sqlite3"
+        external.write_bytes(b"external")
+        replacement = self._make_inventory_backup(
+            Path(self.temp_dir.name) / ("replacement-" + scenario),
+            "replacement.sqlite3",
+        )
+        original_hash = maintenance_module.sha256_file
+        changed = {"done": False}
+
+        def mutate(path):
+            digest = original_hash(path)
+            if changed["done"]:
+                return digest
+            expected = backup
+            if scenario.startswith("staging_"):
+                expected = self._make_inventory_backup(staging, "taimobot-stage.sqlite3")
+            if Path(path) != expected:
+                return digest
+            changed["done"] = True
+            if scenario == "file_append" or scenario == "staging_append":
+                with Path(path).open("ab") as stream:
+                    stream.write(b"changed")
+            elif scenario == "file_replace" or scenario == "staging_replace_file":
+                os.replace(replacement, path)
+            elif scenario == "file_delete" or scenario == "staging_delete_file":
+                Path(path).unlink()
+            elif scenario == "file_rename":
+                Path(path).rename(Path(path).with_name("taimobot-renamed.sqlite3"))
+            elif scenario == "root_rename":
+                root.rename(moved)
+            elif scenario == "root_symlink":
+                root.rename(moved)
+                root.symlink_to(outside, target_is_directory=True)
+            elif scenario == "root_regular_file":
+                root.rename(moved)
+                root.write_text("not a directory", encoding="utf-8")
+            elif scenario == "root_add":
+                (root / "taimobot-late.sqlite3").write_bytes(b"late")
+            elif scenario == "root_remove":
+                backup.unlink()
+            elif scenario == "staging_symlink":
+                staging.rename(root / "staging-held")
+                staging.symlink_to(outside, target_is_directory=True)
+            elif scenario == "staging_remove":
+                staging.rename(root / "staging-held")
+            elif scenario == "staging_create":
+                staging.mkdir()
+            elif scenario == "staging_add":
+                (staging / "taimobot-late.sqlite3").write_bytes(b"late")
+            elif scenario == "staging_file_symlink":
+                target = self._make_inventory_backup(outside, "target.sqlite3")
+                Path(path).unlink()
+                Path(path).symlink_to(target)
+            elif scenario == "root_swap_retry":
+                root.rename(moved)
+                root.symlink_to(outside, target_is_directory=True)
+            elif scenario == "outside_preserved":
+                (outside / "important.txt").write_text("untouched", encoding="utf-8")
+                root.rename(moved)
+                root.symlink_to(outside, target_is_directory=True)
+            elif scenario == "file_touch":
+                stat_result = Path(path).stat()
+                os.utime(path, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 1000000))
+            elif scenario == "staging_file_touch":
+                stat_result = Path(path).stat()
+                os.utime(path, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 1000000))
+            return digest
+
+        with patch.object(maintenance_module, "sha256_file", side_effect=mutate):
+            first = self._call_real_inventory_api(root).json()
+
+        if scenario == "root_swap_retry":
+            root.unlink()
+            moved.rename(root)
+            second = self._call_real_inventory_api(root).json()
+            self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+            self.assertEqual(second["orphaned_count"], 1)
+            return
+        if scenario == "outside_preserved":
+            self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+            self.assertEqual((outside / "important.txt").read_text(encoding="utf-8"), "untouched")
+            return
+        if scenario in {"file_append", "file_touch", "staging_append", "staging_file_touch"}:
+            self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED")
+            self.assertEqual(first["orphaned_count"], 0)
+        else:
+            self.assertEqual(first["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+            self.assertEqual(first["orphaned_count"], 0)
+        self.assertIn(
+            "ARTIFACT_DIRECTORY_CHANGED_DURING_INVENTORY",
+            first["issues"],
+        ) if scenario not in {"file_append", "file_touch", "staging_append", "staging_file_touch"} else None
+    return test
+
+
+_REAL_INVENTORY_RACE_CASES = [
+    ("test_real_inventory_race_detects_file_append", "file_append"),
+    ("test_real_inventory_race_detects_atomic_file_replacement", "file_replace"),
+    ("test_real_inventory_race_blocks_file_deletion", "file_delete"),
+    ("test_real_inventory_race_blocks_file_rename", "file_rename"),
+    ("test_real_inventory_race_blocks_root_rename", "root_rename"),
+    ("test_real_inventory_race_blocks_root_symlink_swap", "root_symlink"),
+    ("test_real_inventory_race_blocks_root_regular_file_swap", "root_regular_file"),
+    ("test_real_inventory_race_blocks_new_backup_entry", "root_add"),
+    ("test_real_inventory_race_blocks_removed_backup_entry", "root_remove"),
+    ("test_real_inventory_race_blocks_staging_symlink_swap", "staging_symlink"),
+    ("test_real_inventory_race_blocks_staging_directory_removal", "staging_remove"),
+    ("test_real_inventory_race_blocks_staging_directory_creation", "staging_create"),
+    ("test_real_inventory_race_detects_staged_file_append", "staging_append"),
+    ("test_real_inventory_race_blocks_staged_file_deletion", "staging_delete_file"),
+    ("test_real_inventory_race_blocks_staged_file_symlink_swap", "staging_file_symlink"),
+    ("test_real_inventory_race_blocks_new_staging_entry", "staging_add"),
+    ("test_real_inventory_race_detects_file_timestamp_change", "file_touch"),
+    ("test_real_inventory_race_detects_staged_timestamp_change", "staging_file_touch"),
+    ("test_real_inventory_race_recovers_after_transient_root_swap", "root_swap_retry"),
+    ("test_real_inventory_race_preserves_external_directory", "outside_preserved"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_race_test(_scenario))
+
+
 
 
 
