@@ -1520,7 +1520,7 @@ def inspect_recovery_candidates(backup_dir: Path | None = None) -> dict:
         missing_schema = []
         foreign_key_violations = None
         try:
-            file_stat = path.file_stat(follow_symlinks=False)
+            file_stat = path.stat(follow_symlinks=False)
             sidecars = inspect_sqlite_sidecars(path)
             if sidecars["status"] != "SIDECARS_CLEAR":
                 issues.append("SQLITE_SIDECARS_PRESENT")
