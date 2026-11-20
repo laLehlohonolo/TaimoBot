@@ -1570,6 +1570,59 @@ def _verify_restore_lock_recovery_audit_fd(descriptor: int, *, allow_unmatched_s
     }
 
 
+def inspect_restore_recovery_consistency(
+    audit_path: Path | None = None, journal_path: Path | None = None
+) -> dict:
+    """Correlate recovery audit, restore marker and execution journal read-only.
+
+    This function provides operator guidance only. It never resumes recovery,
+    removes markers, repairs journals, or changes database files.
+    """
+    audit = inspect_restore_lock_recovery_audit(audit_path)
+    execution = inspect_restore_execution_state(journal_path)
+    marker = inspect_restore_lock()
+    reasons = []
+    decision = "NO_ACTION"
+    if audit.get("status") in ("RECOVERY_AUDIT_INVALID", "RECOVERY_AUDIT_UNREADABLE", "RECOVERY_AUDIT_BUSY"):
+        reasons.append("Recovery audit is invalid, unreadable, or busy.")
+    if execution.get("status") in ("RESTORE_EXECUTION_INSPECTION_BLOCKED", "RESTORE_JOURNAL_SEMANTIC_INVALID"):
+        reasons.append("Restore execution journal cannot be trusted.")
+    if marker.get("status") not in ("NO_RESTORE_LOCK", "RESTORE_LOCK_ACTIVE",
+                                     "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW"):
+        reasons.append("Restore marker is missing, unsafe, or inconclusive.")
+    pending = audit.get("pending_recovery")
+    if pending:
+        if audit.get("marker_state") != "MATCHES_INTERRUPTED_RECOVERY":
+            reasons.append("Interrupted recovery marker is absent or does not match its recorded fingerprint.")
+        if marker.get("plan_id") and marker.get("plan_id") != pending.get("plan_id"):
+            reasons.append("Restore marker plan ID conflicts with the interrupted recovery audit.")
+        reasons.append("Recovery has an unmatched STARTED event; do not retry or complete it automatically.")
+    journal_executions = execution.get("executions", [])
+    if pending and any(item.get("plan_id") == pending.get("plan_id") for item in journal_executions):
+        reasons.append("The same plan also appears in the restore execution journal; reconcile both histories manually.")
+    if any(not item.get("terminal") for item in journal_executions):
+        reasons.append("A restore execution has no terminal journal event.")
+    if execution.get("status") in ("RESTORE_EXECUTION_REVIEW_REQUIRED", "RESTORE_EXECUTION_TERMINAL_EVENTS_RECORDED"):
+        if journal_executions:
+            reasons.append("Execution journal records require artifact/database reconciliation before any further restore.")
+    if reasons:
+        decision = "OPERATOR_REVIEW_REQUIRED"
+    return {
+        "status": "RESTORE_RECOVERY_CONSISTENCY_REVIEW" if reasons else "RESTORE_RECOVERY_CONSISTENT",
+        "decision": decision,
+        "recommended_action": "DO_NOT_RETRY_OR_MUTATE; REVIEW_AUDIT_MARKER_AND_JOURNAL" if reasons else "NO_ACTION",
+        "reasons": list(dict.fromkeys(reasons)),
+        "recovery_audit": audit,
+        "execution_journal": execution,
+        "restore_marker": marker,
+        "read_only": True,
+        "automatic_repair": False,
+        "automatic_resume": False,
+        "database_changed": False,
+        "sidecars_changed": False,
+    }
+
+
 def inspect_restore_lock_recovery_audit(audit_path: Path | None = None) -> dict:
     """Read-only inspection of recovery audit consistency and any interrupted transaction.
 
