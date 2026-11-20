@@ -5916,6 +5916,188 @@ class DailyMaintenanceTests(unittest.TestCase):
 
 
 
+    def _make_restore_artifact_evidence_fixture(self, root, plan_id="a" * 32, token="b" * 32):
+        paths = {
+            "live_database": root / "evidence-live.sqlite3",
+            "source_backup": root / "evidence-source.sqlite3",
+            "staged_candidate": root / "evidence-staged.sqlite3",
+            "rollback_backup": root / "evidence-rollback.sqlite3",
+        }
+        for name, artifact in paths.items():
+            with sqlite3.connect(artifact) as connection:
+                connection.execute("CREATE TABLE evidence_probe (value TEXT)")
+                connection.execute("INSERT INTO evidence_probe VALUES (?)", (name,))
+        hashes = {f"{name}_sha256": sha256_file(artifact) for name, artifact in paths.items()}
+        journal = root / "restore-artifact-cross-check.audit.jsonl"
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", plan_id, token, "operator-test", "INC-CROSS-CHECK",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        return paths, hashes, journal
+
+    def test_artifact_cross_check_rejects_staged_hash_disagreement_at_publish(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"artifacts": {
+                "staged_candidate_sha256": "c" * 64,
+                "published_database_sha256": hashes["live_database_sha256"],
+            }}, journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertTrue(any("staged-candidate fingerprint" in issue for issue in result["lifecycle_consistency_issues"]))
+
+    def test_artifact_cross_check_rejects_published_hash_vs_postcheck_disagreement(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"artifacts": {
+                "staged_candidate_sha256": hashes["staged_candidate_sha256"],
+                "published_database_sha256": "c" * 64,
+            }}, journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_POSTCHECK_PASSED", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"integrity_check": "ok", "foreign_key_violations": 0,
+                     "schema_check": "passed", "installed_database_sha256": "d" * 64},
+            journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertTrue(any("source-published evidence" in issue for issue in result["lifecycle_consistency_issues"]))
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+
+    def test_artifact_cross_check_rejects_rollback_start_backup_disagreement(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        append_restore_execution_event(
+            "RESTORE_ROLLBACK_STARTED", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"artifacts": {"rollback_backup_sha256": "c" * 64}},
+            journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertTrue(any("rollback-start backup" in issue for issue in result["lifecycle_consistency_issues"]))
+
+    def test_artifact_cross_check_rejects_rollback_verified_hash_vs_backup(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        append_restore_execution_event(
+            "RESTORE_ROLLBACK_STARTED", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"artifacts": {"rollback_backup_sha256": hashes["rollback_backup_sha256"]}},
+            journal_path=journal,
+        )
+        append_restore_execution_event(
+            "RESTORE_ROLLBACK_VERIFIED", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"integrity_check": "ok", "foreign_key_violations": 0,
+                     "restored_database_sha256": "c" * 64},
+            journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertTrue(any("rollback verification fingerprint" in issue for issue in result["lifecycle_consistency_issues"]))
+
+    def test_artifact_cross_check_rejects_same_path_for_multiple_roles(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        paths["source_backup"] = paths["live_database"]
+        result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        source = next(item for item in result["artifacts"] if item["artifact"] == "source_backup")
+        self.assertEqual(source["fingerprint_status"], "UNSAFE_OR_MISSING")
+        self.assertIn("aliases", source["error"])
+
+    def test_artifact_cross_check_rejects_hard_link_aliases(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        paths["source_backup"].unlink()
+        os.link(paths["live_database"], paths["source_backup"])
+        result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        source = next(item for item in result["artifacts"] if item["artifact"] == "source_backup")
+        self.assertEqual(source["fingerprint_status"], "UNSAFE_OR_MISSING")
+        self.assertIn("aliases", source["error"])
+
+    def test_artifact_cross_check_blocks_semantically_invalid_plan_token_reuse(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", "a" * 32, "c" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"artifacts": hashes}, journal_path=journal,
+        )
+        result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_RECONCILIATION_BLOCKED")
+        self.assertTrue(result["semantic_errors"])
+        self.assertEqual(result["automatic_action"], "NONE")
+
+    def test_artifact_cross_check_detects_journal_append_during_file_inspection(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        real_inspect = maintenance_module.inspect_sqlite_sidecars
+        changed = {"done": False}
+        def append_during_inspection(artifact):
+            if not changed["done"]:
+                changed["done"] = True
+                append_restore_execution_event(
+                    "RESTORE_EXECUTION_STARTED", "d" * 32, "e" * 32,
+                    "other-operator", "INC-CONCURRENT-APPEND",
+                    journal_path=journal,
+                )
+            return real_inspect(artifact)
+        with patch("app.maintenance.inspect_sqlite_sidecars", side_effect=append_during_inspection):
+            result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertTrue(changed["done"])
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertTrue(any("journal changed" in issue for issue in result["lifecycle_consistency_issues"]))
+
+    def test_artifact_cross_check_detects_sidecar_created_during_integrity_inspection(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        real_inspect = maintenance_module.inspect_sqlite_sidecars
+        calls = {"count": 0}
+        def add_sidecar_on_recheck(artifact):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                Path(str(artifact) + "-wal").write_bytes(b"appeared-during-read")
+            return real_inspect(artifact)
+        with patch("app.maintenance.inspect_sqlite_sidecars", side_effect=add_sidecar_on_recheck):
+            result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        live = next(item for item in result["artifacts"] if item["artifact"] == "live_database")
+        self.assertEqual(live["fingerprint_status"], "UNSAFE_OR_MISSING")
+        self.assertIn("sidecars changed", live["error"])
+        sidecar = Path(str(paths["live_database"]) + "-wal")
+        self.assertEqual(sidecar.read_bytes(), b"appeared-during-read")
+
+    def test_artifact_cross_check_preserves_all_files_and_journal_on_conflict(self):
+        root = Path(self.temp_dir.name)
+        paths, hashes, journal = self._make_restore_artifact_evidence_fixture(root)
+        append_restore_execution_event(
+            "RESTORE_SOURCE_PUBLISHED", "a" * 32, "b" * 32,
+            "operator-test", "INC-CROSS-CHECK",
+            details={"artifacts": {"staged_candidate_sha256": hashes["staged_candidate_sha256"],
+                                   "published_database_sha256": "f" * 64}},
+            journal_path=journal,
+        )
+        before = {name: artifact.read_bytes() for name, artifact in paths.items()}
+        journal_before = journal.read_bytes()
+        result = reconcile_restore_execution_artifacts("a" * 32, "b" * 32, paths, journal_path=journal)
+        self.assertEqual(result["status"], "RESTORE_EVIDENCE_REVIEW_REQUIRED")
+        self.assertEqual({name: artifact.read_bytes() for name, artifact in paths.items()}, before)
+        self.assertEqual(journal.read_bytes(), journal_before)
+        self.assertFalse(result["database_state_verified"])
+        self.assertEqual(result["automatic_action"], "NONE")
+
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
