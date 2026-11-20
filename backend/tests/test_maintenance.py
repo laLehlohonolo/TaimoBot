@@ -8204,3 +8204,130 @@ class RecoveryArtifactStreamingHashRaceTests(unittest.TestCase):
     def test_stream_atomic_swap_twice_rejected(self): self._assert_stream_mutation_rejected("atomic_swap_twice")
     def test_stream_utime_restore_rejected(self): self._assert_stream_mutation_rejected("utime_restore")
     def test_stream_hardlink_create_remove_rejected(self): self._assert_stream_mutation_rejected("hardlink_create_remove")
+
+
+class RecoveryArtifactRestoredMutationRaceTests(unittest.TestCase):
+    """Prove transient edits cannot evade descriptor metadata checks by being restored."""
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.path = self.root / "restored.sqlite3"
+        self.original = (b"stable-recovery-payload-" * 4096)
+        self.path.write_bytes(self.original)
+        self.original_stat = self.path.stat()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _restore_mtime(self):
+        os.utime(self.path, ns=(self.original_stat.st_atime_ns, self.original_stat.st_mtime_ns))
+
+    def _mutate_restore(self, case):
+        if case == "rewrite_head":
+            with self.path.open("r+b") as f: f.write(b"X" * 128); f.flush(); f.seek(0); f.write(self.original[:128])
+        elif case == "rewrite_middle":
+            with self.path.open("r+b") as f: f.seek(4096); f.write(b"Y" * 128); f.flush(); f.seek(4096); f.write(self.original[4096:4224])
+        elif case == "rewrite_tail":
+            offset=len(self.original)-128
+            with self.path.open("r+b") as f: f.seek(offset); f.write(b"Z"*128); f.flush(); f.seek(offset); f.write(self.original[offset:])
+        elif case == "rewrite_two_regions":
+            with self.path.open("r+b") as f:
+                f.seek(0); f.write(b"A"*32); f.flush(); f.seek(0); f.write(self.original[:32])
+                f.seek(8192); f.write(b"B"*32); f.flush(); f.seek(8192); f.write(self.original[8192:8224])
+        elif case == "truncate_extend":
+            with self.path.open("r+b") as f: f.truncate(100); f.truncate(len(self.original)); f.seek(100); f.write(self.original[100:])
+        elif case == "append_truncate":
+            with self.path.open("ab") as f: f.write(b"transient")
+            with self.path.open("r+b") as f: f.truncate(len(self.original))
+        elif case == "append_truncate_restore_mtime":
+            with self.path.open("ab") as f: f.write(b"transient")
+            with self.path.open("r+b") as f: f.truncate(len(self.original))
+            self._restore_mtime()
+        elif case == "rewrite_restore_mtime":
+            with self.path.open("r+b") as f: f.write(b"C"*256); f.flush(); f.seek(0); f.write(self.original[:256])
+            self._restore_mtime()
+        elif case == "chmod_roundtrip":
+            self.path.chmod(0o600); self.path.chmod(0o644)
+        elif case == "hardlink_roundtrip":
+            alias=self.root/"alias"; os.link(self.path,alias); alias.unlink()
+        elif case == "rename_roundtrip":
+            moved=self.root/"moved"; self.path.rename(moved); moved.rename(self.path)
+        elif case == "replace_same_content":
+            replacement=self.root/"replacement"; replacement.write_bytes(self.original); replacement.replace(self.path)
+        elif case == "restore_original_inode":
+            backup=self.root/"original-inode"; os.link(self.path,backup)
+            replacement=self.root/"replacement"; replacement.write_bytes(b"Q"*len(self.original)); replacement.replace(self.path)
+            backup.replace(self.path)
+        elif case == "write_flush_fsync_restore":
+            with self.path.open("r+b") as f:
+                f.seek(2048); f.write(b"D"*64); f.flush(); os.fsync(f.fileno())
+                f.seek(2048); f.write(self.original[2048:2112]); f.flush(); os.fsync(f.fileno())
+            self._restore_mtime()
+        elif case == "write_then_restore_atime_mtime":
+            with self.path.open("r+b") as f: f.seek(512); f.write(b"E"*64); f.flush(); f.seek(512); f.write(self.original[512:576])
+            os.utime(self.path, ns=(self.original_stat.st_atime_ns, self.original_stat.st_mtime_ns))
+        elif case == "truncate_extend_restore_times":
+            with self.path.open("r+b") as f: f.truncate(1); f.truncate(len(self.original)); f.seek(1); f.write(self.original[1:])
+            self._restore_mtime()
+        elif case == "replace_twice_original_inode":
+            backup=self.root/"saved"; os.link(self.path,backup)
+            one=self.root/"one"; one.write_bytes(b"1"*len(self.original)); one.replace(self.path)
+            two=self.root/"two"; two.write_bytes(b"2"*len(self.original)); two.replace(self.path)
+            backup.replace(self.path)
+        elif case == "link_count_roundtrip_twice":
+            for index in range(2):
+                alias=self.root/f"alias-{index}"; os.link(self.path,alias); alias.unlink()
+        elif case == "rewrite_and_restore_multiple_chunks":
+            with self.path.open("r+b") as f:
+                for offset in (0, 4096, 8192, 12288):
+                    f.seek(offset); f.write(b"R"*64); f.flush()
+                    f.seek(offset); f.write(self.original[offset:offset+64]); f.flush()
+            self._restore_mtime()
+        elif case == "metadata_only_roundtrip":
+            os.utime(self.path, ns=(self.original_stat.st_atime_ns, self.original_stat.st_mtime_ns+5000000))
+            os.utime(self.path, ns=(self.original_stat.st_atime_ns, self.original_stat.st_mtime_ns))
+
+    def _assert_transient_change_rejected(self, case):
+        real_fdopen=os.fdopen
+        state={"read":0,"changed":False}
+        owner=self
+        class MutatingReader:
+            def __init__(self, stream): self.stream=stream
+            def __enter__(self): return self
+            def __exit__(self,*args): return self.stream.__exit__(*args)
+            def read(self,size=-1):
+                chunk=self.stream.read(size)
+                state["read"]+=1
+                if state["read"]==1 and not state["changed"]:
+                    state["changed"]=True
+                    owner._mutate_restore(case)
+                return chunk
+        def wrapped(fd,*args,**kwargs): return MutatingReader(real_fdopen(fd,*args,**kwargs))
+        with patch.object(maintenance_module.os,"fdopen",side_effect=wrapped):
+            with self.assertRaises(OSError,msg=case):
+                sha256_file(self.path,chunk_size=64)
+        self.assertTrue(state["changed"],case)
+        self.assertGreaterEqual(state["read"],1)
+        if self.path.is_file():
+            self.assertEqual(self.path.read_bytes(),self.original,case)
+
+    def test_transient_head_rewrite_rejected(self): self._assert_transient_change_rejected("rewrite_head")
+    def test_transient_middle_rewrite_rejected(self): self._assert_transient_change_rejected("rewrite_middle")
+    def test_transient_tail_rewrite_rejected(self): self._assert_transient_change_rejected("rewrite_tail")
+    def test_transient_two_region_rewrite_rejected(self): self._assert_transient_change_rejected("rewrite_two_regions")
+    def test_transient_truncate_extend_rejected(self): self._assert_transient_change_rejected("truncate_extend")
+    def test_transient_append_truncate_rejected(self): self._assert_transient_change_rejected("append_truncate")
+    def test_transient_append_truncate_restored_mtime_rejected(self): self._assert_transient_change_rejected("append_truncate_restore_mtime")
+    def test_transient_rewrite_restored_mtime_rejected(self): self._assert_transient_change_rejected("rewrite_restore_mtime")
+    def test_transient_chmod_roundtrip_rejected(self): self._assert_transient_change_rejected("chmod_roundtrip")
+    def test_transient_hardlink_roundtrip_rejected(self): self._assert_transient_change_rejected("hardlink_roundtrip")
+    def test_transient_rename_roundtrip_rejected(self): self._assert_transient_change_rejected("rename_roundtrip")
+    def test_transient_same_content_replacement_rejected(self): self._assert_transient_change_rejected("replace_same_content")
+    def test_transient_original_inode_restore_rejected(self): self._assert_transient_change_rejected("restore_original_inode")
+    def test_transient_fsync_rewrite_restore_rejected(self): self._assert_transient_change_rejected("write_flush_fsync_restore")
+    def test_transient_rewrite_restore_times_rejected(self): self._assert_transient_change_rejected("write_then_restore_atime_mtime")
+    def test_transient_truncate_restore_times_rejected(self): self._assert_transient_change_rejected("truncate_extend_restore_times")
+    def test_transient_two_replacements_restore_inode_rejected(self): self._assert_transient_change_rejected("replace_twice_original_inode")
+    def test_transient_double_link_roundtrip_rejected(self): self._assert_transient_change_rejected("link_count_roundtrip_twice")
+    def test_transient_multi_chunk_rewrite_restore_rejected(self): self._assert_transient_change_rejected("rewrite_and_restore_multiple_chunks")
+    def test_transient_metadata_roundtrip_rejected(self): self._assert_transient_change_rejected("metadata_only_roundtrip")
