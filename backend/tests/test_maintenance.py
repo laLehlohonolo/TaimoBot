@@ -4386,6 +4386,93 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
 
+
+    def _assert_concurrent_audit_append_trial(self, trial):
+        root = Path(self.temp_dir.name) / ("parallel-audit-" + str(trial))
+        root.mkdir()
+        db_paths = [root / "operator-a.sqlite3", root / "operator-b.sqlite3"]
+        for index, db_path in enumerate(db_paths):
+            marker_path = db_path.with_name(db_path.name + ".restore.lock")
+            marker_path.write_text(json.dumps({
+                "plan_id": str(index + 1) * 32,
+                "lock_token": str(index + 3) * 32,
+                "pid": 999999,
+                "created_at": "2026-11-20T10:00:00+02:00",
+            }), encoding="utf-8")
+        audit = root / "shared-recovery.audit.jsonl"
+        context = multiprocessing.get_context("fork")
+        start = context.Event()
+        results = context.Queue()
+
+        def recover_worker(db_path, incident):
+            try:
+                database.DB_PATH = Path(db_path)
+                start.wait(5)
+                outcome = recover_abandoned_restore_lock(
+                    "operator-" + incident, incident, confirm=True, audit_path=audit
+                )
+                results.put(("ok", outcome.get("status")))
+            except BaseException as error:
+                results.put(("error", type(error).__name__ + ": " + str(error)))
+
+        workers = [
+            context.Process(target=recover_worker, args=(str(db_paths[0]), "PAR-" + str(trial) + "-A")),
+            context.Process(target=recover_worker, args=(str(db_paths[1]), "PAR-" + str(trial) + "-B")),
+        ]
+        for worker in workers:
+            worker.start()
+        start.set()
+        for worker in workers:
+            worker.join(15)
+        self.assertTrue(all(not worker.is_alive() for worker in workers), "recovery worker timed out")
+        self.assertEqual([worker.exitcode for worker in workers], [0, 0])
+        outcomes = [results.get(timeout=2) for _ in workers]
+        self.assertEqual(outcomes, [("ok", "RESTORE_LOCK_RECOVERED"), ("ok", "RESTORE_LOCK_RECOVERED")])
+        self.assertTrue(all(not db.with_name(db.name + ".restore.lock").exists() for db in db_paths))
+        with audit.open("rb") as stream:
+            verified = maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+        records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(verified["record_count"], 4)
+        self.assertEqual([record["sequence"] for record in records], [1, 2, 3, 4])
+        self.assertEqual(
+            [record["event"] for record in records],
+            ["RESTORE_LOCK_RECOVERY_STARTED", "RESTORE_LOCK_RECOVERY_COMPLETE"] * 2,
+        )
+        for index in (0, 2):
+            self.assertEqual(records[index + 1]["previous_record_sha256"], records[index]["record_sha256"])
+            self.assertEqual(records[index + 1]["incident_ref"], records[index]["incident_ref"])
+        self.assertEqual(records[2]["previous_record_sha256"], records[1]["record_sha256"])
+
+    def test_concurrent_recovery_audit_appends_trial_01(self):
+        self._assert_concurrent_audit_append_trial(1)
+
+    def test_concurrent_recovery_audit_appends_trial_02(self):
+        self._assert_concurrent_audit_append_trial(2)
+
+    def test_concurrent_recovery_audit_appends_trial_03(self):
+        self._assert_concurrent_audit_append_trial(3)
+
+    def test_concurrent_recovery_audit_appends_trial_04(self):
+        self._assert_concurrent_audit_append_trial(4)
+
+    def test_concurrent_recovery_audit_appends_trial_05(self):
+        self._assert_concurrent_audit_append_trial(5)
+
+    def test_concurrent_recovery_audit_appends_trial_06(self):
+        self._assert_concurrent_audit_append_trial(6)
+
+    def test_concurrent_recovery_audit_appends_trial_07(self):
+        self._assert_concurrent_audit_append_trial(7)
+
+    def test_concurrent_recovery_audit_appends_trial_08(self):
+        self._assert_concurrent_audit_append_trial(8)
+
+    def test_concurrent_recovery_audit_appends_trial_09(self):
+        self._assert_concurrent_audit_append_trial(9)
+
+    def test_concurrent_recovery_audit_appends_trial_10(self):
+        self._assert_concurrent_audit_append_trial(10)
+
     def test_recovery_audit_success_writes_verifiable_hash_chain(self):
         marker = self._write_abandoned_restore_marker()
         audit = Path(self.temp_dir.name) / "recovery-chain.jsonl"
