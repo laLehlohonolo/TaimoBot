@@ -7486,6 +7486,12 @@ def _make_real_inventory_postcheck_metadata_race_test(scenario):
                 "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
                 (str(backup),),
             )
+            if scenario == "attempt_delete":
+                connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('baseline-delete','2026-11-20','FAILED','s','e',?)", (str(backup),))
+            elif scenario == "plan_delete":
+                connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','baseline','operator')", ("9" * 32, str(backup), str(backup), str(backup)))
+            elif scenario == "artifact_delete":
+                connection.execute("INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)", ("9" * 32, "a" * 64, "b" * 64, "c" * 64))
         original_verify = maintenance_module.verify_restore_execution_journal
         calls = {"count": 0, "changed": False}
 
@@ -7510,7 +7516,7 @@ def _make_real_inventory_postcheck_metadata_race_test(scenario):
                         connection.execute("UPDATE maintenance_run_attempts SET status='COMPLETE' WHERE attempt_token='late-attempt'")
                     elif scenario == "attempt_delete":
                         connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('late-attempt','2026-11-20','FAILED','s','e',?)", (str(backup),))
-                        connection.execute("DELETE FROM maintenance_run_attempts WHERE attempt_token='late-attempt'")
+                        connection.execute("DELETE FROM maintenance_run_attempts WHERE attempt_token='baseline-delete'")
                     elif scenario == "attempt_path":
                         connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('late-attempt','2026-11-20','FAILED','s','e',?)", (str(backup),))
                         connection.execute("UPDATE maintenance_run_attempts SET backup_file=? WHERE attempt_token='late-attempt'", (str(root / "late-attempt.sqlite3"),))
@@ -7521,7 +7527,7 @@ def _make_real_inventory_postcheck_metadata_race_test(scenario):
                         connection.execute("UPDATE maintenance_restore_plans SET status='FAILED' WHERE plan_id=?", ("f" * 32,))
                     elif scenario == "plan_delete":
                         connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("f" * 32, str(backup), str(backup), str(backup)))
-                        connection.execute("DELETE FROM maintenance_restore_plans WHERE plan_id=?", ("f" * 32,))
+                        connection.execute("DELETE FROM maintenance_restore_plans WHERE plan_id=?", ("9" * 32,))
                     elif scenario == "plan_path":
                         connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("f" * 32, str(backup), str(backup), str(backup)))
                         connection.execute("UPDATE maintenance_restore_plans SET staging_file=? WHERE plan_id=?", (str(root / "late-stage.sqlite3"), "f" * 32))
@@ -7532,14 +7538,14 @@ def _make_real_inventory_postcheck_metadata_race_test(scenario):
                         connection.execute("UPDATE maintenance_restore_artifacts SET source_sha256=? WHERE plan_id=?", ("d" * 64, "f" * 32))
                     elif scenario == "artifact_delete":
                         connection.execute("INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)", ("f" * 32, "a" * 64, "b" * 64, "c" * 64))
-                        connection.execute("DELETE FROM maintenance_restore_artifacts WHERE plan_id=?", ("f" * 32,))
+                        connection.execute("DELETE FROM maintenance_restore_artifacts WHERE plan_id=?", ("9" * 32,))
                     elif scenario == "plan_operator":
                         connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("f" * 32, str(backup), str(backup), str(backup)))
                         connection.execute("UPDATE maintenance_restore_plans SET created_by='late-operator' WHERE plan_id=?", ("f" * 32,))
                     elif scenario == "run_timestamp":
                         connection.execute("UPDATE maintenance_runs SET started_at='late-start' WHERE run_date='2026-11-20'")
                     elif scenario == "schema_change":
-                        connection.execute("CREATE TABLE late_inventory_metadata_change (id INTEGER PRIMARY KEY, note TEXT)")
+                        connection.execute("ALTER TABLE maintenance_runs ADD COLUMN late_inventory_metadata_change TEXT")
                     elif scenario == "atomic_multi_table":
                         connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('atomic-late','2026-11-20','SUPERSEDED','s','e',?)", (str(backup),))
                         connection.execute("UPDATE maintenance_runs SET status='SUPERSEDED' WHERE run_date='2026-11-20'")
