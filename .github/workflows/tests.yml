@@ -93,6 +93,8 @@ jobs:
         run: python scripts/run_recovery_inventory_journal_races.py
       - name: Run twenty recovery inventory database identity race checks sequentially
         run: python scripts/run_recovery_inventory_database_identity_races.py
+      - name: Run twenty recovery inventory postcheck metadata race checks sequentially
+        run: python scripts/run_recovery_inventory_postcheck_metadata_races.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
