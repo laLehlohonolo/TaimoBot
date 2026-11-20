@@ -105,6 +105,8 @@ jobs:
         run: python scripts/run_recovery_inventory_hash_to_sqlite_open_races.py
       - name: Run twenty recovery artifact streaming hash race checks sequentially
         run: python scripts/run_recovery_artifact_streaming_hash_races.py
+      - name: Run twenty transiently restored artifact mutation race checks sequentially
+        run: python scripts/run_recovery_artifact_restored_mutation_races.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
