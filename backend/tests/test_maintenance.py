@@ -5044,7 +5044,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(worker.exitcode, 0)
         self.assertTrue(ready.is_set())
-        marker = database.restore_lock_path()
+        marker = maintenance_module.restore_lock_path()
         self.assertTrue(marker.exists())
         self.assertEqual(inspect_restore_lock()["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW")
         audit = Path(self.temp_dir.name) / "dead-child.audit.jsonl"
@@ -5060,7 +5060,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         worker = context.Process(target=_hold_restore_lock_until_release, args=(ready, release))
         worker.start()
         self.assertTrue(ready.wait(5))
-        marker = database.restore_lock_path()
+        marker = maintenance_module.restore_lock_path()
         self.assertTrue(marker.exists())
         worker.kill()
         worker.join(5)
@@ -5081,7 +5081,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             self.assertTrue(ready.wait(5))
             with self.assertRaisesRegex(RuntimeError, "not confirmed abandoned|guard is active"):
                 recover_abandoned_restore_lock("operator", "INC-LIVE-CHILD", confirm=True, audit_path=audit)
-            self.assertTrue(database.restore_lock_path().exists())
+            self.assertTrue(maintenance_module.restore_lock_path().exists())
             self.assertFalse(audit.exists())
         finally:
             release.set()
@@ -5104,7 +5104,7 @@ class DailyMaintenanceTests(unittest.TestCase):
             worker.join(5)
             self.assertFalse(worker.is_alive())
             self.assertEqual(worker.exitcode, 0)
-            self.assertFalse(database.restore_lock_path().exists())
+            self.assertFalse(maintenance_module.restore_lock_path().exists())
             self.assertEqual(inspect_restore_lock()["status"], "NO_RESTORE_LOCK")
             connection = database.get_connection()
             connection.close()
@@ -5121,7 +5121,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         worker.join(5)
         self.assertFalse(worker.is_alive())
         self.assertEqual(worker.exitcode, 73)
-        marker = database.restore_lock_path()
+        marker = maintenance_module.restore_lock_path()
         self.assertTrue(marker.exists())
         self.assertEqual(inspect_restore_lock()["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW")
         audit = Path(self.temp_dir.name) / "after-publish-crash.audit.jsonl"
@@ -5198,7 +5198,7 @@ class DailyMaintenanceTests(unittest.TestCase):
         outcomes = [results.get(timeout=2) for _ in range(2)]
         self.assertEqual(sum(item[0] == "recovered" for item in outcomes), 1)
         self.assertEqual(len(audit.read_text().splitlines()), 2)
-        self.assertFalse(database.restore_lock_path().exists())
+        self.assertFalse(maintenance_module.restore_lock_path().exists())
 
     def test_explicit_recovery_after_process_death_allows_new_lock_without_touching_db(self):
         context = multiprocessing.get_context("fork")
