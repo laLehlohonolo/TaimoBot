@@ -5215,5 +5215,103 @@ class DailyMaintenanceTests(unittest.TestCase):
         release_restore_lock(new_lock["lock_token"])
 
 
+
+    def test_current_pid_without_kernel_guard_is_not_treated_as_active(self):
+        marker = self._write_abandoned_restore_marker()
+        payload = json.loads(marker.read_text())
+        payload["pid"] = os.getpid()
+        marker.write_text(json.dumps(payload))
+        self.assertEqual(inspect_restore_lock()["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW")
+
+    def test_large_reused_or_unrelated_pid_does_not_override_unlocked_guard(self):
+        marker = self._write_abandoned_restore_marker()
+        payload = json.loads(marker.read_text())
+        payload["pid"] = 2**31 - 1
+        marker.write_text(json.dumps(payload))
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW")
+        self.assertEqual(result["process_id"], 2**31 - 1)
+
+    def test_live_kernel_guard_overrides_dead_pid_metadata(self):
+        marker = self._write_abandoned_restore_marker()
+        lock = acquire_restore_lock("1" * 32)
+        try:
+            payload = json.loads(marker.read_text())
+            payload["pid"] = 2**31 - 1
+            marker.write_text(json.dumps(payload))
+            self.assertEqual(inspect_restore_lock()["status"], "RESTORE_LOCK_ACTIVE")
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_live_kernel_guard_overrides_current_pid_metadata(self):
+        marker = self._write_abandoned_restore_marker()
+        lock = acquire_restore_lock("2" * 32)
+        try:
+            payload = json.loads(marker.read_text())
+            payload["pid"] = os.getpid()
+            marker.write_text(json.dumps(payload))
+            self.assertEqual(inspect_restore_lock()["status"], "RESTORE_LOCK_ACTIVE")
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_live_kernel_guard_overrides_different_positive_pid_metadata(self):
+        marker = self._write_abandoned_restore_marker()
+        lock = acquire_restore_lock("3" * 32)
+        try:
+            payload = json.loads(marker.read_text())
+            payload["pid"] = 123456789
+            marker.write_text(json.dumps(payload))
+            self.assertEqual(inspect_restore_lock()["status"], "RESTORE_LOCK_ACTIVE")
+        finally:
+            release_restore_lock(lock["lock_token"])
+
+    def test_zero_pid_is_rejected_as_unreadable_marker_metadata(self):
+        marker = self._write_abandoned_restore_marker()
+        payload = json.loads(marker.read_text())
+        payload["pid"] = 0
+        marker.write_text(json.dumps(payload))
+        self.assertEqual(inspect_restore_lock()["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+
+    def test_negative_pid_is_rejected_as_unreadable_marker_metadata(self):
+        marker = self._write_abandoned_restore_marker()
+        payload = json.loads(marker.read_text())
+        payload["pid"] = -1
+        marker.write_text(json.dumps(payload))
+        self.assertEqual(inspect_restore_lock()["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+
+    def test_boolean_pid_is_rejected_as_unreadable_marker_metadata(self):
+        marker = self._write_abandoned_restore_marker()
+        payload = json.loads(marker.read_text())
+        payload["pid"] = True
+        marker.write_text(json.dumps(payload))
+        self.assertEqual(inspect_restore_lock()["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+
+    def test_dead_pid_marker_requires_explicit_recovery_not_automatic_cleanup(self):
+        marker = self._write_abandoned_restore_marker()
+        before = marker.read_bytes()
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW")
+        self.assertFalse(result["automatic_recovery_performed"])
+        self.assertFalse(result["marker_removed"])
+        self.assertEqual(marker.read_bytes(), before)
+
+    def test_recovery_refuses_pid_metadata_change_after_inspection(self):
+        marker = self._write_abandoned_restore_marker()
+        original = marker.read_bytes()
+        lock = acquire_restore_lock("4" * 32)
+        try:
+            payload = json.loads(marker.read_text())
+            payload["pid"] = os.getpid()
+            marker.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(RuntimeError, "not confirmed abandoned"):
+                recover_abandoned_restore_lock("operator", "INC-PID-CHANGE", confirm=True, audit_path=Path(self.temp_dir.name) / "pid-change.audit.jsonl")
+            self.assertTrue(marker.exists())
+        finally:
+            payload = json.loads(marker.read_text())
+            payload["pid"] = 999999
+            marker.write_text(json.dumps(payload))
+            release_restore_lock(lock["lock_token"])
+
+
 if __name__ == "__main__":
     unittest.main()
