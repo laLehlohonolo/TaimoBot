@@ -71,8 +71,6 @@ def verify_restore_execution_journal(
         if include_records:
             result["records"] = []
         return result
-    except OSError as error:
-        return {"status": "RESTORE_JOURNAL_UNREADABLE", "reason": str(error)[:200], "record_count": 0}
     try:
         if lock_file:
             fcntl.flock(descriptor, fcntl.LOCK_SH)
@@ -1509,7 +1507,14 @@ def inspect_recovery_artifact_inventory(
 
     # Re-verify the journal after filesystem inspection so a concurrent append
     # cannot make an artifact appear orphaned based on a stale journal snapshot.
-    final_journal = verify_restore_execution_journal(journal, include_records=True)
+    try:
+        final_journal = verify_restore_execution_journal(journal, include_records=True)
+    except OSError as error:
+        final_journal = {
+            "status": "RESTORE_JOURNAL_UNREADABLE",
+            "reason": str(error)[:200],
+            "record_count": 0,
+        }
     if (
         final_journal.get("status") != journal_verification.get("status")
         or final_journal.get("record_count") != journal_verification.get("record_count")
