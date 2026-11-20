@@ -7250,3 +7250,148 @@ for _test_name, _scenario in _REAL_INVENTORY_METADATA_RACE_CASES:
 
 if __name__ == "__main__":
     unittest.main()
+
+def _make_real_inventory_journal_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("journal-race-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-journal-race.sqlite3")
+        self._create_inventory_metadata_tables()
+        baseline_hash = maintenance_module.sha256_file(backup)
+        plan_id = "d" * 32
+        token = "e" * 32
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','2026-11-20','operator')",
+                (plan_id, str(backup), str(backup), str(backup)),
+            )
+            connection.execute(
+                "INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)",
+                (plan_id, baseline_hash, baseline_hash, baseline_hash),
+            )
+        journal = Path(database.DB_PATH).parent / "restore-execution.audit.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.unlink(missing_ok=True)
+        append_restore_execution_event(
+            "RESTORE_EXECUTION_STARTED", plan_id, token,
+            "operator@example.com", "INC-JOURNAL-RACE",
+            details={"live_database_replaced": False}, journal_path=journal,
+        )
+        original_bytes = journal.read_bytes()
+
+        def mutate_journal():
+            if scenario == "append_valid_event":
+                append_restore_execution_event("RESTORE_EXECUTION_RECOVERY_REQUIRED", plan_id, token,
+                    "operator@example.com", "INC-JOURNAL-RACE",
+                    details={"reason": "concurrent recovery decision"}, journal_path=journal)
+            elif scenario == "append_invalid_json":
+                with journal.open("ab") as handle: handle.write(b'{"broken":true}\\n')
+            elif scenario == "truncate_tail":
+                journal.write_bytes(original_bytes[:-3])
+            elif scenario == "delete_journal":
+                journal.unlink()
+            elif scenario == "replace_valid_chain":
+                replacement = journal.with_suffix(".replacement")
+                append_restore_execution_event("RESTORE_EXECUTION_STARTED", "f" * 32, "1" * 32,
+                    "operator@example.com", "INC-REPLACEMENT", journal_path=replacement)
+                os.replace(replacement, journal)
+            elif scenario == "replace_empty":
+                replacement = journal.with_suffix(".replacement")
+                replacement.write_bytes(b"")
+                os.replace(replacement, journal)
+            elif scenario == "append_partial_record":
+                with journal.open("ab") as handle: handle.write(b'{"sequence":2')
+            elif scenario == "tamper_existing_record":
+                changed = bytearray(original_bytes)
+                changed[changed.index(b"operator@example.com")] ^= 1
+                journal.write_bytes(changed)
+            elif scenario == "truncate_to_empty":
+                journal.write_bytes(b"")
+            elif scenario == "duplicate_first_record":
+                with journal.open("ab") as handle: handle.write(original_bytes)
+            elif scenario == "append_wrong_hash":
+                with journal.open("ab") as handle:
+                    handle.write(b'{"sequence":2,"record_sha256":"' + b"0" * 64 + b'"}\\n')
+            elif scenario == "append_wrong_sequence":
+                append_restore_execution_event("RESTORE_EXECUTION_RECOVERY_REQUIRED", plan_id, token,
+                    "operator@example.com", "INC-JOURNAL-RACE",
+                    details={"reason": "sequence test"}, journal_path=journal)
+                journal.write_bytes(journal.read_bytes().replace(b'"sequence":2', b'"sequence":9', 1))
+            elif scenario == "append_unknown_event":
+                append_restore_execution_event("RESTORE_EXECUTION_RECOVERY_REQUIRED", plan_id, token,
+                    "operator@example.com", "INC-JOURNAL-RACE",
+                    details={"reason": "event test"}, journal_path=journal)
+                journal.write_bytes(journal.read_bytes().replace(b"RESTORE_EXECUTION_RECOVERY_REQUIRED", b"UNKNOWN_EVENT", 1))
+            elif scenario == "replace_with_directory":
+                journal.unlink()
+                journal.mkdir()
+            elif scenario == "symlink_swap":
+                replacement = journal.with_suffix(".replacement")
+                replacement.write_bytes(original_bytes + b"tampered\\n")
+                journal.unlink()
+                journal.symlink_to(replacement)
+            elif scenario == "append_duplicate_sequence":
+                with journal.open("ab") as handle: handle.write(original_bytes.splitlines()[-1] + b"\\n")
+            elif scenario == "rewrite_same_length":
+                changed = bytearray(original_bytes)
+                changed[0] = ord("{") if changed[0] != ord("{") else ord("[")
+                journal.write_bytes(changed)
+            elif scenario == "append_unterminated_record":
+                with journal.open("ab") as handle: handle.write(b'{"sequence":2}')
+            elif scenario == "replace_with_other_plan":
+                replacement = journal.with_suffix(".replacement")
+                append_restore_execution_event("RESTORE_EXECUTION_STARTED", "2" * 32, "3" * 32,
+                    "operator@example.com", "INC-OTHER-PLAN", journal_path=replacement)
+                os.replace(replacement, journal)
+            elif scenario == "append_valid_second_plan":
+                append_restore_execution_event("RESTORE_EXECUTION_STARTED", "4" * 32, "5" * 32,
+                    "operator@example.com", "INC-SECOND-PLAN", journal_path=journal)
+
+        original_hash = maintenance_module.sha256_file
+        changed = {"done": False}
+        def mutate_during_scan(path):
+            digest = original_hash(path)
+            if Path(path) == backup and not changed["done"]:
+                changed["done"] = True
+                mutate_journal()
+            return digest
+
+        try:
+            with patch.object(maintenance_module, "sha256_file", side_effect=mutate_during_scan):
+                response = self._call_real_inventory_api(root)
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(changed["done"])
+            self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_REVIEW_REQUIRED")
+            self.assertIn("RESTORE_EXECUTION_JOURNAL_CHANGED_DURING_INVENTORY", payload["issues"])
+        finally:
+            if journal.is_dir() and not journal.is_symlink():
+                journal.rmdir()
+            else:
+                journal.unlink(missing_ok=True)
+    return test
+
+
+_REAL_INVENTORY_JOURNAL_RACE_CASES = [
+    ("test_journal_race_append_valid_event", "append_valid_event"),
+    ("test_journal_race_append_invalid_json", "append_invalid_json"),
+    ("test_journal_race_truncate_tail", "truncate_tail"),
+    ("test_journal_race_delete_journal", "delete_journal"),
+    ("test_journal_race_replace_valid_chain", "replace_valid_chain"),
+    ("test_journal_race_replace_empty", "replace_empty"),
+    ("test_journal_race_append_partial_record", "append_partial_record"),
+    ("test_journal_race_tamper_existing_record", "tamper_existing_record"),
+    ("test_journal_race_truncate_to_empty", "truncate_to_empty"),
+    ("test_journal_race_duplicate_first_record", "duplicate_first_record"),
+    ("test_journal_race_append_wrong_hash", "append_wrong_hash"),
+    ("test_journal_race_append_wrong_sequence", "append_wrong_sequence"),
+    ("test_journal_race_append_unknown_event", "append_unknown_event"),
+    ("test_journal_race_replace_with_directory", "replace_with_directory"),
+    ("test_journal_race_symlink_swap", "symlink_swap"),
+    ("test_journal_race_append_duplicate_sequence", "append_duplicate_sequence"),
+    ("test_journal_race_rewrite_same_length", "rewrite_same_length"),
+    ("test_journal_race_append_unterminated_record", "append_unterminated_record"),
+    ("test_journal_race_replace_with_other_plan", "replace_with_other_plan"),
+    ("test_journal_race_append_valid_second_plan", "append_valid_second_plan"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_JOURNAL_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_journal_race_test(_scenario))
