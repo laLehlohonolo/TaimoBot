@@ -2192,6 +2192,18 @@ class DailyMaintenanceTests(unittest.TestCase):
             connection.rollback()
             connection.close()
 
+    def test_restore_lock_rejects_symlinked_guard_without_touching_target(self):
+        guard_path = database.restore_guard_path()
+        guard_path.parent.mkdir(parents=True, exist_ok=True)
+        target = Path(self.temp_dir.name) / "unrelated-guard-target"
+        target.write_bytes(b"do-not-modify")
+        guard_path.symlink_to(target)
+        with self.assertRaises(OSError):
+            acquire_restore_lock("a" * 32)
+        self.assertEqual(target.read_bytes(), b"do-not-modify")
+        self.assertTrue(guard_path.is_symlink())
+        self.assertFalse(restore_lock_path().exists())
+
     def test_restore_lock_rejects_invalid_plan_and_release_tokens(self):
         with self.assertRaisesRegex(ValueError, "plan ID"):
             acquire_restore_lock("../unsafe")
