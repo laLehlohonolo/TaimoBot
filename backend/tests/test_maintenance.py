@@ -41,6 +41,34 @@ def _crash_after_acquiring_restore_lock(ready):
     ready.set()
     os._exit(0)
 
+def _hold_restore_lock_until_release(ready, release):
+    lock = acquire_restore_lock("6" * 32, timeout_seconds=1.0)
+    ready.set()
+    if not release.wait(5):
+        os._exit(75)
+    release_restore_lock(lock["lock_token"])
+
+
+def _exit_during_restore_marker_directory_sync():
+    real_fsync = os.fsync
+    def crash_on_directory_sync(fd):
+        if maintenance_module.stat.S_ISDIR(os.fstat(fd).st_mode):
+            os._exit(73)
+        return real_fsync(fd)
+    os.fsync = crash_on_directory_sync
+    acquire_restore_lock("4" * 32, timeout_seconds=1.0)
+    os._exit(74)
+
+
+def _attempt_restore_recovery(results, operator, audit):
+    try:
+        recover_abandoned_restore_lock(
+            operator, "INC-CONCURRENT-RECOVERY", confirm=True, audit_path=audit,
+        )
+        results.put(("recovered", operator))
+    except Exception as error:
+        results.put(("refused", type(error).__name__, str(error)))
+
 def _hold_database_connection_for_restore_test(ready, release):
     connection = database.get_connection()
     ready.set()
