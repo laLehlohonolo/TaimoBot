@@ -6979,8 +6979,12 @@ class DailyMaintenanceTests(unittest.TestCase):
 def _make_real_inventory_race_test(scenario):
     def test(self):
         root = Path(self.temp_dir.name) / ("race-" + scenario)
-        backup = self._make_inventory_backup(root, "taimobot-race.sqlite3")
         staging = root / "recovery-staging"
+        if scenario.startswith("staging_") and scenario != "staging_create":
+            root.mkdir(parents=True, exist_ok=True)
+            backup = self._make_inventory_backup(staging, "taimobot-stage.sqlite3")
+        else:
+            backup = self._make_inventory_backup(root, "taimobot-race.sqlite3")
         moved = root.with_name(root.name + "-held")
         outside = Path(self.temp_dir.name) / ("outside-" + scenario)
         outside.mkdir()
@@ -6998,8 +7002,6 @@ def _make_real_inventory_race_test(scenario):
             if changed["done"]:
                 return digest
             expected = backup
-            if scenario.startswith("staging_"):
-                expected = self._make_inventory_backup(staging, "taimobot-stage.sqlite3")
             if Path(path) != expected:
                 return digest
             changed["done"] = True
