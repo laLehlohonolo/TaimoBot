@@ -1658,6 +1658,17 @@ def recover_abandoned_restore_lock(
         try:
             if not stat.S_ISREG(os.fstat(audit_fd).st_mode):
                 raise RuntimeError("Recovery audit destination is not a regular file.")
+            # Persist the audit filename itself before any recovery operation
+            # can unlink the marker. This matters when the operator-selected
+            # audit directory differs from the marker directory.
+            audit_directory_fd = os.open(
+                str(audit_file.parent),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(audit_directory_fd)
+            finally:
+                os.close(audit_directory_fd)
             fcntl.flock(audit_fd, fcntl.LOCK_EX)
             audit_state = _verify_restore_lock_recovery_audit_fd(audit_fd)
             marker_hash = hashlib.sha256(marker_bytes).hexdigest()
