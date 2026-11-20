@@ -1555,6 +1555,34 @@ def inspect_recovery_artifact_inventory(
     ):
         issues.append("RESTORE_EXECUTION_JOURNAL_CHANGED_DURING_INVENTORY")
 
+    # Recheck after final journal verification: a metadata write during that
+    # verification must not escape the inventory's last consistency check.
+    try:
+        with database.get_connection() as connection:
+            response_metadata_fingerprint = metadata_state_fingerprint(connection)
+        if database_file_identity() != initial_database_identity:
+            raise sqlite3.DatabaseError("live database identity changed before inventory response")
+    except (sqlite3.Error, OSError, ValueError) as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": final_journal.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["MAINTENANCE_METADATA_UNREADABLE_BEFORE_RESPONSE", str(error)[:180]])),
+        }
+    if response_metadata_fingerprint != initial_metadata_fingerprint:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": final_journal.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["MAINTENANCE_METADATA_CHANGED_BEFORE_RESPONSE"])),
+        }
+
     orphaned = [item for item in artifacts if item.get("status") == "ORPHANED"]
     blocked = bool(issues) or any(item.get("status") in ("UNSAFE", "REVIEW_REQUIRED", "INCOMPLETE", "PROTECTED_LIVE_DATABASE") for item in artifacts)
     return {
