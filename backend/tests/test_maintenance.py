@@ -7473,3 +7473,113 @@ _REAL_INVENTORY_DATABASE_IDENTITY_RACE_CASES = [
 ]
 for _test_name, _scenario in _REAL_INVENTORY_DATABASE_IDENTITY_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_database_identity_race_test(_scenario))
+
+
+
+def _make_real_inventory_postcheck_metadata_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("postcheck-metadata-race-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-postcheck-metadata.sqlite3")
+        self._create_inventory_metadata_tables()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-20','COMPLETE','start','end',?)",
+                (str(backup),),
+            )
+        original_verify = maintenance_module.verify_restore_execution_journal
+        calls = {"count": 0, "changed": False}
+
+        def mutate_after_final_journal_check(*args, **kwargs):
+            result = original_verify(*args, **kwargs)
+            calls["count"] += 1
+            if calls["count"] == 3 and not calls["changed"]:
+                calls["changed"] = True
+                with database.get_connection() as connection:
+                    if scenario == "run_insert":
+                        connection.execute("INSERT INTO maintenance_runs (run_date,status,started_at,completed_at,backup_file) VALUES ('2026-11-19','SUPERSEDED','s','e',?)", (str(backup),))
+                    elif scenario == "run_update":
+                        connection.execute("UPDATE maintenance_runs SET completed_at='late-change' WHERE run_date='2026-11-20'")
+                    elif scenario == "run_delete":
+                        connection.execute("DELETE FROM maintenance_runs WHERE run_date='2026-11-20'")
+                    elif scenario == "run_path":
+                        connection.execute("UPDATE maintenance_runs SET backup_file=? WHERE run_date='2026-11-20'", (str(root / "late.sqlite3"),))
+                    elif scenario == "attempt_insert":
+                        connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('late-attempt','2026-11-20','FAILED','s','e',?)", (str(backup),))
+                    elif scenario == "attempt_update":
+                        connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('late-attempt','2026-11-20','FAILED','s','e',?)", (str(backup),))
+                        connection.execute("UPDATE maintenance_run_attempts SET status='COMPLETE' WHERE attempt_token='late-attempt'")
+                    elif scenario == "attempt_delete":
+                        connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('late-attempt','2026-11-20','FAILED','s','e',?)", (str(backup),))
+                        connection.execute("DELETE FROM maintenance_run_attempts WHERE attempt_token='late-attempt'")
+                    elif scenario == "attempt_path":
+                        connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('late-attempt','2026-11-20','FAILED','s','e',?)", (str(backup),))
+                        connection.execute("UPDATE maintenance_run_attempts SET backup_file=? WHERE attempt_token='late-attempt'", (str(root / "late-attempt.sqlite3"),))
+                    elif scenario == "plan_insert":
+                        connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("f" * 32, str(backup), str(backup), str(backup)))
+                    elif scenario == "plan_update":
+                        connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("f" * 32, str(backup), str(backup), str(backup)))
+                        connection.execute("UPDATE maintenance_restore_plans SET status='FAILED' WHERE plan_id=?", ("f" * 32,))
+                    elif scenario == "plan_delete":
+                        connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("f" * 32, str(backup), str(backup), str(backup)))
+                        connection.execute("DELETE FROM maintenance_restore_plans WHERE plan_id=?", ("f" * 32,))
+                    elif scenario == "plan_path":
+                        connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("f" * 32, str(backup), str(backup), str(backup)))
+                        connection.execute("UPDATE maintenance_restore_plans SET staging_file=? WHERE plan_id=?", (str(root / "late-stage.sqlite3"), "f" * 32))
+                    elif scenario == "artifact_insert":
+                        connection.execute("INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)", ("f" * 32, "a" * 64, "b" * 64, "c" * 64))
+                    elif scenario == "artifact_update":
+                        connection.execute("INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)", ("f" * 32, "a" * 64, "b" * 64, "c" * 64))
+                        connection.execute("UPDATE maintenance_restore_artifacts SET source_sha256=? WHERE plan_id=?", ("d" * 64, "f" * 32))
+                    elif scenario == "artifact_delete":
+                        connection.execute("INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)", ("f" * 32, "a" * 64, "b" * 64, "c" * 64))
+                        connection.execute("DELETE FROM maintenance_restore_artifacts WHERE plan_id=?", ("f" * 32,))
+                    elif scenario == "plan_operator":
+                        connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("f" * 32, str(backup), str(backup), str(backup)))
+                        connection.execute("UPDATE maintenance_restore_plans SET created_by='late-operator' WHERE plan_id=?", ("f" * 32,))
+                    elif scenario == "run_timestamp":
+                        connection.execute("UPDATE maintenance_runs SET started_at='late-start' WHERE run_date='2026-11-20'")
+                    elif scenario == "schema_change":
+                        connection.execute("CREATE TABLE late_inventory_metadata_change (id INTEGER PRIMARY KEY, note TEXT)")
+                    elif scenario == "atomic_multi_table":
+                        connection.execute("INSERT INTO maintenance_run_attempts (attempt_token,run_date,status,started_at,completed_at,backup_file) VALUES ('atomic-late','2026-11-20','SUPERSEDED','s','e',?)", (str(backup),))
+                        connection.execute("UPDATE maintenance_runs SET status='SUPERSEDED' WHERE run_date='2026-11-20'")
+                    elif scenario == "restore_artifact_roles":
+                        connection.execute("INSERT INTO maintenance_restore_plans (plan_id,backup_file,staging_file,pre_restore_backup_file,status,created_at,created_by) VALUES (?,?,?,?, 'PREPARED','late','operator')", ("e" * 32, str(backup), str(backup), str(backup)))
+                        connection.execute("INSERT INTO maintenance_restore_artifacts (plan_id,source_sha256,staged_sha256,rollback_sha256) VALUES (?,?,?,?)", ("e" * 32, "1" * 64, "2" * 64, "3" * 64))
+            return result
+
+        with patch.object(maintenance_module, "verify_restore_execution_journal", side_effect=mutate_after_final_journal_check):
+            response = self._call_real_inventory_api(root)
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(calls["changed"], f"mutation did not run; verify calls={calls['count']}")
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED")
+        self.assertIn("MAINTENANCE_METADATA_CHANGED_BEFORE_RESPONSE", payload["issues"])
+        self.assertEqual(payload["orphaned_artifacts"], [])
+    return test
+
+
+_REAL_INVENTORY_POSTCHECK_METADATA_RACE_CASES = [
+    ("test_postcheck_metadata_race_run_insert", "run_insert"),
+    ("test_postcheck_metadata_race_run_update", "run_update"),
+    ("test_postcheck_metadata_race_run_delete", "run_delete"),
+    ("test_postcheck_metadata_race_run_path", "run_path"),
+    ("test_postcheck_metadata_race_attempt_insert", "attempt_insert"),
+    ("test_postcheck_metadata_race_attempt_update", "attempt_update"),
+    ("test_postcheck_metadata_race_attempt_delete", "attempt_delete"),
+    ("test_postcheck_metadata_race_attempt_path", "attempt_path"),
+    ("test_postcheck_metadata_race_plan_insert", "plan_insert"),
+    ("test_postcheck_metadata_race_plan_update", "plan_update"),
+    ("test_postcheck_metadata_race_plan_delete", "plan_delete"),
+    ("test_postcheck_metadata_race_plan_path", "plan_path"),
+    ("test_postcheck_metadata_race_artifact_insert", "artifact_insert"),
+    ("test_postcheck_metadata_race_artifact_update", "artifact_update"),
+    ("test_postcheck_metadata_race_artifact_delete", "artifact_delete"),
+    ("test_postcheck_metadata_race_plan_operator", "plan_operator"),
+    ("test_postcheck_metadata_race_run_timestamp", "run_timestamp"),
+    ("test_postcheck_metadata_race_schema_change", "schema_change"),
+    ("test_postcheck_metadata_race_atomic_multi_table", "atomic_multi_table"),
+    ("test_postcheck_metadata_race_restore_artifact_roles", "restore_artifact_roles"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_POSTCHECK_METADATA_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_postcheck_metadata_race_test(_scenario))
