@@ -1683,6 +1683,67 @@ def inspect_recovery_artifact_inventory(
             "issues": list(dict.fromkeys(issues + ["MAINTENANCE_METADATA_CHANGED_BEFORE_RESPONSE"])),
         }
 
+    # The metadata read above is itself a race window for filesystem changes.
+    # Revalidate the full managed-file snapshot once more, then take one final
+    # metadata fingerprint so changes during this last filesystem pass are caught.
+    try:
+        assert_managed_directories_unchanged()
+        for (directory_path, artifact_type, file_name), expected_identity in artifact_snapshots.items():
+            managed_directory = Path(directory_path)
+            candidate = managed_directory / file_name
+            current = candidate.stat(follow_symlinks=False)
+            current_identity = (
+                current.st_dev, current.st_ino, current.st_mode,
+                current.st_size, current.st_mtime_ns,
+            )
+            if current_identity != expected_identity:
+                raise OSError("recovery artifact changed after final metadata verification")
+            if stat.S_ISREG(current.st_mode):
+                recorded = next(
+                    (item.get("sha256") for item in artifacts
+                     if item["file_name"] == file_name and item["artifact_type"] == artifact_type),
+                    None,
+                )
+                if recorded and sha256_file(candidate) != recorded:
+                    raise OSError("recovery artifact digest changed after final metadata verification")
+        assert_managed_directories_unchanged()
+    except (OSError, ValueError) as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": final_journal.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["ARTIFACT_CHANGED_DURING_FINAL_CHECK", str(error)[:180]])),
+        }
+
+    try:
+        with database.get_connection() as connection:
+            terminal_metadata_fingerprint = metadata_state_fingerprint(connection)
+        if database_file_identity() != initial_database_identity:
+            raise sqlite3.DatabaseError("live database identity changed during terminal consistency fence")
+    except (sqlite3.Error, OSError, ValueError) as error:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": final_journal.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["MAINTENANCE_METADATA_UNREADABLE_BEFORE_RESPONSE", str(error)[:180]])),
+        }
+    if terminal_metadata_fingerprint != initial_metadata_fingerprint:
+        return {
+            **result_base,
+            "status": "RECOVERY_ARTIFACT_INVENTORY_BLOCKED",
+            "journal_status": final_journal.get("status"),
+            "artifacts": artifacts,
+            "orphaned_artifacts": [],
+            "missing_references": missing_references,
+            "issues": list(dict.fromkeys(issues + ["MAINTENANCE_METADATA_CHANGED_BEFORE_RESPONSE"])),
+        }
+
     orphaned = [item for item in artifacts if item.get("status") == "ORPHANED"]
     blocked = bool(issues) or any(item.get("status") in ("UNSAFE", "REVIEW_REQUIRED", "INCOMPLETE", "PROTECTED_LIVE_DATABASE") for item in artifacts)
     return {
