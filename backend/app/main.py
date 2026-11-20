@@ -19,7 +19,8 @@ from .maintenance_scheduler import (
 )
 from .maintenance import (
     BACKUP_DIR, SAST, create_verified_backup, is_maintenance_window,
-    inspect_recovery_candidates, verify_restore_candidate, sha256_file,
+    inspect_recovery_candidates, inspect_recovery_artifact_inventory,
+    verify_restore_candidate, sha256_file,
     verify_approved_restore_plan,
 )
 from .cors import configure_cors
@@ -292,6 +293,13 @@ def maintenance_recovery_candidates(user=Depends(current_user)):
     """Admin-only, read-only inventory of verified recovery candidates."""
     require_admin(user)
     return inspect_recovery_candidates()
+
+
+@app.get("/maintenance/recovery-artifact-inventory")
+def maintenance_recovery_artifact_inventory(user=Depends(current_user)):
+    """Admin-only, read-only cross-check of managed recovery artifacts and references."""
+    require_admin(user)
+    return inspect_recovery_artifact_inventory()
 
 
 @app.post("/maintenance/restore/prepare")
