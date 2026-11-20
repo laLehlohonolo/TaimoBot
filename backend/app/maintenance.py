@@ -1349,7 +1349,7 @@ def inspect_recovery_artifact_inventory(
 
     artifacts: list[dict] = []
     seen_inodes: dict[tuple[int, int], str] = {}
-    artifact_snapshots: dict[tuple[str, str], tuple[int, int, int, int, int]] = {}
+    artifact_snapshots: dict[tuple[str, str, str], tuple[int, int, int, int, int]] = {}
     try:
         directories = [(root, "BACKUP")]
         if staging.exists():
@@ -1372,7 +1372,7 @@ def inspect_recovery_artifact_inventory(
                 if not relevant:
                     continue
                 entry_metadata = path.stat(follow_symlinks=False)
-                artifact_snapshots[(artifact_type, path.name)] = (
+                artifact_snapshots[(str(directory), artifact_type, path.name)] = (
                     entry_metadata.st_dev, entry_metadata.st_ino, entry_metadata.st_mode,
                     entry_metadata.st_size, entry_metadata.st_mtime_ns,
                 )
@@ -1565,8 +1565,8 @@ def inspect_recovery_artifact_inventory(
     # verification, closing the final window for concurrent backup replacement.
     try:
         assert_managed_directories_unchanged()
-        for (artifact_type, file_name), expected_identity in artifact_snapshots.items():
-            managed_directory = staging if artifact_type == "STAGED" else root
+        for (directory_path, artifact_type, file_name), expected_identity in artifact_snapshots.items():
+            managed_directory = Path(directory_path)
             candidate = managed_directory / file_name
             current = candidate.stat(follow_symlinks=False)
             current_identity = (
