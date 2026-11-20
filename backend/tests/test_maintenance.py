@@ -5233,8 +5233,8 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["process_id"], 2**31 - 1)
 
     def test_live_kernel_guard_overrides_dead_pid_metadata(self):
-        marker = self._write_abandoned_restore_marker()
         lock = acquire_restore_lock("1" * 32)
+        marker = maintenance_module.restore_lock_path()
         try:
             payload = json.loads(marker.read_text())
             payload["pid"] = 2**31 - 1
@@ -5244,8 +5244,8 @@ class DailyMaintenanceTests(unittest.TestCase):
             release_restore_lock(lock["lock_token"])
 
     def test_live_kernel_guard_overrides_current_pid_metadata(self):
-        marker = self._write_abandoned_restore_marker()
         lock = acquire_restore_lock("2" * 32)
+        marker = maintenance_module.restore_lock_path()
         try:
             payload = json.loads(marker.read_text())
             payload["pid"] = os.getpid()
@@ -5255,8 +5255,8 @@ class DailyMaintenanceTests(unittest.TestCase):
             release_restore_lock(lock["lock_token"])
 
     def test_live_kernel_guard_overrides_different_positive_pid_metadata(self):
-        marker = self._write_abandoned_restore_marker()
         lock = acquire_restore_lock("3" * 32)
+        marker = maintenance_module.restore_lock_path()
         try:
             payload = json.loads(marker.read_text())
             payload["pid"] = 123456789
@@ -5296,9 +5296,8 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(marker.read_bytes(), before)
 
     def test_recovery_refuses_pid_metadata_change_after_inspection(self):
-        marker = self._write_abandoned_restore_marker()
-        original = marker.read_bytes()
         lock = acquire_restore_lock("4" * 32)
+        marker = maintenance_module.restore_lock_path()
         try:
             payload = json.loads(marker.read_text())
             payload["pid"] = os.getpid()
