@@ -7975,3 +7975,110 @@ _REAL_INVENTORY_TERMINAL_FENCE_RACE_CASES = [
 ]
 for _test_name, _scenario in _REAL_INVENTORY_TERMINAL_FENCE_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_terminal_fence_race_test(_scenario))
+
+def _make_real_inventory_hash_to_sqlite_open_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("hash-open-race-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-hash-open.sqlite3")
+        external = self._make_inventory_backup(Path(self.temp_dir.name) / ("external-" + scenario), "external.sqlite3")
+        self._create_inventory_metadata_tables()
+        original_hash = maintenance_module.sha256_file
+        calls = {"hash": 0, "changed": False}
+        def swap_after_hash(path, *args, **kwargs):
+            digest = original_hash(path, *args, **kwargs)
+            calls["hash"] += 1
+            if path.name == backup.name and calls["hash"] == 1 and not calls["changed"]:
+                calls["changed"] = True
+                if scenario == "symlink_external":
+                    backup.unlink()
+                    backup.symlink_to(external)
+                elif scenario == "replace_valid":
+                    replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "replace-valid", backup.name)
+                    replacement.replace(backup)
+                elif scenario == "delete":
+                    backup.unlink()
+                elif scenario == "append":
+                    with backup.open("ab") as handle: handle.write(b"raced")
+                elif scenario == "truncate":
+                    backup.write_bytes(b"not a sqlite database")
+                elif scenario == "touch":
+                    os.utime(backup, None)
+                elif scenario == "chmod":
+                    backup.chmod(0o600)
+                elif scenario == "rename":
+                    backup.rename(root / "renamed.sqlite3")
+                elif scenario == "hardlink":
+                    alias = root / "taimobot-hardlink.sqlite3"
+                    os.link(backup, alias)
+                elif scenario == "directory":
+                    backup.unlink()
+                    backup.mkdir()
+                elif scenario == "temp_add":
+                    (root / ".taimobot-raced.tmp").write_text("partial")
+                elif scenario == "nested_add":
+                    (root / "raced-directory").mkdir()
+                elif scenario == "same_bytes_replace":
+                    replacement = Path(self.temp_dir.name) / "same-bytes.sqlite3"
+                    replacement.write_bytes(backup.read_bytes())
+                    replacement.replace(backup)
+                elif scenario == "symlink_dangling":
+                    backup.unlink()
+                    backup.symlink_to(root / "missing-target.sqlite3")
+                elif scenario == "external_copy":
+                    external_copy = Path(self.temp_dir.name) / "external-copy.sqlite3"
+                    external_copy.write_bytes(external.read_bytes())
+                    external_copy.replace(backup)
+                elif scenario == "swap_twice":
+                    replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "swap-twice", backup.name)
+                    replacement.replace(backup)
+                    backup.rename(root / "taimobot-original.sqlite3")
+                    replacement2 = self._make_inventory_backup(Path(self.temp_dir.name) / "swap-twice-second", backup.name)
+                    replacement2.replace(backup)
+                elif scenario == "symlink_loop":
+                    backup.unlink()
+                    backup.symlink_to(backup)
+                elif scenario == "sidecar":
+                    Path(str(backup) + "-wal").write_bytes(b"wal")
+                elif scenario == "directory_swap":
+                    moved = root / "original.sqlite3"
+                    backup.rename(moved)
+                    replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "directory-swap", backup.name)
+                    replacement.replace(backup)
+                elif scenario == "replace_external_symlink":
+                    backup.unlink()
+                    backup.symlink_to(external)
+            return digest
+        with patch.object(maintenance_module, "sha256_file", side_effect=swap_after_hash):
+            response = self._call_real_inventory_api(root)
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(calls["changed"], f"race hook not reached: {calls}")
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED", payload)
+        self.assertEqual(payload["orphaned_artifacts"], [])
+    return test
+
+
+_REAL_INVENTORY_HASH_TO_SQLITE_OPEN_RACE_CASES = [
+    ("test_hash_open_symlink_external", "symlink_external"),
+    ("test_hash_open_replace_valid", "replace_valid"),
+    ("test_hash_open_delete", "delete"),
+    ("test_hash_open_append", "append"),
+    ("test_hash_open_truncate", "truncate"),
+    ("test_hash_open_touch", "touch"),
+    ("test_hash_open_chmod", "chmod"),
+    ("test_hash_open_rename", "rename"),
+    ("test_hash_open_hardlink", "hardlink"),
+    ("test_hash_open_directory", "directory"),
+    ("test_hash_open_temp_add", "temp_add"),
+    ("test_hash_open_nested_add", "nested_add"),
+    ("test_hash_open_same_bytes_replace", "same_bytes_replace"),
+    ("test_hash_open_symlink_dangling", "symlink_dangling"),
+    ("test_hash_open_external_copy", "external_copy"),
+    ("test_hash_open_swap_twice", "swap_twice"),
+    ("test_hash_open_symlink_loop", "symlink_loop"),
+    ("test_hash_open_sidecar", "sidecar"),
+    ("test_hash_open_directory_swap", "directory_swap"),
+    ("test_hash_open_replace_external_symlink", "replace_external_symlink"),
+]
+for _test_name, _scenario in _REAL_INVENTORY_HASH_TO_SQLITE_OPEN_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_hash_to_sqlite_open_race_test(_scenario))
