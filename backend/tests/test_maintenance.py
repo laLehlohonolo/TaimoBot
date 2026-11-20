@@ -4797,5 +4797,214 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(is_restore_lock_active())
 
 
+
+    def test_recovery_syncs_separate_audit_directory_before_marker_unlink(self):
+        marker = self._write_abandoned_restore_marker()
+        audit_dir = Path(self.temp_dir.name) / "separate-audit"
+        audit_dir.mkdir()
+        audit = audit_dir / "recovery.jsonl"
+        events = []
+        real_fsync = os.fsync
+        audit_dir_stat = audit_dir.stat()
+        real_unlink = Path.unlink
+        def trace_fsync(fd):
+            info = os.fstat(fd)
+            if maintenance_module.stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (audit_dir_stat.st_dev, audit_dir_stat.st_ino):
+                events.append("audit-directory-fsync")
+            return real_fsync(fd)
+        def trace_unlink(path, *args, **kwargs):
+            if path == marker:
+                events.append("marker-unlink")
+            return real_unlink(path, *args, **kwargs)
+        with patch("app.maintenance.os.fsync", side_effect=trace_fsync), patch.object(Path, "unlink", trace_unlink):
+            recover_abandoned_restore_lock("operator", "INC-AUDIT-DIR-ORDER", confirm=True, audit_path=audit)
+        self.assertLess(events.index("audit-directory-fsync"), events.index("marker-unlink"))
+        self.assertFalse(marker.exists())
+
+    def test_recovery_audit_directory_sync_failure_preserves_marker(self):
+        marker = self._write_abandoned_restore_marker()
+        audit_dir = Path(self.temp_dir.name) / "separate-audit"
+        audit_dir.mkdir()
+        audit = audit_dir / "recovery.jsonl"
+        before = database.DB_PATH.read_bytes()
+        directory = audit_dir.stat()
+        real_fsync = os.fsync
+        def fail_audit_directory(fd):
+            info = os.fstat(fd)
+            if maintenance_module.stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (directory.st_dev, directory.st_ino):
+                raise OSError("simulated audit directory sync failure")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_audit_directory):
+            with self.assertRaisesRegex(OSError, "audit directory sync failure"):
+                recover_abandoned_restore_lock("operator", "INC-AUDIT-DIR-FAIL", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+        self.assertEqual(audit.read_bytes(), b"")
+        self.assertEqual(database.DB_PATH.read_bytes(), before)
+
+    def test_recovery_audit_directory_sync_failure_does_not_write_started_event(self):
+        marker = self._write_abandoned_restore_marker()
+        audit_dir = Path(self.temp_dir.name) / "separate-audit"
+        audit_dir.mkdir()
+        audit = audit_dir / "recovery.jsonl"
+        directory = audit_dir.stat()
+        real_fsync = os.fsync
+        def fail_audit_directory(fd):
+            info = os.fstat(fd)
+            if maintenance_module.stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (directory.st_dev, directory.st_ino):
+                raise OSError("audit directory not durable")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_audit_directory):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-NO-START", confirm=True, audit_path=audit)
+        self.assertEqual(audit.read_bytes(), b"")
+        self.assertTrue(marker.exists())
+
+    def test_recovery_started_audit_fsync_failure_preserves_marker(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "started-fsync.jsonl"
+        real_fsync = os.fsync
+        def fail_audit_file(fd):
+            info = os.fstat(fd)
+            if maintenance_module.stat.S_ISREG(info.st_mode) and os.path.samefile(f"/proc/self/fd/{fd}", audit):
+                raise OSError("started audit fsync failure")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_audit_file):
+            with self.assertRaisesRegex(OSError, "started audit fsync failure"):
+                recover_abandoned_restore_lock("operator", "INC-START-FSYNC", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+        self.assertTrue(audit.exists())
+
+    def test_recovery_marker_directory_sync_failure_leaves_pending_started_for_review(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "marker-dir-fsync.jsonl"
+        marker_dir = marker.parent.stat()
+        real_fsync = os.fsync
+        def fail_marker_directory(fd):
+            info = os.fstat(fd)
+            if maintenance_module.stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (marker_dir.st_dev, marker_dir.st_ino):
+                # The audit file is in a distinct subdirectory; fail only the marker directory sync.
+                raise OSError("marker directory sync failure")
+            return real_fsync(fd)
+        audit_dir = Path(self.temp_dir.name) / "audit-subdir"
+        audit_dir.mkdir()
+        audit = audit_dir / "recovery.jsonl"
+        with patch("app.maintenance.os.fsync", side_effect=fail_marker_directory):
+            with self.assertRaisesRegex(OSError, "marker directory sync failure"):
+                recover_abandoned_restore_lock("operator", "INC-MARKER-DIR", confirm=True, audit_path=audit)
+        self.assertFalse(marker.exists())
+        records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([row["event"] for row in records], ["RESTORE_LOCK_RECOVERY_STARTED"])
+        with audit.open("rb") as stream:
+            with self.assertRaisesRegex(RuntimeError, "unmatched STARTED"):
+                maintenance_module._verify_restore_lock_recovery_audit_fd(stream.fileno())
+
+    def test_recovery_marker_unlink_failure_leaves_started_audit_and_marker(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "unlink-failure.jsonl"
+        real_unlink = Path.unlink
+        def fail_marker_unlink(path, *args, **kwargs):
+            if path == marker:
+                raise OSError("simulated marker unlink failure")
+            return real_unlink(path, *args, **kwargs)
+        with patch.object(Path, "unlink", fail_marker_unlink):
+            with self.assertRaisesRegex(OSError, "marker unlink failure"):
+                recover_abandoned_restore_lock("operator", "INC-UNLINK-FAIL", confirm=True, audit_path=audit)
+        self.assertTrue(marker.exists())
+        records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([row["event"] for row in records], ["RESTORE_LOCK_RECOVERY_STARTED"])
+
+    def test_recovery_after_unlink_before_complete_is_not_automatically_resumed(self):
+        marker = self._write_abandoned_restore_marker()
+        audit_dir = Path(self.temp_dir.name) / "audit-subdir"
+        audit_dir.mkdir()
+        audit = audit_dir / "recovery.jsonl"
+        marker_dir = marker.parent.stat()
+        real_fsync = os.fsync
+        def fail_marker_dir_sync(fd):
+            info = os.fstat(fd)
+            if maintenance_module.stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (marker_dir.st_dev, marker_dir.st_ino):
+                raise OSError("simulate host interruption boundary")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_marker_dir_sync):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-INTERRUPTED", confirm=True, audit_path=audit)
+        before_audit = audit.read_bytes()
+        before_db = database.DB_PATH.read_bytes()
+        self.assertFalse(marker.exists())
+        with self.assertRaisesRegex(RuntimeError, "not confirmed abandoned"):
+            recover_abandoned_restore_lock("operator", "INC-RETRY", confirm=True, audit_path=audit)
+        self.assertEqual(audit.read_bytes(), before_audit)
+        self.assertEqual(database.DB_PATH.read_bytes(), before_db)
+
+    def test_recovery_pending_started_blocks_replacement_marker_after_interruption(self):
+        marker = self._write_abandoned_restore_marker()
+        audit = Path(self.temp_dir.name) / "pending-replacement.jsonl"
+        real_unlink = Path.unlink
+        def fail_unlink(path, *args, **kwargs):
+            if path == marker:
+                raise OSError("interrupted before marker removal")
+            return real_unlink(path, *args, **kwargs)
+        with patch.object(Path, "unlink", fail_unlink):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-PENDING", confirm=True, audit_path=audit)
+        pending = audit.read_bytes()
+        marker.write_text(json.dumps({
+            "plan_id": "c" * 32, "pid": 999998,
+            "created_at": "2026-11-20T00:00:00+02:00", "lock_token": "d" * 32,
+        }), encoding="utf-8")
+        replacement = marker.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "unmatched STARTED"):
+            recover_abandoned_restore_lock("operator", "INC-REPLACEMENT", confirm=True, audit_path=audit)
+        self.assertEqual(marker.read_bytes(), replacement)
+        self.assertEqual(audit.read_bytes(), pending)
+
+    def test_recovery_crash_boundaries_preserve_database_and_sidecars(self):
+        marker = self._write_abandoned_restore_marker()
+        audit_dir = Path(self.temp_dir.name) / "audit-subdir"
+        audit_dir.mkdir()
+        audit = audit_dir / "recovery.jsonl"
+        wal = Path(str(database.DB_PATH) + "-wal")
+        shm = Path(str(database.DB_PATH) + "-shm")
+        wal.write_bytes(b"wal-recovery-boundary")
+        shm.write_bytes(b"shm-recovery-boundary")
+        database_before = database.DB_PATH.read_bytes()
+        marker_dir = marker.parent.stat()
+        real_fsync = os.fsync
+        def fail_marker_dir_sync(fd):
+            info = os.fstat(fd)
+            if maintenance_module.stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (marker_dir.st_dev, marker_dir.st_ino):
+                raise OSError("crash boundary")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_marker_dir_sync):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-PRESERVE-DB", confirm=True, audit_path=audit)
+        self.assertEqual(database.DB_PATH.read_bytes(), database_before)
+        self.assertEqual(wal.read_bytes(), b"wal-recovery-boundary")
+        self.assertEqual(shm.read_bytes(), b"shm-recovery-boundary")
+
+    def test_recovery_crash_boundary_preserves_backup_and_restore_artifacts(self):
+        marker = self._write_abandoned_restore_marker()
+        audit_dir = Path(self.temp_dir.name) / "audit-subdir"
+        audit_dir.mkdir()
+        audit = audit_dir / "recovery.jsonl"
+        artifacts = {}
+        for name in ("source-backup.sqlite3", "staged.sqlite3", "rollback.sqlite3"):
+            path = Path(self.temp_dir.name) / name
+            path.write_bytes((name + "-unchanged").encode())
+            artifacts[path] = path.read_bytes()
+        marker_dir = marker.parent.stat()
+        real_fsync = os.fsync
+        def fail_marker_dir_sync(fd):
+            info = os.fstat(fd)
+            if maintenance_module.stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (marker_dir.st_dev, marker_dir.st_ino):
+                raise OSError("crash boundary")
+            return real_fsync(fd)
+        with patch("app.maintenance.os.fsync", side_effect=fail_marker_dir_sync):
+            with self.assertRaises(OSError):
+                recover_abandoned_restore_lock("operator", "INC-PRESERVE-ARTIFACTS", confirm=True, audit_path=audit)
+        for path, content in artifacts.items():
+            self.assertEqual(path.read_bytes(), content)
+
+
 if __name__ == "__main__":
     unittest.main()
