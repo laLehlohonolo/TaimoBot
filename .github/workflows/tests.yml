@@ -101,6 +101,8 @@ jobs:
         run: python scripts/run_recovery_inventory_terminal_fence_races.py
       - name: Run twenty recovery inventory final consistency fence checks sequentially
         run: python scripts/run_recovery_inventory_final_consistency_fence.py
+      - name: Run twenty recovery inventory hash-to-SQLite-open race checks sequentially
+        run: python scripts/run_recovery_inventory_hash_to_sqlite_open_races.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
