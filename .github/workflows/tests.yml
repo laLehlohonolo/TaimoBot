@@ -53,6 +53,8 @@ jobs:
         run: python scripts/run_restore_interruption_journal_consistency.py
       - name: Run ten restore lock cleanup checks sequentially
         run: python scripts/run_restore_lock_cleanup_group.py
+      - name: Run ten restore marker crash-boundary checks sequentially
+        run: python scripts/run_restore_marker_crash_boundaries.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
