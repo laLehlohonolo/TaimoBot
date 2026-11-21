@@ -9,6 +9,7 @@ from .risk import (
     get_risk_profile
 )
 from .safety import require_trading_enabled
+from .instruments import require_execution_approval
 
 
 DEFAULT_SYMBOL = "XAUUSD"
@@ -124,6 +125,7 @@ def create_position_group(account_id, symbol, side):
     """Create a group for related positions in one instrument."""
     account_id = str(account_id).strip()
     symbol = validate_symbol(symbol)
+    require_execution_approval(symbol)
     side = str(side).strip().upper()
 
     if not account_id:
@@ -277,6 +279,7 @@ def open_paper_trade(
     client_order_id = str(client_order_id).strip()
     side = str(side).upper().strip()
     symbol = validate_symbol(symbol)
+    require_execution_approval(symbol)
 
     if not account_id or not client_order_id:
         raise ValueError("Account ID and order ID are required.")
