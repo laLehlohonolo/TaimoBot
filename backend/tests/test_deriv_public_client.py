@@ -91,6 +91,7 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_candle_range_uses_explicit_bounded_start_and_end(self):
         response = self.history_response()
+        response["req_id"] = 3
         socket = FakeSocket(response)
         with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
             candles = await DerivPublicMarketDataClient().fetch_candle_range(
@@ -116,6 +117,7 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_candle_range_rejects_provider_candles_outside_requested_window(self):
         response = self.history_response()
+        response["req_id"] = 3
         socket = FakeSocket(response)
         with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
             with self.assertRaisesRegex(ValueError, "outside the requested"):
