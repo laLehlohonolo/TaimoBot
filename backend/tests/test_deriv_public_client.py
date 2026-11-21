@@ -49,7 +49,7 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
 
     def history_response(self):
         return {
-            "msg_type": "history",
+            "msg_type": "candles",
             "req_id": 2,
             "candles": [
                 {"epoch": 1795256100, "open": 1000, "high": 1002, "low": 999, "close": 1001},
@@ -94,7 +94,7 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_error_and_unexpected_response_are_rejected(self):
         client = DerivPublicMarketDataClient()
         error_socket = FakeSocket({
-            "req_id": 2, "msg_type": "history",
+            "req_id": 2, "msg_type": "candles",
             "error": {"message": "Unknown symbol"},
         })
         with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(error_socket)):
