@@ -8784,3 +8784,143 @@ def test_restore_candidate_rejects_identical_source_and_staging_path(self):
 DailyMaintenanceTests.test_restore_candidate_rejects_identical_source_and_staging_path = (
     test_restore_candidate_rejects_identical_source_and_staging_path
 )
+
+
+def _make_live_database_symlink_preflight_test(scenario):
+    def test(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "backups"
+            staging_dir = backup_dir / "recovery-staging"
+            staging_dir.mkdir(parents=True)
+            source = backup_dir / "taimobot-source.sqlite3"
+            rollback = backup_dir / "taimobot-rollback.sqlite3"
+            staged = staging_dir / "taimobot-staged.sqlite3"
+            valid_live_target = root / "valid-live-target.sqlite3"
+            for target in (source, rollback, staged, valid_live_target):
+                with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(target) as copy:
+                    live.backup(copy)
+
+            link = root / "live-link.sqlite3"
+            if scenario == "absolute":
+                link.symlink_to(valid_live_target.resolve())
+            elif scenario == "relative":
+                link.symlink_to(Path(valid_live_target.name))
+            elif scenario == "relative_dot":
+                link.symlink_to(Path(".") / valid_live_target.name)
+            elif scenario == "relative_parent":
+                nested = root / "nested"
+                nested.mkdir()
+                link = nested / "live.sqlite3"
+                link.symlink_to(Path("..") / valid_live_target.name)
+            elif scenario == "chain":
+                first = root / "first-link.sqlite3"
+                first.symlink_to(valid_live_target)
+                link.symlink_to(first)
+            elif scenario == "dangling":
+                link.symlink_to(root / "missing-target.sqlite3")
+            elif scenario == "external":
+                outside = root.parent / (root.name + "-outside.sqlite3")
+                shutil.copy2(valid_live_target, outside)
+                link.symlink_to(outside)
+            elif scenario == "unicode":
+                target = root / "database-ḓ.sqlite3"
+                valid_live_target.rename(target)
+                link.symlink_to(target)
+            elif scenario == "spaces":
+                target = root / "live database copy.sqlite3"
+                valid_live_target.rename(target)
+                link.symlink_to(target)
+            elif scenario == "hidden":
+                target = root / ".hidden-live.sqlite3"
+                valid_live_target.rename(target)
+                link.symlink_to(target)
+            elif scenario == "absolute_chain":
+                first = root / "absolute-first.sqlite3"
+                first.symlink_to(valid_live_target.resolve())
+                link.symlink_to(first.resolve(strict=False))
+            elif scenario == "directory_target":
+                directory_target = root / "database-directory"
+                directory_target.mkdir()
+                link.symlink_to(directory_target)
+            elif scenario == "self_loop":
+                link.symlink_to(link.name)
+            elif scenario == "two_node_loop":
+                other = root / "other-link.sqlite3"
+                link.symlink_to(other)
+                other.symlink_to(link)
+            elif scenario == "target_replaced":
+                link.symlink_to(valid_live_target)
+                replacement = root / "replacement.sqlite3"
+                with sqlite3.connect(database.DB_PATH) as live, sqlite3.connect(replacement) as copy:
+                    live.backup(copy)
+                replacement.replace(valid_live_target)
+            elif scenario == "target_hardlink":
+                hard = root / "hard-linked-live.sqlite3"
+                os.link(valid_live_target, hard)
+                link.symlink_to(hard)
+            elif scenario == "nested_target":
+                nested = root / "sub" / "dir"
+                nested.mkdir(parents=True)
+                target = nested / "live.sqlite3"
+                valid_live_target.rename(target)
+                link.symlink_to(target)
+            elif scenario == "uppercase_extension":
+                target = root / "LIVE.SQLITE3"
+                valid_live_target.rename(target)
+                link.symlink_to(target)
+            elif scenario == "long_name":
+                target = root / ("live-" + "x" * 80 + ".sqlite3")
+                valid_live_target.rename(target)
+                link.symlink_to(target)
+            elif scenario == "same_directory_alias":
+                alias = root / "alias.sqlite3"
+                alias.symlink_to(valid_live_target)
+                link.symlink_to(alias)
+            else:
+                raise AssertionError("Unknown symlink scenario: " + scenario)
+
+            before = {
+                str(path): maintenance_module.sha256_file(path)
+                for path in (source, rollback, staged)
+            }
+            with self.assertRaisesRegex(ValueError, "live database is missing or unsafe"):
+                verify_restore_execution_readiness(
+                    source, staged, rollback,
+                    backup_dir=backup_dir,
+                    live_database_path=link,
+                )
+            self.assertTrue(link.is_symlink(), scenario)
+            self.assertEqual(
+                {str(path): maintenance_module.sha256_file(path)
+                 for path in (source, rollback, staged)},
+                before,
+            )
+
+    return test
+
+
+_LIVE_DATABASE_SYMLINK_PREFLIGHT_CASES = [
+    ("test_live_db_symlink_absolute_preflight", "absolute"),
+    ("test_live_db_symlink_relative_preflight", "relative"),
+    ("test_live_db_symlink_relative_dot_preflight", "relative_dot"),
+    ("test_live_db_symlink_relative_parent_preflight", "relative_parent"),
+    ("test_live_db_symlink_chain_preflight", "chain"),
+    ("test_live_db_dangling_symlink_preflight", "dangling"),
+    ("test_live_db_external_symlink_preflight", "external"),
+    ("test_live_db_unicode_target_symlink_preflight", "unicode"),
+    ("test_live_db_spaces_target_symlink_preflight", "spaces"),
+    ("test_live_db_hidden_target_symlink_preflight", "hidden"),
+    ("test_live_db_absolute_chain_symlink_preflight", "absolute_chain"),
+    ("test_live_db_directory_target_symlink_preflight", "directory_target"),
+    ("test_live_db_self_loop_symlink_preflight", "self_loop"),
+    ("test_live_db_two_node_loop_symlink_preflight", "two_node_loop"),
+    ("test_live_db_replaced_target_symlink_preflight", "target_replaced"),
+    ("test_live_db_hardlink_target_symlink_preflight", "target_hardlink"),
+    ("test_live_db_nested_target_symlink_preflight", "nested_target"),
+    ("test_live_db_uppercase_extension_symlink_preflight", "uppercase_extension"),
+    ("test_live_db_long_name_target_symlink_preflight", "long_name"),
+    ("test_live_db_same_directory_alias_symlink_preflight", "same_directory_alias"),
+]
+for _test_name, _scenario in _LIVE_DATABASE_SYMLINK_PREFLIGHT_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_live_database_symlink_preflight_test(_scenario))
