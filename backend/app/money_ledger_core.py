@@ -5,6 +5,7 @@ integration. It validates journal shape only; it does not post money.
 """
 
 from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 
 MAX_AMOUNT_MINOR = 9_000_000_000_000_000
 VALID_SIDES = frozenset({"DEBIT", "CREDIT"})
@@ -18,7 +19,7 @@ def validate_journal_lines(
     lines: Iterable[Mapping[str, object]],
     *,
     currency: str = "ZAR",
-) -> tuple[dict[str, object], ...]:
+) -> tuple[Mapping[str, object], ...]:
     """Return a normalized immutable snapshot of balanced, single-currency lines.
 
     Amounts are integer minor units (cents for ZAR). This function performs
@@ -70,12 +71,12 @@ def validate_journal_lines(
         else:
             credit_total += amount
 
-        normalized.append({
+        normalized.append(MappingProxyType({
             "account_id": account_id.strip(),
             "side": side,
             "amount_minor": amount,
             "currency": normalized_currency,
-        })
+        }))
 
     if debit_total > MAX_AMOUNT_MINOR or credit_total > MAX_AMOUNT_MINOR:
         raise LedgerValidationError("Journal total is outside the supported amount range.")
