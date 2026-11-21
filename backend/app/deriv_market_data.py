@@ -83,7 +83,9 @@ def normalize_active_symbols_response(payload):
 
 def normalize_deriv_candle(symbol, candle, timeframe, source="deriv"):
     """Convert one Deriv candle response object into the common OHLCV format."""
-    get_instrument(symbol)
+    instrument = get_instrument(symbol)
+    if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+        raise ValueError("Only catalogued Deriv synthetic indices are supported.")
     if not isinstance(candle, dict):
         raise ValueError("Deriv candle must be an object.")
     epoch = candle.get("epoch")
