@@ -24,7 +24,34 @@ This is a simulation allowance, not a deposit, loan, investment, entitlement to 
 - No demo balance or profit may be withdrawn, transferred, converted to cash, or used to satisfy a real-money payment.
 - Keep demo funding configurable so the allowance can be changed without touching wallet records.
 
-## 3. Real-money wallet experience
+## 3. Currency choice and multi-currency balances
+
+Participants must be able to choose a preferred balance display currency from:
+- South African Rand — `ZAR`
+- US Dollar — `USD`
+- Euro — `EUR`
+- Pound Sterling — `GBP`
+- Kuwaiti Dinar — `KWD`
+
+The product must support two distinct capabilities in stages:
+
+**Stage A — display-currency preference**
+- Participants can select one preferred display currency in their profile or wallet view.
+- The displayed original wallet balance and its actual currency remain clearly visible.
+- If a balance is shown in another currency, label it as an indicative converted value and show the exchange-rate source and timestamp.
+- A display preference must never create a new currency balance, execute an FX conversion, change a transaction's original currency, or move/deduct funds.
+- If a reliable rate is unavailable or stale, show the original balance and explain that conversion is temporarily unavailable; do not invent or silently reuse a rate.
+
+**Stage B — separate multi-currency wallets**
+- The long-term wallet model should allow a participant to hold separate balances in each supported currency, subject to provider, legal and operational approval for that currency.
+- Each currency balance is its own ledger account and is never silently netted against another currency.
+- Deposits and withdrawals must preserve the actual transaction currency and provider settlement details.
+- Moving value between currencies is a separate, explicit FX transaction with a disclosed quote, rate, fees/spread, expiry and participant confirmation. Post both sides atomically with auditable linked journal entries; never implement FX as a display-only recalculation.
+- Availability of KWD (or any other currency) for actual deposits, custody, conversion or payouts must be confirmed with the chosen provider and reviewed before being offered as a funded wallet.
+
+Currency precision must follow the currency's minor-unit exponent. ZAR, USD, EUR and GBP use two decimal places; KWD uses three. Store monetary values as integer minor units for the transaction currency, never binary floating-point. Do not assume every currency has two decimal places.
+
+## 4. Real-money wallet experience
 
 When the financial segment is authorised and launched, participants should be able to view:
 
@@ -36,7 +63,7 @@ When the financial segment is authorised and launched, participants should be ab
 
 Never display simulated/demo amounts as real funds. Do not describe a pending deposit as settled cash.
 
-## 4. Deposits must remain independent
+## 5. Deposits must remain independent
 
 Deposits must use a supported payment-provider integration and an auditable transaction lifecycle.
 
@@ -47,7 +74,7 @@ Deposits must use a supported payment-provider integration and an auditable tran
 - Reconcile provider settlements against the internal ledger.
 - A failed or delayed payment must remain visible with a clear status and support reference; do not silently discard it.
 
-## 5. Withdrawals to banks
+## 6. Withdrawals to banks
 
 The product goal is broad South African bank coverage, not an unverified promise that every bank is supported from day one.
 
@@ -59,7 +86,7 @@ The product goal is broad South African bank coverage, not an unverified promise
 - Never mark a withdrawal paid until the provider confirms settlement.
 - Do not let demo trading or demo losses reduce the withdrawable wallet balance.
 
-## 6. Ledger and system architecture requirements
+## 7. Ledger and system architecture requirements
 
 Before implementation, design a dedicated real-money double-entry ledger with immutable journal entries. Wallet balances must be derived/reconciled from ledger entries, not edited as arbitrary numbers.
 
@@ -73,7 +100,7 @@ Minimum controls:
 - No admin action may silently manufacture, erase or transfer customer funds.
 - No trading engine, strategy, AI or paper-execution path may call wallet-credit/debit operations.
 
-## 7. Launch gates — no real-money activation before all are met
+## 8. Launch gates — no real-money activation before all are met
 
 1. South African legal and regulatory review confirms the exact business model, licences/authorisations and permitted activities.
 2. Payment-provider and banking partners approve the use case, settlement flow, supported banks, fees, limits, refunds and chargeback handling.
