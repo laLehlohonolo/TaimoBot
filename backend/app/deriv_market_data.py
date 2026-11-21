@@ -45,8 +45,10 @@ def normalize_active_symbols_response(payload):
         if not isinstance(symbol, str):
             continue
         symbol = symbol.strip().upper()
-        if symbol not in DERIV_SYNTHETIC_SYMBOLS or symbol in seen:
+        if symbol not in DERIV_SYNTHETIC_SYMBOLS:
             continue
+        if symbol in seen:
+            raise ValueError("Deriv active_symbols response contains a duplicate synthetic symbol.")
         instrument = get_instrument(symbol)
         pip_size = _finite_positive(record.get("pip_size"), "pip_size")
         market = record.get("market")
