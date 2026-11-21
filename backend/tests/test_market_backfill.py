@@ -155,6 +155,24 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone()["count"]
         self.assertEqual(stored, 0)
 
+    async def test_incomplete_nonempty_batch_is_held_for_gap_review(self):
+        client = FakeRangeClient([candle(3480), candle(3600)])
+        result = await run_backfill_batch(
+            self.connection, client, "1HZ100V", "M1",
+            batch_size=3, now_epoch=3600,
+        )
+        self.assertEqual(result["status"], "GAP_REVIEW")
+        self.assertEqual(result["next_end_epoch"], 3600)
+        self.assertFalse(result["complete"])
+        self.assertIn("1 expected candle(s) are missing", result["last_error"])
+        self.assertEqual(result["inserted_count"], 2)
+        checkpoint = get_backfill_checkpoint(self.connection, "1HZ100V", "M1")
+        self.assertEqual(checkpoint["batches_completed"], 1)
+        stored = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM market_observations"
+        ).fetchone()["count"]
+        self.assertEqual(stored, 2)
+
     async def test_backfill_persists_candles_and_moves_durable_cursor_backwards(self):
         client = FakeRangeClient([candle(3480), candle(3540), candle(3600)])
         result = await run_backfill_batch(
