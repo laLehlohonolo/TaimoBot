@@ -14,14 +14,18 @@ from app.market_observation_store import list_market_observations
 
 class FakeSocket:
     def __init__(self, response):
-        self.response = response
+        self.responses = list(response) if isinstance(response, list) else [response]
         self.sent = []
 
     async def send(self, payload):
         self.sent.append(json.loads(payload))
 
     async def recv(self):
-        return json.dumps(self.response)
+        if len(self.responses) > 1:
+            response = self.responses.pop(0)
+        else:
+            response = self.responses[0]
+        return json.dumps(response)
 
 
 class FakeSocketContext:
@@ -260,6 +264,19 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
                 )
         connection.close()
 
+
+    async def test_unmatched_response_is_ignored_before_matching_response(self):
+        matching = self.history_response()
+        socket = FakeSocket([
+            {"msg_type": "candles", "req_id": 999, "candles": []},
+            matching,
+        ])
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            candles = await DerivPublicMarketDataClient().fetch_candles(
+                "1HZ100V", "M1", count=2
+            )
+        self.assertEqual(len(candles), 2)
+        self.assertEqual(socket.sent[0]["req_id"], 2)
 
     async def test_unmatched_request_ids_do_not_extend_request_deadline(self):
         socket = FakeSocket({"msg_type": "candles", "req_id": 999, "candles": []})
