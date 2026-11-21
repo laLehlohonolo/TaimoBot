@@ -211,9 +211,6 @@ class MarketObservationStoreTests(unittest.TestCase):
         self.assertEqual(result["missing_intervals"], [])
         self.assertFalse(result["execution_eligible"])
 
-if __name__ == "__main__":
-    unittest.main()
-
 
     def test_quality_diagnostics_treat_exact_stale_threshold_as_current(self):
         from datetime import datetime, timezone
@@ -267,3 +264,7 @@ if __name__ == "__main__":
         self.assertEqual(len(result["missing_intervals"]), 50)
         self.assertEqual(result["status"], "GAPS_DETECTED")
         self.assertFalse(result["execution_eligible"])
+
+
+if __name__ == "__main__":
+    unittest.main()
