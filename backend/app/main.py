@@ -50,6 +50,7 @@ from .history import (
     get_account_history,
     get_trade_history
 )
+from .currency_preference_routes import router as currency_preference_router
 from .auth_routes import (
     router as auth_router,
     current_user,
@@ -95,6 +96,7 @@ app = FastAPI(
 )
 
 app.include_router(auth_router)
+app.include_router(currency_preference_router)
 
 # Cross-origin browser access is disabled unless exact trusted origins are configured.
 configure_cors(app, os.getenv("TAIMOBOT_CORS_ORIGINS", ""))
