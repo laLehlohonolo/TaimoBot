@@ -14,6 +14,36 @@ The administrator control centre must provide:
 
 The administrator must not be able to view plaintext passwords, password hashes, reset tokens, session tokens, payment credentials, or full sensitive identity documents through dashboard screens. Sensitive participant information must be minimised and permission-scoped. Every cross-participant inspection and export must be logged.
 
+## Participant registration and verification
+
+Participant registration must collect the following before an account is considered registration-complete:
+
+1. Legal first and last names, matching the participant's identity document.
+2. South African identity number for South African applicants. If TaimoBot later accepts non-South-African participants, use a country-specific identity-document flow rather than assuming every person has a South African ID number.
+3. Residential address, including the fields needed to identify the physical address. Do not treat a typed address alone as independently verified proof of residence.
+4. Email address, with a verification link sent to that exact registered address.
+
+Email verification flow:
+
+- Generate a cryptographically random, single-use email-verification token and send a HTTPS link to the registered email address.
+- Store only a secure hash of the token, its purpose, account reference, expiry and consumed timestamp.
+- Set a reasonable short expiry (target: 24 hours); allow a rate-limited resend that invalidates prior unused links.
+- Mark email as verified only after the link is opened and the token is atomically validated and consumed.
+- Keep the account in an unverified/pending state until email verification is complete. Use neutral responses and rate limits to reduce account enumeration and abuse.
+- Never send passwords, ID numbers or full identity documents in the verification email or URL.
+
+Identity and address checks:
+
+- Validate the ID number's format and checksum where applicable, but do not treat format validation as proof that the identity is genuine or belongs to the applicant.
+- Where identity or address verification is legally required for a feature, use an appropriately authorised identity-verification/KYC provider and/or documented manual review. Record the provider, check type, result, timestamp and reference, not unnecessary copies of sensitive source data.
+- Define acceptable proof-of-address documents, freshness rules and exception handling with the compliance provider/legal review before enabling the relevant financial features. A submitted residential address is a registration field; it is not automatically verified merely because it was entered.
+- Keep separate status fields for email verification, identity verification and address verification. Do not collapse them into one generic "verified" flag.
+- Until checks are complete, restrict access to the features that require verification. Do not enable real-money deposits or withdrawals based only on email verification.
+- Encrypt sensitive identity data at rest and in transit, mask it in ordinary screens and logs, restrict access by role, audit every authorised view, and apply a documented retention/deletion schedule under applicable privacy law. Never expose full ID numbers in administrator analytics.
+- Obtain and record appropriate privacy notices and lawful processing grounds before collecting identity data. Do not collect more data than the specific product and legal purpose requires.
+
+Registration status should therefore distinguish at least: EMAIL_PENDING, EMAIL_VERIFIED, IDENTITY_PENDING, IDENTITY_VERIFIED, ADDRESS_PENDING, ADDRESS_VERIFIED, REVIEW_REQUIRED, and REJECTED. Status transitions must be auditable and must not be self-assigned by the participant or frontend.
+
 ## Premium and Standard tiers
 
 Every participant record must have one explicit subscription tier: STANDARD or PREMIUM. Tier entitlements must be centrally defined and enforced by the backend, not trusted from frontend labels. The administrator can view tier membership and aggregate performance by tier. Any future tier change must be an authenticated, audited administrative action with effective time and reason. Tier status must not change a participant's actual wallet currency, money ownership, risk limits, or trading ledger.
