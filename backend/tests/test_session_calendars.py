@@ -62,6 +62,36 @@ class SessionCalendarTests(unittest.TestCase):
         self.assertFalse(result["backtest_eligible"])
         self.assertFalse(result["execution_eligible"])
 
+    def test_approved_calendar_waits_for_separate_integration_review(self):
+        approved = validate_session_calendar_record(self.valid_record())
+        approved.update({
+            "status": "APPROVED",
+            "source_verified": True,
+            "admin_reviewed": True,
+            "calendar_id": "calendar-approved-version-1",
+        })
+        result = assess_session_calendar_readiness("XAUUSD", approved)
+        self.assertEqual(result["status"], "APPROVED_PENDING_INTEGRATION_REVIEW")
+        self.assertEqual(result["session_calendar_id"], "calendar-approved-version-1")
+        self.assertFalse(result["session_adjusted_coverage_available"])
+        self.assertFalse(result["backtest_eligible"])
+        self.assertFalse(result["execution_eligible"])
+
+    def test_legacy_verified_status_cannot_activate_a_calendar(self):
+        legacy = validate_session_calendar_record(self.valid_record())
+        legacy.update({
+            "status": "VERIFIED",
+            "source_verified": True,
+            "admin_reviewed": True,
+            "calendar_id": "legacy-calendar",
+        })
+        result = assess_session_calendar_readiness("XAUUSD", legacy)
+        self.assertEqual(result["status"], "PENDING_VERIFICATION")
+        self.assertIsNone(result["session_calendar_id"])
+        self.assertFalse(result["session_adjusted_coverage_available"])
+        self.assertFalse(result["backtest_eligible"])
+        self.assertFalse(result["execution_eligible"])
+
     def test_rejects_empty_weekly_schedule(self):
         record = self.valid_record()
         record["weekly_sessions"] = []
