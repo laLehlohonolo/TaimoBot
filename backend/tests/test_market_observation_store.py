@@ -213,3 +213,57 @@ class MarketObservationStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_quality_diagnostics_treat_exact_stale_threshold_as_current(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import inspect_market_observation_quality
+
+        record = self.valid_record()
+        record["source"] = "deriv"
+        record["timestamp"] = "2026-11-21T12:00:00+00:00"
+        save_market_observation(self.connection, record)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1",
+            now=datetime(2026, 11, 21, 12, 2, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["age_seconds"], 120)
+        self.assertEqual(result["stale_after_seconds"], 120)
+        self.assertFalse(result["stale"])
+        self.assertEqual(result["status"], "FRESH")
+
+    def test_quality_diagnostics_mark_series_stale_immediately_after_threshold(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import inspect_market_observation_quality
+
+        record = self.valid_record()
+        record["source"] = "deriv"
+        record["timestamp"] = "2026-11-21T12:00:00+00:00"
+        save_market_observation(self.connection, record)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1",
+            now=datetime(2026, 11, 21, 12, 2, 0, 1, tzinfo=timezone.utc),
+        )
+        self.assertGreater(result["age_seconds"], result["stale_after_seconds"])
+        self.assertTrue(result["stale"])
+        self.assertEqual(result["status"], "STALE")
+
+    def test_quality_diagnostics_cap_gap_details_without_truncating_total_counts(self):
+        from datetime import datetime, timezone, timedelta
+        from app.market_observation_store import inspect_market_observation_quality
+
+        start = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+        for index in range(102):
+            record = self.valid_record()
+            record["source"] = "deriv"
+            record["timestamp"] = (start + timedelta(minutes=index * 2)).isoformat()
+            save_market_observation(self.connection, record)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1",
+            now=start + timedelta(minutes=204),
+        )
+        self.assertEqual(result["missing_interval_count"], 101)
+        self.assertEqual(result["missing_candle_count"], 101)
+        self.assertEqual(len(result["missing_intervals"]), 50)
+        self.assertEqual(result["status"], "GAPS_DETECTED")
+        self.assertFalse(result["execution_eligible"])
