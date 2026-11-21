@@ -54,15 +54,24 @@ def _calendar_response(row):
 @router.post("", status_code=201)
 def submit_calendar(request: CalendarSubmission, user=Depends(current_user)):
     require_admin(user)
+    provider = request.provider.strip().casefold()
+    symbol = request.symbol.strip().upper()
     with get_connection() as connection:
+        # Serialize version allocation so concurrent submissions cannot reuse a version.
+        connection.execute("BEGIN IMMEDIATE")
         latest = connection.execute(
             """SELECT MAX(version) AS version FROM brain_session_calendars
                WHERE provider = ? AND symbol = ?""",
-            (request.provider.strip(), request.symbol.strip().upper()),
+            (provider, symbol),
         ).fetchone()
         version = (latest["version"] or 0) + 1
         raw = request.model_dump()
-        raw.update({"version": version, "reviewed_by": user["user_id"]})
+        raw.update({
+            "provider": provider,
+            "symbol": symbol,
+            "version": version,
+            "reviewed_by": user["user_id"],
+        })
         try:
             record = validate_session_calendar_record(raw)
         except ValueError as error:
