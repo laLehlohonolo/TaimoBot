@@ -122,6 +122,8 @@ jobs:
         run: python scripts/run_locked_preflight_final_lock_races.py
       - name: Run twenty approved restore preflight final-fence checks sequentially
         run: python scripts/run_approved_preflight_final_fence.py
+      - name: Run twenty restore approval transaction race checks sequentially
+        run: python scripts/run_restore_approval_transaction_races.py
       - name: Run twenty live database symlink preflight checks sequentially
         run: python scripts/run_live_database_symlink_preflight.py
       - name: Run backend tests
