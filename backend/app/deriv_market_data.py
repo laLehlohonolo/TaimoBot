@@ -95,7 +95,10 @@ def normalize_deriv_candle(symbol, candle, timeframe, source="deriv"):
         raise ValueError("Deriv candle epoch must be numeric.")
     if not math.isfinite(float(epoch)) or epoch < 0:
         raise ValueError("Deriv candle epoch must be a finite non-negative number.")
-    timestamp = datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat()
+    try:
+        timestamp = datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError("Deriv candle epoch is outside the supported timestamp range.") from exc
     return normalize_market_observation({
         "symbol": symbol,
         "timeframe": timeframe,
