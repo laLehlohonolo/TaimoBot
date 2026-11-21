@@ -98,6 +98,35 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         self.assertTrue(body["read_only"])
         self.assertFalse(body["execution_triggered"])
 
+    def test_market_data_quality_is_admin_only_and_never_enables_research_or_execution(self):
+        params = {"symbol": "R_10", "timeframe": "M1"}
+        self.assertEqual(
+            self.participant_client.get(
+                "/admin/brain/strategy-candidates/market-data-quality",
+                params=params,
+            ).status_code,
+            403,
+        )
+        response = self.admin_client.get(
+            "/admin/brain/strategy-candidates/market-data-quality",
+            params=params,
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "NO_DATA")
+        self.assertTrue(body["stale"])
+        self.assertFalse(body["provenance_verified"])
+        self.assertFalse(body["eligible_for_backtest"])
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["signals_generated"])
+        self.assertFalse(body["execution_triggered"])
+
+        unsupported = self.admin_client.get(
+            "/admin/brain/strategy-candidates/market-data-quality",
+            params={"symbol": "XAUUSD", "timeframe": "M1"},
+        )
+        self.assertEqual(unsupported.status_code, 400)
+
     def test_admin_can_create_review_and_reject_candidate(self):
         created = self.admin_client.post(
             "/admin/brain/strategy-candidates", json=self.candidate_payload()
