@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from .auth_routes import current_user
 from .database import get_connection
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/participant", tags=["participant preferences"])
 
 class DisplayCurrencySelectionRequest(BaseModel):
     currency: Literal["ZAR", "USD", "EUR", "GBP", "KWD"]
-    confirmed: bool
+    confirmed: StrictBool
 
 
 @router.get("/currency-preference")
