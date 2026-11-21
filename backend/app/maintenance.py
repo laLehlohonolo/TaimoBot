@@ -1953,18 +1953,83 @@ def inspect_recovery_candidates(backup_dir: Path | None = None) -> dict:
 
 
 def verify_restore_candidate(backup_path: Path, staging_path: Path) -> dict:
-    """Restore into an isolated staging DB and verify; never replace the live DB."""
+    """Verify a descriptor-pinned source snapshot in isolated staging; never replace live DB."""
     source = Path(backup_path)
     staging = Path(staging_path)
-    if not source.is_file():
-        raise FileNotFoundError(f"Backup file not found: {source}")
-
     staging.parent.mkdir(parents=True, exist_ok=True)
     staging.unlink(missing_ok=True)
+
+    snapshot = staging.with_name(f".{staging.name}.{uuid4().hex}.source.tmp")
+    source_fd = None
+    snapshot_fd = None
+
+    def file_identity(metadata):
+        return (
+            metadata.st_dev, metadata.st_ino, metadata.st_mode,
+            metadata.st_nlink, metadata.st_size,
+            metadata.st_mtime_ns, metadata.st_ctime_ns,
+        )
+
     try:
-        with sqlite3.connect(str(source), timeout=30) as backup:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        source_fd = os.open(str(source), flags)
+        source_before = os.fstat(source_fd)
+        if not stat.S_ISREG(source_before.st_mode):
+            raise OSError("Restore source is not a regular non-symlink file.")
+        source_identity = file_identity(source_before)
+        path_before = os.stat(source, follow_symlinks=False)
+        if file_identity(path_before) != source_identity:
+            raise OSError("Restore source path changed before snapshot.")
+
+        snapshot_flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        snapshot_fd = os.open(str(snapshot), snapshot_flags, 0o600)
+        bytes_copied = 0
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(snapshot_fd, view)
+                if written <= 0:
+                    raise OSError("Restore source snapshot write made no progress.")
+                view = view[written:]
+            bytes_copied += len(chunk)
+        os.fsync(snapshot_fd)
+
+        source_after = os.fstat(source_fd)
+        path_after = os.stat(source, follow_symlinks=False)
+        if (
+            file_identity(source_after) != source_identity
+            or file_identity(path_after) != source_identity
+            or bytes_copied != source_before.st_size
+        ):
+            raise OSError("Restore source changed while its isolated snapshot was created.")
+
+        os.close(snapshot_fd)
+        snapshot_fd = None
+        snapshot_digest = sha256_file(snapshot)
+
+        # SQLite reads only the private, descriptor-derived snapshot. The
+        # caller's source path is never reopened by SQLite during staging.
+        with sqlite3.connect(str(snapshot), timeout=30) as backup:
             with sqlite3.connect(str(staging), timeout=30) as candidate:
                 backup.backup(candidate)
+        if sha256_file(snapshot) != snapshot_digest:
+            raise OSError("Isolated restore source snapshot changed during SQLite verification.")
+
+        source_after_sqlite = os.fstat(source_fd)
+        path_after_sqlite = os.stat(source, follow_symlinks=False)
+        if (
+            file_identity(source_after_sqlite) != source_identity
+            or file_identity(path_after_sqlite) != source_identity
+        ):
+            raise OSError("Restore source changed while SQLite verified the isolated snapshot.")
+
         with sqlite3.connect(str(staging), timeout=30) as candidate:
             integrity = candidate.execute("PRAGMA integrity_check").fetchone()[0]
             if integrity != "ok":
@@ -1972,6 +2037,12 @@ def verify_restore_candidate(backup_path: Path, staging_path: Path) -> dict:
     except Exception:
         staging.unlink(missing_ok=True)
         raise
+    finally:
+        if snapshot_fd is not None:
+            os.close(snapshot_fd)
+        if source_fd is not None:
+            os.close(source_fd)
+        snapshot.unlink(missing_ok=True)
 
     return {
         "status": "RESTORE_CANDIDATE_VERIFIED",
