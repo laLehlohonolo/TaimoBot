@@ -653,3 +653,35 @@ class StrategyLabSchemaTests(unittest.TestCase):
             json={"confirm_collection": True, "batch_size": 10},
         )
         self.assertEqual(unsupported.status_code, 400)
+
+
+    def test_backfill_review_history_is_admin_only_and_read_only(self):
+        with database.get_connection() as connection:
+            admin = connection.execute(
+                "SELECT user_id FROM users WHERE email = ?",
+                ("strategy-admin@taimobot.local",),
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO market_backfill_review_audit (
+                    review_id, symbol, timeframe, decision, rationale, decided_by
+                ) VALUES (
+                    'review_history_test', '1HZ100V', 'M1', 'RETRY_SAME_RANGE',
+                    'Provider recovery was checked; retry the same interval.', ?
+                )
+                """,
+                (admin["user_id"],),
+            )
+        path = "/admin/market-backfills/1HZ100V/M1/reviews"
+        self.assertEqual(self.participant_client.get(path).status_code, 403)
+        response = self.admin_client.get(path)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["reviews"][0]["decision"], "RETRY_SAME_RANGE")
+        self.assertEqual(
+            body["reviews"][0]["rationale"],
+            "Provider recovery was checked; retry the same interval.",
+        )
+        self.assertFalse(body["backtest_eligible"])
+        self.assertFalse(body["execution_triggered"])
