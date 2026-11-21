@@ -85,6 +85,46 @@ class MarketObservationStoreTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     list_market_observations(self.connection, limit=limit)
 
+    def test_listing_is_newest_first_independent_of_ingestion_order(self):
+        timestamps = (
+            "2026-11-21T10:15:00+02:00",
+            "2026-11-21T10:17:00+02:00",
+            "2026-11-21T10:16:00+02:00",
+        )
+        for timestamp in timestamps:
+            record = self.valid_record()
+            record["timestamp"] = timestamp
+            save_market_observation(self.connection, record)
+        self.connection.commit()
+
+        rows = list_market_observations(
+            self.connection, symbol="1HZ100V", timeframe="M1", limit=10
+        )
+        self.assertEqual(
+            [row["timestamp"] for row in rows],
+            [
+                "2026-11-21T08:17:00+00:00",
+                "2026-11-21T08:16:00+00:00",
+                "2026-11-21T08:15:00+00:00",
+            ],
+        )
+        self.assertTrue(all(not row["execution_eligible"] for row in rows))
+
+    def test_timezone_equivalent_candles_share_one_persisted_timestamp(self):
+        first = self.valid_record()
+        second = self.valid_record()
+        first["timestamp"] = "2026-11-21T10:15:00+02:00"
+        second["timestamp"] = "2026-11-21T08:15:00Z"
+
+        saved_first = save_market_observation(self.connection, first)
+        saved_second = save_market_observation(self.connection, second)
+        self.connection.commit()
+
+        self.assertTrue(saved_first["inserted"])
+        self.assertFalse(saved_second["inserted"])
+        self.assertEqual(saved_first["timestamp"], saved_second["timestamp"])
+        self.assertEqual(len(list_market_observations(self.connection)), 1)
+
     def test_rejects_unsupported_timeframe_filter(self):
         with self.assertRaisesRegex(ValueError, "timeframe"):
             list_market_observations(self.connection, timeframe="M2")
