@@ -112,12 +112,23 @@ def validate_session_calendar_record(record):
             raise ValueError("weekday must be an integer from 0 (Monday) to 6 (Sunday).")
         start = _clock_minutes(session.get("start"), "weekly_sessions.start")
         end = _clock_minutes(session.get("end"), "weekly_sessions.end")
-        if start >= end:
-            raise ValueError("Weekly sessions must be same-day intervals with start before end.")
-        for prior_start, prior_end in occupied[day]:
-            if start < prior_end and prior_start < end:
-                raise ValueError("Weekly sessions cannot overlap on the same weekday.")
-        occupied[day].append((start, end))
+        if start == end:
+            raise ValueError("Weekly session start and end cannot be equal.")
+        # Provider sessions may cross midnight. Split overnight intervals into
+        # day-local segments for overlap checks, including Sunday-to-Monday.
+        segments = (
+            [(day, start, end)]
+            if start < end
+            else [(day, start, 1440)] + (
+                [((day + 1) % 7, 0, end)] if end > 0 else []
+            )
+        )
+        for segment_day, segment_start, segment_end in segments:
+            for prior_start, prior_end in occupied[segment_day]:
+                if segment_start < prior_end and prior_start < segment_end:
+                    raise ValueError("Weekly sessions cannot overlap on the same weekday.")
+        for segment_day, segment_start, segment_end in segments:
+            occupied[segment_day].append((segment_start, segment_end))
         normalized_weekly.append({
             "weekday": day, "start": session["start"], "end": session["end"],
         })
