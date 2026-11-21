@@ -2052,6 +2052,29 @@ class PaperTradingTests(unittest.TestCase):
                     )
 
 
+    def test_instrument_readiness_endpoint_separates_catalogue_from_execution(self):
+        response = self.client.get("/instruments")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        instruments = {item["symbol"]: item for item in payload["instruments"]}
+        self.assertEqual(
+            instruments["XAUUSD"]["paper_execution_status"],
+            "PAPER_EXECUTION_ENABLED",
+        )
+        for symbol in ("EURUSD", "GBPUSD"):
+            self.assertEqual(
+                instruments[symbol]["paper_execution_status"],
+                "OBSERVATION_ONLY",
+            )
+        for item in instruments.values():
+            self.assertEqual(item["market_data_status"], "NOT_CONNECTED")
+            self.assertEqual(
+                item["broker_specifications_status"], "NOT_CONFIGURED"
+            )
+
+
     def test_direct_order_rejects_observation_only_symbol_without_reserving_risk(self):
         with self.assertRaisesRegex(ValueError, "observation-only"):
             self.open_trade("OBSERVATION-ONLY-EUR", symbol="EURUSD")
