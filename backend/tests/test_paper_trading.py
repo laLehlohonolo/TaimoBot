@@ -346,7 +346,7 @@ class PaperTradingTests(unittest.TestCase):
             entry_price=4000,
             stop_loss=3990,
             risk_percent=1.0,
-            symbol="EURUSD"
+            symbol="XAUUSD"
         )
 
         self.assertEqual(result["risk_profile"], "STARTER")
@@ -473,7 +473,7 @@ class PaperTradingTests(unittest.TestCase):
             entry_price=4000,
             stop_loss=3990,
             risk_percent=1.0,
-            symbol="EURUSD"
+            symbol="XAUUSD"
         )
 
         self.assertEqual(
@@ -649,7 +649,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(resumed.status_code, 200)
         self.assertFalse(self.client.get("/safety/status").json()["emergency_stop"])
 
-    def test_api_accepts_a_valid_instrument_symbol(self):
+    def test_api_rejects_observation_only_instrument(self):
         response = self.client.post(
             "/trades",
             json={
@@ -662,11 +662,8 @@ class PaperTradingTests(unittest.TestCase):
                 "risk_percent": 0.5
             }
         )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["symbol"], "EURUSD")
-        self.assertEqual(response.json()["risk_percent"], 0.5)
-        self.assertEqual(response.json()["risk_amount"], 50)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("observation-only", response.json()["detail"])
 
     def test_api_cannot_override_assigned_risk_profile(self):
         response = self.client.post(
@@ -674,7 +671,7 @@ class PaperTradingTests(unittest.TestCase):
             json={
                 "account_id": "TEST-001",
                 "client_order_id": "API-RISK-OVERRIDE",
-                "symbol": "EURUSD",
+                "symbol": "XAUUSD",
                 "side": "BUY",
                 "entry_price": 4000,
                 "stop_loss": 3990,
@@ -2059,6 +2056,20 @@ class PaperTradingTests(unittest.TestCase):
                         risk_percent=risk_percent,
                         side="BUY",
                     )
+
+
+    def test_direct_order_rejects_observation_only_symbol_without_reserving_risk(self):
+        with self.assertRaisesRegex(ValueError, "observation-only"):
+            self.open_trade("OBSERVATION-ONLY-EUR", symbol="EURUSD")
+        self.assertEqual(self.client.get("/accounts/TEST-001/risk").json()["open_positions"], 0)
+
+    def test_position_group_rejects_observation_only_symbol(self):
+        response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "GBPUSD", "side": "BUY"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("observation-only", response.json()["detail"])
 
 
 if __name__ == "__main__":
