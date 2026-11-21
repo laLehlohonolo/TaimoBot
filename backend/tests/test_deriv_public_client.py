@@ -184,7 +184,7 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
         connection.row_factory = sqlite3.Row
         ensure_market_observation_schema(connection)
         with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
-            with self.assertRaisesRegex(ValueError, "not currently active"):
+            with self.assertRaisesRegex(ValueError, "does not currently report this symbol as active"):
                 await DerivPublicMarketDataClient().discover_and_store_candles(
                     connection, "1HZ100V", "M1", 1
                 )
