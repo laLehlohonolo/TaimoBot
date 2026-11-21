@@ -128,6 +128,53 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row["execution_eligible"] is False for row in rows))
         connection.close()
 
+    async def test_repeat_sync_counts_existing_candles_as_duplicates(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        ensure_market_observation_schema(connection)
+        contexts = []
+        for _ in range(2):
+            contexts.extend([
+                FakeSocketContext(FakeSocket({
+                    "msg_type": "active_symbols", "req_id": 1,
+                    "active_symbols": [self.active_record()],
+                })),
+                FakeSocketContext(FakeSocket(self.history_response())),
+            ])
+        with patch("app.deriv_public_client.websockets.connect", side_effect=contexts):
+            client = DerivPublicMarketDataClient()
+            await client.discover_and_store_candles(connection, "1HZ100V", "M1", 2)
+            second = await client.discover_and_store_candles(connection, "1HZ100V", "M1", 2)
+        self.assertEqual(second["inserted_count"], 0)
+        self.assertEqual(second["duplicate_count"], 2)
+        self.assertEqual(len(list_market_observations(connection)), 2)
+        connection.close()
+
+    async def test_database_failure_rolls_back_entire_candle_batch(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        ensure_market_observation_schema(connection)
+        connection.execute("""
+            CREATE TRIGGER reject_second_deriv_candle
+            BEFORE INSERT ON market_observations
+            WHEN NEW.observed_at = '2026-11-21T11:36:00+00:00'
+            BEGIN SELECT RAISE(ABORT, 'test batch failure'); END;
+        """)
+        contexts = [
+            FakeSocketContext(FakeSocket({
+                "msg_type": "active_symbols", "req_id": 1,
+                "active_symbols": [self.active_record()],
+            })),
+            FakeSocketContext(FakeSocket(self.history_response())),
+        ]
+        with patch("app.deriv_public_client.websockets.connect", side_effect=contexts):
+            with self.assertRaises(sqlite3.IntegrityError):
+                await DerivPublicMarketDataClient().discover_and_store_candles(
+                    connection, "1HZ100V", "M1", 2
+                )
+        self.assertEqual(list_market_observations(connection), [])
+        connection.close()
+
     async def test_rejects_catalogued_symbol_not_active_on_deriv(self):
         socket = FakeSocket({
             "msg_type": "active_symbols", "req_id": 1,
