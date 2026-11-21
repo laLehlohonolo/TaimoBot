@@ -71,6 +71,7 @@ from .safety import (
 )
 from .instruments import list_instruments, EXECUTION_ENABLED_SYMBOLS
 from .market_observation_store import list_market_observations, inspect_market_observation_quality
+from .market_backfill import run_backfill_batch_with_connection_factory
 from .deriv_public_client import DerivPublicMarketDataClient
 from .market_observations import SUPPORTED_TIMEFRAMES
 from .instruments import get_instrument
@@ -205,6 +206,11 @@ class StrategyKnowledgeRequest(BaseModel):
     entry_logic: str = Field(min_length=10, max_length=2000)
     exit_logic: str = Field(min_length=10, max_length=2000)
     risk_notes: str = Field(min_length=10, max_length=2000)
+
+
+class BackfillRunRequest(BaseModel):
+    confirm_collection: StrictBool
+    batch_size: StrictInt = Field(default=100, ge=2, le=500)
 
 
 class BackfillReviewRequest(BaseModel):
@@ -1154,6 +1160,49 @@ def strategy_details(strategy_id: str, user=Depends(current_user)):
     if strategy is None:
         raise HTTPException(status_code=404, detail="Strategy not found.")
     return strategy
+
+
+@app.post("/admin/market-backfills/{symbol}/{timeframe}/run")
+async def run_admin_market_backfill(
+    symbol: str,
+    timeframe: str,
+    request: BackfillRunRequest,
+    user=Depends(current_user),
+):
+    """Collect and persist one bounded historical batch for admin research only."""
+    require_admin(user)
+    if request.confirm_collection is not True:
+        raise HTTPException(status_code=400, detail="Explicit collection confirmation is required.")
+    try:
+        instrument = get_instrument(symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices support historical backfill.")
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported backfill timeframe.")
+        result = await run_backfill_batch_with_connection_factory(
+            get_connection,
+            DerivPublicMarketDataClient(),
+            instrument["symbol"],
+            timeframe,
+            batch_size=request.batch_size,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except TimeoutError as error:
+        raise HTTPException(status_code=504, detail="Deriv historical data request timed out.") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail="Backfill batch failed safely; inspect checkpoint before retrying.") from error
+    except sqlite3.OperationalError as error:
+        raise HTTPException(status_code=503, detail="Market database is temporarily unavailable.") from error
+    return {
+        **result,
+        "provider": "Deriv",
+        "operator_triggered": True,
+        "read_only": True,
+        "backtest_eligible": False,
+        "signals_generated": False,
+        "execution_triggered": False,
+    }
 
 
 @app.get("/admin/market-backfills")
