@@ -62,6 +62,31 @@ class SessionCalendarTests(unittest.TestCase):
         self.assertFalse(result["backtest_eligible"])
         self.assertFalse(result["execution_eligible"])
 
+    def test_rejects_empty_weekly_schedule(self):
+        record = self.valid_record()
+        record["weekly_sessions"] = []
+        with self.assertRaisesRegex(ValueError, "non-empty list"):
+            validate_session_calendar_record(record)
+
+    def test_untrusted_verification_claims_are_discarded(self):
+        record = self.valid_record()
+        record.update({
+            "status": "VERIFIED",
+            "source_verified": True,
+            "admin_reviewed": True,
+            "calendar_id": "forged-calendar-id",
+        })
+        validated = validate_session_calendar_record(record)
+        self.assertEqual(validated["status"], "PENDING_SOURCE_VERIFICATION")
+        self.assertFalse(validated["source_verified"])
+        self.assertFalse(validated["admin_reviewed"])
+        readiness = assess_session_calendar_readiness("XAUUSD", validated)
+        self.assertEqual(readiness["status"], "PENDING_VERIFICATION")
+        self.assertIsNone(readiness["session_calendar_id"])
+        self.assertFalse(readiness["session_adjusted_coverage_available"])
+        self.assertFalse(readiness["backtest_eligible"])
+        self.assertFalse(readiness["execution_eligible"])
+
     def test_rejects_unknown_timezone(self):
         record = self.valid_record()
         record["timezone"] = "Mars/Olympus_Mons"
