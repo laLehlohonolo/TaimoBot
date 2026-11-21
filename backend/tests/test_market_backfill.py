@@ -54,15 +54,16 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
         persisted = get_backfill_checkpoint(self.connection, "1HZ100V", "M1")
         self.assertEqual(persisted["next_end_epoch"], 3420)
 
-    async def test_backfill_marks_complete_only_after_reaching_epoch_zero(self):
+    async def test_backfill_requires_review_at_epoch_zero_instead_of_claiming_complete(self):
         client = FakeRangeClient([candle(0), candle(60), candle(120)])
         result = await run_backfill_batch(
             self.connection, client, "1HZ100V", "M1",
             batch_size=3, now_epoch=120,
         )
-        self.assertEqual(result["status"], "COMPLETE")
-        self.assertIsNone(result["next_end_epoch"])
-        self.assertTrue(result["complete"])
+        self.assertEqual(result["status"], "GAP_REVIEW")
+        self.assertEqual(result["next_end_epoch"], 120)
+        self.assertFalse(result["complete"])
+        self.assertIn("coverage requires review", result["last_error"])
         self.assertEqual(result["earliest_observed_at"], candle(0)["timestamp"])
 
     async def test_empty_nonzero_range_is_held_for_gap_review_not_assumed_inception(self):
@@ -87,6 +88,15 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["complete"])
         self.assertEqual(len(client.calls), 1)
+
+    async def test_rejects_boolean_and_non_integer_now_epoch(self):
+        for invalid in (True, 120.5, "120", -1):
+            with self.subTest(now_epoch=invalid):
+                with self.assertRaisesRegex(ValueError, "integer epoch"):
+                    await run_backfill_batch(
+                        self.connection, FakeRangeClient([]), "1HZ100V", "M1",
+                        batch_size=3, now_epoch=invalid,
+                    )
 
     async def test_rejects_unbounded_or_invalid_batch_size(self):
         with self.assertRaisesRegex(ValueError, "batch_size"):
