@@ -2201,6 +2201,36 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+    def test_deriv_sync_reports_inserted_and_duplicate_counts_from_persistence(self):
+        candles = [
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:15:00+00:00",
+             "open": 1000, "high": 1002, "low": 999, "close": 1001, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:16:00+00:00",
+             "open": 1001, "high": 1003, "low": 1000, "close": 1002, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+        ]
+        persisted = [
+            {"inserted": True, "symbol": "1HZ100V"},
+            {"inserted": False, "symbol": "1HZ100V"},
+        ]
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(return_value=candles)
+            client_class.return_value.persist_candles = Mock(return_value=persisted)
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["received_count"], 2)
+        self.assertEqual(payload["inserted_count"], 1)
+        self.assertEqual(payload["duplicate_count"], 1)
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["signals_generated"])
+
+
     def test_deriv_sync_provider_timeout_returns_gateway_timeout_without_persisting(self):
         with patch("app.main.DerivPublicMarketDataClient") as client_class:
             client_class.return_value.collect_candles = AsyncMock(
