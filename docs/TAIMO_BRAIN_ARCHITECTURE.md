@@ -127,3 +127,14 @@ This document is a product and engineering specification. It does not claim that
 ## Non-negotiable principle
 
 **Taimo Brain may inform every layer, but it must never become more powerful than the safeguards that protect TaimoBot and its participants.** It recommends; deterministic controls enforce; the administrator authorizes governed improvements.
+
+
+## Strategy Intelligence Lab
+
+Taimo Brain includes a dedicated **Strategy Intelligence Lab** for independently inventing, critically challenging, testing, comparing, and recommending strategy hypotheses. It may explore conventional and unconventional statistical, mathematical, behavioural, market-structure, volatility, multi-timeframe and hybrid approaches. Every hypothesis must be falsifiable, explainable, reproducible and tested without look-ahead leakage.
+
+The initial discovery challenge is seven calendar days after the required historical data, experiment records and evaluation harness are operational. It must end with an administrator-only report, including rejected and inconclusive ideas; seven days is not proof of profitability. The long-term planning aspiration is approximately two or three materially distinct candidates per year, never a forced quota. A candidate may be combined with others only through a separately tested composite strategy with conflict handling, correlation/exposure analysis, net-of-cost comparisons and independent approval.
+
+The Lab must preserve experiment history and challenge every proposal adversarially: state its hypothesis, supporting and opposing evidence, failure conditions, uncertainty, baseline comparison and what would falsify it. It must never claim sentience, guaranteed profits, or loss-free trading. Strategy research remains paper/shadow only; XAUUSD remains the only currently execution-enabled instrument, other instruments remain observation-only, and the deterministic backend 1% maximum risk boundary remains unchanged.
+
+All strategy research and candidate reports are administrator-only. Brain may propose and test candidates but cannot approve its own work or deploy directly. The full research protocol, seven-day plan, evaluation gates, composite-strategy requirements and truthful implementation status are specified in [TAIMO_STRATEGY_INTELLIGENCE_LAB.md](TAIMO_STRATEGY_INTELLIGENCE_LAB.md). Do not start the seven-day challenge clock until the data and reproducible test infrastructure are ready.
