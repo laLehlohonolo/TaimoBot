@@ -1893,5 +1893,45 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(balance, 10000)
 
 
+    def test_position_size_rejects_overflowing_quantities(self):
+        # Finite inputs can still overflow during division when the stop
+        # distance is extremely small relative to the risk amount.
+        cases = (
+            (1e308, 1e-308, 5e-309, 0.25),
+            (1e308, 1e-308, 1e-309, 0.25),
+            (1e308, 1e-307, 1e-308, 0.50),
+            (1e308, 1e-306, 1e-307, 1.00),
+            (9e307, 1e-308, 5e-309, 0.25),
+            (8e307, 1e-308, 1e-309, 0.25),
+            (7e307, 1e-307, 1e-308, 0.50),
+            (6e307, 1e-306, 1e-307, 1.00),
+            (5e307, 1e-308, 5e-309, 0.25),
+            (4e307, 1e-308, 1e-309, 0.25),
+            (3e307, 1e-307, 1e-308, 0.50),
+            (2e307, 1e-306, 1e-307, 1.00),
+            (1e308, 2e-308, 1e-308, 0.25),
+            (1e308, 2e-308, 2e-309, 0.25),
+            (1e308, 2e-307, 2e-308, 0.50),
+            (1e308, 2e-306, 2e-307, 1.00),
+            (9e307, 3e-308, 1e-308, 0.25),
+            (8e307, 3e-308, 3e-309, 0.25),
+            (7e307, 3e-307, 3e-308, 0.50),
+            (6e307, 3e-306, 3e-307, 1.00),
+        )
+        for balance, entry, stop, risk_percent in cases:
+            with self.subTest(
+                balance=balance, entry=entry, stop=stop,
+                risk_percent=risk_percent
+            ):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=balance,
+                        entry_price=entry,
+                        stop_loss=stop,
+                        risk_percent=risk_percent,
+                        side="BUY",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
