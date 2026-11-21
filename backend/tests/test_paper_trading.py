@@ -2445,5 +2445,95 @@ class PaperTradingTests(unittest.TestCase):
         self.assertFalse(quality.json()["signals_generated"])
 
 
+    def test_deriv_sync_uses_public_client_normalization_before_database_and_api(self):
+        import json
+
+        class Socket:
+            def __init__(self, response):
+                self.response = response
+                self.sent = []
+
+            async def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            async def recv(self):
+                return json.dumps(self.response)
+
+        class SocketContext:
+            def __init__(self, socket):
+                self.socket = socket
+
+            async def __aenter__(self):
+                return self.socket
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        latest = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        first = latest - timedelta(minutes=1)
+        active_socket = Socket({
+            "msg_type": "active_symbols", "req_id": 1,
+            "active_symbols": [{
+                "underlying_symbol": "1HZ100V",
+                "underlying_symbol_name": "Volatility 100 (1s) Index",
+                "market": "synthetic_index", "subgroup": "synthetics",
+                "submarket": "random_index", "pip_size": 2,
+                "exchange_is_open": 1, "is_trading_suspended": 0,
+                "trade_count": 0, "underlying_symbol_type": "stockindex",
+            }],
+        })
+        history_socket = Socket({
+            "msg_type": "candles", "req_id": 2,
+            "candles": [
+                {"epoch": int(first.timestamp()), "open": 1000, "high": 1002, "low": 999, "close": 1001},
+                {"epoch": int(latest.timestamp()), "open": 1001, "high": 1003, "low": 1000, "close": 1002},
+            ],
+        })
+
+        with patch(
+            "app.deriv_public_client.websockets.connect",
+            side_effect=[SocketContext(active_socket), SocketContext(history_socket)],
+        ):
+            sync = self.client.post(
+                "/market-observations/deriv-sync",
+                json={
+                    "symbol": "1HZ100V", "timeframe": "M1", "count": 2,
+                    "confirm_collection": True,
+                },
+            )
+
+        self.assertEqual(sync.status_code, 200, sync.text)
+        payload = sync.json()
+        self.assertEqual(payload["received_count"], 2)
+        self.assertEqual(payload["inserted_count"], 2)
+        self.assertEqual(payload["duplicate_count"], 0)
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertEqual(active_socket.sent, [{"active_symbols": "full", "req_id": 1}])
+        self.assertEqual(history_socket.sent[0]["ticks_history"], "1HZ100V")
+        self.assertEqual(history_socket.sent[0]["style"], "candles")
+
+        observations = self.client.get(
+            "/market-observations",
+            params={"symbol": "1HZ100V", "timeframe": "M1", "limit": 10},
+        )
+        self.assertEqual(observations.status_code, 200)
+        self.assertEqual(observations.json()["count"], 2)
+        self.assertTrue(all(item["source"] == "deriv" for item in observations.json()["observations"]))
+        self.assertTrue(all(not item["execution_eligible"] for item in observations.json()["observations"]))
+
+        quality = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(quality.status_code, 200)
+        self.assertEqual(quality.json()["status"], "FRESH")
+        self.assertEqual(quality.json()["observation_count"], 2)
+        self.assertFalse(quality.json()["execution_eligible"])
+        self.assertFalse(quality.json()["execution_triggered"])
+        self.assertFalse(quality.json()["signals_generated"])
+
+
 if __name__ == "__main__":
     unittest.main()
