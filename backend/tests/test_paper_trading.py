@@ -2,7 +2,7 @@
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from pathlib import Path
@@ -2136,14 +2136,21 @@ class PaperTradingTests(unittest.TestCase):
 
 
     def test_deriv_sync_endpoint_is_authenticated_confirmed_bounded_and_read_only(self):
-        result = {
-            "provider": "Deriv", "symbol": "1HZ100V", "timeframe": "M1",
-            "received_count": 2, "inserted_count": 2, "duplicate_count": 0,
-            "read_only": True, "execution_triggered": False,
-            "signals_generated": False, "observations": [],
-        }
+        candles = [
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:15:00+00:00",
+             "open": 1000, "high": 1002, "low": 999, "close": 1001, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:16:00+00:00",
+             "open": 1001, "high": 1003, "low": 1000, "close": 1002, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+        ]
+        persisted = [
+            {"inserted": True, "symbol": "1HZ100V"},
+            {"inserted": True, "symbol": "1HZ100V"},
+        ]
         with patch("app.main.DerivPublicMarketDataClient") as client_class:
-            client_class.return_value.discover_and_store_candles = AsyncMock(return_value=result)
+            client_class.return_value.collect_candles = AsyncMock(return_value=candles)
+            client_class.return_value.persist_candles = Mock(return_value=persisted)
             response = self.client.post(
                 "/market-observations/deriv-sync",
                 json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
@@ -2154,7 +2161,13 @@ class PaperTradingTests(unittest.TestCase):
         self.assertTrue(payload["read_only"])
         self.assertFalse(payload["execution_triggered"])
         self.assertFalse(payload["signals_generated"])
-        client_class.return_value.discover_and_store_candles.assert_awaited_once()
+        self.assertEqual(payload["received_count"], 2)
+        self.assertEqual(payload["inserted_count"], 2)
+        self.assertEqual(payload["duplicate_count"], 0)
+        client_class.return_value.collect_candles.assert_awaited_once_with(
+            "1HZ100V", "M1", count=2
+        )
+        client_class.return_value.persist_candles.assert_called_once()
 
     def test_deriv_sync_endpoint_requires_explicit_confirmation_and_rejects_non_deriv_symbols(self):
         with patch("app.main.DerivPublicMarketDataClient") as client_class:
