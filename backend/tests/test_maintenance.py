@@ -8924,3 +8924,54 @@ _LIVE_DATABASE_SYMLINK_PREFLIGHT_CASES = [
 ]
 for _test_name, _scenario in _LIVE_DATABASE_SYMLINK_PREFLIGHT_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_live_database_symlink_preflight_test(_scenario))
+
+
+def _make_restore_lock_unknown_state_test(exception_type, message):
+    def test(self):
+        marker = maintenance_module.restore_lock_path()
+        with patch.object(Path, "lstat", side_effect=exception_type(message)) as inspect:
+            with patch.object(Path, "exists", side_effect=AssertionError("exists() must not decide lock state")):
+                self.assertTrue(is_restore_lock_active())
+        inspect.assert_called_once_with(marker)
+    return test
+
+
+_RESTORE_LOCK_UNKNOWN_STATE_CASES = [
+    ("test_restore_lock_unknown_permission_error", PermissionError, "permission denied"),
+    ("test_restore_lock_unknown_access_error", PermissionError, "access denied"),
+    ("test_restore_lock_unknown_io_error", OSError, "I/O error"),
+    ("test_restore_lock_unknown_stale_mount", OSError, "stale file handle"),
+    ("test_restore_lock_unknown_device_error", OSError, "device unavailable"),
+    ("test_restore_lock_unknown_network_error", OSError, "network filesystem unavailable"),
+    ("test_restore_lock_unknown_resource_error", OSError, "resource temporarily unavailable"),
+    ("test_restore_lock_unknown_interrupted_error", OSError, "inspection interrupted"),
+    ("test_restore_lock_unknown_bad_descriptor", OSError, "bad descriptor"),
+    ("test_restore_lock_unknown_not_directory", NotADirectoryError, "parent is not a directory"),
+    ("test_restore_lock_unknown_is_directory", IsADirectoryError, "directory metadata unavailable"),
+    ("test_restore_lock_unknown_read_only", PermissionError, "read-only filesystem"),
+    ("test_restore_lock_unknown_operation_not_permitted", PermissionError, "operation not permitted"),
+    ("test_restore_lock_unknown_input_output", OSError, "input/output failure"),
+    ("test_restore_lock_unknown_file_table", OSError, "file table overflow"),
+    ("test_restore_lock_unknown_too_many_links", OSError, "too many symbolic links"),
+    ("test_restore_lock_unknown_quota", OSError, "filesystem quota exceeded"),
+    ("test_restore_lock_unknown_remote_disconnect", OSError, "remote filesystem disconnected"),
+    ("test_restore_lock_unknown_metadata_unavailable", OSError, "metadata unavailable"),
+    ("test_restore_lock_unknown_unclassified_os_error", OSError, "unclassified filesystem failure"),
+]
+for _name, _error_type, _message in _RESTORE_LOCK_UNKNOWN_STATE_CASES:
+    setattr(
+        DailyMaintenanceTests,
+        _name,
+        _make_restore_lock_unknown_state_test(_error_type, _message),
+    )
+
+
+def test_restore_lock_confirmed_absence_is_the_only_unlocked_state(self):
+    marker = maintenance_module.restore_lock_path()
+    with patch.object(Path, "lstat", side_effect=FileNotFoundError(marker)):
+        self.assertFalse(is_restore_lock_active())
+
+
+DailyMaintenanceTests.test_restore_lock_confirmed_absence_is_the_only_unlocked_state = (
+    test_restore_lock_confirmed_absence_is_the_only_unlocked_state
+)
