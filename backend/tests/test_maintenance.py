@@ -9280,6 +9280,32 @@ for _name, _scenario in _RESTORE_APPROVAL_TRANSACTION_RACE_CASES:
     )
 
 
+def _make_restore_lock_timestamp_validation_test(value):
+    def test(self):
+        lock_path = maintenance_module.restore_lock_path()
+        marker = {
+            "plan_id": "a" * 32,
+            "pid": os.getpid(),
+            "created_at": value,
+            "lock_token": "b" * 32,
+        }
+        lock_path.write_text(json.dumps(marker, sort_keys=True), encoding="utf-8")
+        result = inspect_restore_lock()
+        self.assertEqual(result["status"], "RESTORE_LOCK_METADATA_UNREADABLE")
+        self.assertTrue(result["marker_present"])
+        self.assertFalse(result.get("automatic_recovery_performed", False))
+    return test
+
+
+_RESTORE_LOCK_INVALID_TIMESTAMP_CASES = [["empty",""],["whitespace","   "],["plain_text","not-a-timestamp"],["date_only","2026-11-21"],["naive_datetime","2026-11-21T10:00:00"],["invalid_month","2026-13-21T10:00:00+02:00"],["zero_month","2026-00-21T10:00:00+02:00"],["invalid_day","2026-11-32T10:00:00+02:00"],["invalid_hour","2026-11-21T25:00:00+02:00"],["invalid_minute","2026-11-21T10:60:00+02:00"],["invalid_second","2026-11-21T10:00:60+02:00"],["invalid_offset_hour","2026-11-21T10:00:00+25:00"],["invalid_offset_minute","2026-11-21T10:00:00+02:99"],["trailing_garbage","2026-11-21T10:00:00+02:00garbage"],["bad_leap_day","2025-02-29T10:00:00+02:00"],["null",null],["integer",123],["boolean",true],["array",["2026-11-21T10:00:00+02:00"]],["object",{"timestamp":"2026-11-21T10:00:00+02:00"}]]
+for _scenario, _value in _RESTORE_LOCK_INVALID_TIMESTAMP_CASES:
+    setattr(
+        DailyMaintenanceTests,
+        "test_restore_lock_invalid_timestamp_" + _scenario,
+        _make_restore_lock_timestamp_validation_test(_value),
+    )
+
+
 def _make_restore_lock_marker_metadata_race_test(scenario):
     def test(self):
         import fcntl as system_fcntl
