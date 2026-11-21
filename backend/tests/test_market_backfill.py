@@ -76,17 +76,18 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["next_end_epoch"], 3600)
         self.assertIn("no candles", result["last_error"])
 
-    async def test_completed_checkpoint_is_idempotent_and_does_not_fetch_again(self):
+    async def test_epoch_zero_gap_review_requires_operator_review_and_does_not_fetch_again(self):
         client = FakeRangeClient([candle(0), candle(60), candle(120)])
-        await run_backfill_batch(
+        first = await run_backfill_batch(
             self.connection, client, "1HZ100V", "M1",
             batch_size=3, now_epoch=120,
         )
-        result = await run_backfill_batch(
-            self.connection, client, "1HZ100V", "M1",
-            batch_size=3, now_epoch=120,
-        )
-        self.assertTrue(result["complete"])
+        self.assertEqual(first["status"], "GAP_REVIEW")
+        with self.assertRaisesRegex(ValueError, "operator review"):
+            await run_backfill_batch(
+                self.connection, client, "1HZ100V", "M1",
+                batch_size=3, now_epoch=120,
+            )
         self.assertEqual(len(client.calls), 1)
 
     async def test_rejects_boolean_and_non_integer_now_epoch(self):
