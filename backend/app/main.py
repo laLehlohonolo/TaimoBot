@@ -67,7 +67,7 @@ from .safety import (
     is_emergency_stop_active
 )
 from .instruments import list_instruments, EXECUTION_ENABLED_SYMBOLS
-from .market_observation_store import list_market_observations
+from .market_observation_store import list_market_observations, inspect_market_observation_quality
 from .deriv_public_client import DerivPublicMarketDataClient
 from .market_observations import SUPPORTED_TIMEFRAMES
 from .instruments import get_instrument
@@ -1214,4 +1214,28 @@ def market_observations_route(
         "read_only": True,
         "execution_triggered": False,
         "signals_generated": False,
+    }
+
+
+
+@app.get("/market-observations/quality")
+def market_observation_quality_route(
+    symbol: str,
+    timeframe: str,
+    user=Depends(current_user),
+):
+    """Authenticated read-only freshness and continuity diagnostics for Deriv synthetics."""
+    del user
+    try:
+        with get_connection() as connection:
+            quality = inspect_market_observation_quality(
+                connection, symbol=symbol, timeframe=timeframe
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        **quality,
+        "read_only": True,
+        "signals_generated": False,
+        "execution_triggered": False,
     }
