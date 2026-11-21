@@ -83,7 +83,7 @@ def submit_calendar(request: CalendarSubmission, user=Depends(current_user)):
             "provider": provider,
             "symbol": symbol,
             "version": version,
-            "reviewed_by": user["user_id"],
+            "submitted_by": user["user_id"],
         })
         try:
             record = validate_session_calendar_record(raw)
