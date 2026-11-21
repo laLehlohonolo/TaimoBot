@@ -150,14 +150,22 @@ def persist_backfill_batch(connection, request, candles):
         earliest = min(previous_earliest, earliest) if previous_earliest and earliest else (previous_earliest or earliest)
         latest = max(previous_latest, latest) if previous_latest and latest else (previous_latest or latest)
 
+        expected_epochs = list(range(
+            request["start_epoch"], request["end_epoch"] + 1, granularity
+        ))
+        missing_epochs = sorted(set(expected_epochs) - set(candle_epochs))
         if request["start_epoch"] == 0:
             status = "GAP_REVIEW"
             next_end = request["end_epoch"]
             error = "Reached the epoch-zero boundary; provider history coverage requires review."
-        elif not candles:
+        elif missing_epochs:
             status = "GAP_REVIEW"
             next_end = request["end_epoch"]
-            error = "Provider returned no candles for a non-zero historical interval."
+            error = (
+                "Provider batch is incomplete; "
+                + str(len(missing_epochs))
+                + " expected candle(s) are missing. Operator review is required."
+            )
         else:
             status = "RUNNING"
             next_end = request["start_epoch"] - granularity
