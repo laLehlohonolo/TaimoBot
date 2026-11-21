@@ -497,6 +497,33 @@ def ensure_session_calendar_schema(connection):
         CREATE INDEX IF NOT EXISTS idx_brain_session_calendars_symbol
             ON brain_session_calendars(symbol, provider, version DESC);
 
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_record_mutation
+        BEFORE UPDATE OF provider, symbol, version, record_json, submitted_by, created_at
+        ON brain_session_calendars
+        BEGIN
+            SELECT RAISE(ABORT, 'Session calendar versions are immutable.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_brain_session_calendar_status_transition
+        BEFORE UPDATE OF status ON brain_session_calendars
+        WHEN NOT (
+            (OLD.status = 'PENDING_SOURCE_VERIFICATION' AND NEW.status IN (
+                'SOURCE_VERIFIED_PENDING_APPROVAL', 'REJECTED'
+            )) OR
+            (OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL' AND NEW.status IN (
+                'APPROVED', 'PENDING_SOURCE_VERIFICATION', 'REJECTED'
+            ))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Invalid session calendar status transition.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_delete
+        BEFORE DELETE ON brain_session_calendars
+        BEGIN
+            SELECT RAISE(ABORT, 'Session calendar versions cannot be deleted.');
+        END;
+
         CREATE TABLE IF NOT EXISTS brain_session_calendar_decisions (
             decision_id TEXT PRIMARY KEY,
             calendar_id TEXT NOT NULL,
