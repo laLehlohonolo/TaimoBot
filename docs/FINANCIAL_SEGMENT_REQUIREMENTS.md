@@ -35,11 +35,16 @@ Participants must be able to choose a preferred balance display currency from:
 
 The product must support two distinct capabilities in stages:
 
-**Stage A — display-currency preference**
-- Participants can select one preferred display currency in their profile or wallet view.
+**Stage A — one-time display-currency selection**
+- Each participant chooses exactly one preferred display currency from ZAR, USD, EUR, GBP or KWD during the designated first-time setup.
+- The choice is one-time and permanent: after the participant confirms and saves it, they cannot change it again through profile settings, wallet settings, support requests or a later self-service flow.
+- Show a clear warning before confirmation: "You can choose this currency only once. You will not be able to change it later." Require an explicit final confirmation.
+- Persist the selection as an immutable participant preference with the selection timestamp and confirmation/audit record. Enforce one selection per participant in the backend/database; do not rely only on a disabled frontend selector.
+- If no choice has been made, prompt the participant to choose before enabling the balance display. Do not silently choose a default on their behalf.
 - The displayed original wallet balance and its actual currency remain clearly visible.
 - If a balance is shown in another currency, label it as an indicative converted value and show the exchange-rate source and timestamp.
 - A display preference must never create a new currency balance, execute an FX conversion, change a transaction's original currency, or move/deduct funds.
+- The one-time display-currency choice remains separate from any later multi-currency wallet balances; it does not prevent the participant from viewing individually held balances in their actual currencies.
 - If a reliable rate is unavailable or stale, show the original balance and explain that conversion is temporarily unavailable; do not invent or silently reuse a rate.
 
 **Stage B — separate multi-currency wallets**
