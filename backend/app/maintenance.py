@@ -2107,11 +2107,18 @@ def restore_lock_path() -> Path:
 
 
 def is_restore_lock_active() -> bool:
-    """Fail closed if a restore lock exists or cannot be safely inspected."""
+    """Fail closed unless the restore-lock path is confirmed absent."""
     lock_path = restore_lock_path()
     try:
-        return lock_path.exists() or lock_path.is_symlink()
+        lock_path.lstat()
+        # Any directory entry (regular file, symlink, directory or special
+        # file) blocks restore work until its state is explicitly inspected.
+        return True
+    except FileNotFoundError:
+        return False
     except OSError:
+        # Permission, I/O, stale-mount and other inspection failures are
+        # unknown lock state, never evidence that no lock exists.
         return True
 
 
