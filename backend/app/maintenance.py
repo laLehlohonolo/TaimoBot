@@ -2944,7 +2944,16 @@ def verify_restore_execution_readiness(
     """
     managed_backup_dir = Path(backup_dir or BACKUP_DIR).resolve()
     staging_dir = (managed_backup_dir / "recovery-staging").resolve()
-    live_path = Path(live_database_path or database.DB_PATH).resolve()
+    live_path_input = Path(live_database_path or database.DB_PATH)
+    # Inspect the caller-supplied path before resolving it: resolving first
+    # erases the fact that the live DB entry itself was a symlink.
+    try:
+        live_path_metadata = live_path_input.lstat()
+    except OSError as error:
+        raise ValueError("The live database is missing or unsafe.") from error
+    if stat.S_ISLNK(live_path_metadata.st_mode) or not stat.S_ISREG(live_path_metadata.st_mode):
+        raise ValueError("The live database is missing or unsafe.")
+    live_path = live_path_input.resolve()
     artifacts = (
         (Path(source_backup), managed_backup_dir, "source"),
         (Path(rollback_backup), managed_backup_dir, "rollback"),
@@ -2958,7 +2967,11 @@ def verify_restore_execution_readiness(
         if artifact.resolve() == live_path:
             raise ValueError(f"The {label} recovery artifact cannot be the live database.")
 
-    if live_path.is_symlink() or not live_path.is_file():
+    try:
+        resolved_live_metadata = live_path.lstat()
+    except OSError as error:
+        raise ValueError("The live database is missing or unsafe.") from error
+    if not stat.S_ISREG(resolved_live_metadata.st_mode):
         raise ValueError("The live database is missing or unsafe.")
 
     source_inventory = inspect_recovery_candidates(managed_backup_dir)
