@@ -538,6 +538,40 @@ class StrategyLabSchemaTests(unittest.TestCase):
         self.assertEqual(audit[0]["decision"], "RETRY_SAME_RANGE")
         self.assertTrue(audit[0]["decided_by"])
 
+    def test_backfill_review_rejects_whitespace_only_rationale(self):
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO market_backfill_checkpoints (
+                    symbol, timeframe, next_end_epoch, status
+                ) VALUES ('1HZ100V', 'M5', 3600, 'GAP_REVIEW')
+                """
+            )
+        response = self.admin_client.post(
+            "/admin/market-backfills/1HZ100V/M5/review",
+            json={
+                "decision": "RETRY_SAME_RANGE",
+                "confirm_retry": True,
+                "rationale": "          ",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        with database.get_connection() as connection:
+            checkpoint = connection.execute(
+                """
+                SELECT status FROM market_backfill_checkpoints
+                WHERE symbol = '1HZ100V' AND timeframe = 'M5'
+                """
+            ).fetchone()
+            audit_count = connection.execute(
+                """
+                SELECT COUNT(*) AS count FROM market_backfill_review_audit
+                WHERE symbol = '1HZ100V' AND timeframe = 'M5'
+                """
+            ).fetchone()["count"]
+        self.assertEqual(checkpoint["status"], "GAP_REVIEW")
+        self.assertEqual(audit_count, 0)
+
     def test_backfill_review_requires_strict_confirmation_and_gap_state(self):
         with database.get_connection() as connection:
             connection.execute(
