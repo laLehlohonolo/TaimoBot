@@ -142,16 +142,42 @@ class SessionCalendarTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot overlap"):
             validate_session_calendar_record(record)
 
-    def test_rejects_invalid_weekdays_and_overnight_intervals(self):
+    def test_rejects_invalid_weekdays_and_zero_length_sessions(self):
         record = self.valid_record()
         record["weekly_sessions"][0]["weekday"] = 7
         with self.assertRaisesRegex(ValueError, "weekday"):
             validate_session_calendar_record(record)
 
         record = self.valid_record()
-        record["weekly_sessions"][0].update({"start": "22:00", "end": "02:00"})
-        with self.assertRaisesRegex(ValueError, "same-day"):
+        record["weekly_sessions"][0].update({"start": "22:00", "end": "22:00"})
+        with self.assertRaisesRegex(ValueError, "cannot be equal"):
             validate_session_calendar_record(record)
+
+    def test_accepts_overnight_sessions_and_splits_week_boundary_for_overlap_checks(self):
+        record = self.valid_record()
+        record["weekly_sessions"] = [
+            {"weekday": 6, "start": "22:00", "end": "02:00"},
+            {"weekday": 0, "start": "03:00", "end": "06:00"},
+        ]
+        result = validate_session_calendar_record(record)
+        self.assertEqual(result["weekly_sessions"], record["weekly_sessions"])
+
+    def test_rejects_overlap_with_overnight_session_on_following_day(self):
+        record = self.valid_record()
+        record["weekly_sessions"] = [
+            {"weekday": 0, "start": "22:00", "end": "02:00"},
+            {"weekday": 1, "start": "01:00", "end": "03:00"},
+        ]
+        with self.assertRaisesRegex(ValueError, "cannot overlap"):
+            validate_session_calendar_record(record)
+
+    def test_accepts_overnight_session_ending_at_midnight(self):
+        record = self.valid_record()
+        record["weekly_sessions"] = [
+            {"weekday": 4, "start": "18:00", "end": "00:00"},
+        ]
+        result = validate_session_calendar_record(record)
+        self.assertEqual(result["weekly_sessions"][0]["end"], "00:00")
 
     def test_rejects_invalid_effective_dates_and_versions(self):
         record = self.valid_record()
