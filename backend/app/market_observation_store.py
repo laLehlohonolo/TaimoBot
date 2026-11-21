@@ -153,6 +153,10 @@ def inspect_market_observation_coverage(connection, symbol, timeframe, source=No
         "source_count": len(reports),
         "sources": reports,
         "coverage_basis": "continuous_elapsed_time_between_first_and_last_candles",
+        "session_calendar_status": "NOT_CONFIGURED",
+        "session_calendar_id": None,
+        "session_adjusted_coverage_available": False,
+        "session_calendar_policy": "INSTRUMENT_SPECIFIC_CALENDAR_REQUIRED",
         "session_calendar_applied": False,
         "coverage_caveat": (
             "This is a raw elapsed-time coverage estimate. Exchange, OTC, holiday, "
