@@ -207,6 +207,37 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         self.assertEqual(future["future_observation_count"], 1)
         self.assertFalse(future["execution_eligible"])
 
+    def test_market_observation_duplicate_is_idempotent_across_timezone_offsets(self):
+        from app.market_observation_store import save_market_observation, list_market_observations
+
+        base = {
+            "symbol": "R_10",
+            "timeframe": "M1",
+            "source": "deriv",
+            "open": 300.0,
+            "high": 302.0,
+            "low": 299.0,
+            "close": 301.0,
+            "volume": 0,
+        }
+        with database.get_connection() as connection:
+            first = save_market_observation(
+                connection, {**base, "timestamp": "2026-11-21T20:00:00Z"}
+            )
+            duplicate = save_market_observation(
+                connection, {**base, "timestamp": "2026-11-21T22:00:00+02:00"}
+            )
+            rows = list_market_observations(
+                connection, symbol="R_10", timeframe="M1", limit=10
+            )
+
+        self.assertTrue(first["inserted"])
+        self.assertFalse(duplicate["inserted"])
+        self.assertEqual(first["timestamp"], duplicate["timestamp"])
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["execution_eligible"])
+        self.assertEqual(rows[0]["provenance_status"], "UNVERIFIED_EXTERNAL_INPUT")
+
     def test_admin_can_create_review_and_reject_candidate(self):
         created = self.admin_client.post(
             "/admin/brain/strategy-candidates", json=self.candidate_payload()
