@@ -73,8 +73,21 @@ class MoneyLedgerCoreTests(unittest.TestCase):
             validate_journal_lines(lines)
 
     def test_rejects_invalid_currency_code(self):
-        with self.assertRaisesRegex(LedgerValidationError, "three-letter"):
-            validate_journal_lines(self.balanced_lines(), currency="ZAR1")
+        for currency in ("ZAR1", "ÅBC", "ZÄR"):
+            with self.subTest(currency=currency):
+                with self.assertRaisesRegex(LedgerValidationError, "three-letter ASCII"):
+                    validate_journal_lines(self.balanced_lines(), currency=currency)
+
+    def test_rejects_aggregate_journal_total_above_supported_bound(self):
+        amount = MAX_AMOUNT_MINOR // 2 + 1
+        lines = [
+            {"account_id": "a", "side": "DEBIT", "amount_minor": amount},
+            {"account_id": "b", "side": "DEBIT", "amount_minor": amount},
+            {"account_id": "c", "side": "CREDIT", "amount_minor": amount},
+            {"account_id": "d", "side": "CREDIT", "amount_minor": amount},
+        ]
+        with self.assertRaisesRegex(LedgerValidationError, "Journal total"):
+            validate_journal_lines(lines)
 
     def test_accepts_maximum_supported_integer_amount(self):
         lines = [
