@@ -2268,8 +2268,9 @@ def inspect_restore_lock() -> dict:
         if not __import__("stat").S_ISREG(marker_stat.st_mode):
             return {"status": "RESTORE_LOCK_UNSAFE_MARKER", "marker_present": True}
         marker_identity = (
-            marker_stat.st_dev, marker_stat.st_ino,
-            marker_stat.st_size, marker_stat.st_mtime_ns,
+            marker_stat.st_dev, marker_stat.st_ino, marker_stat.st_mode,
+            marker_stat.st_nlink, marker_stat.st_size,
+            marker_stat.st_mtime_ns, marker_stat.st_ctime_ns,
         )
         marker_bytes = os.read(marker_fd, 65536)
         if os.read(marker_fd, 1):
@@ -2343,9 +2344,12 @@ def inspect_restore_lock() -> dict:
         # This prevents a concurrent marker swap/edit from being labelled stale.
         current_stat = lock_path.lstat()
         current_identity = (
-            current_stat.st_dev, current_stat.st_ino,
-            current_stat.st_size, current_stat.st_mtime_ns,
+            current_stat.st_dev, current_stat.st_ino, current_stat.st_mode,
+            current_stat.st_nlink, current_stat.st_size,
+            current_stat.st_mtime_ns, current_stat.st_ctime_ns,
         )
+        if not __import__("stat").S_ISREG(current_stat.st_mode):
+            status = "RESTORE_LOCK_CHANGED_DURING_INSPECTION"
         os.lseek(marker_fd, 0, os.SEEK_SET)
         current_bytes = os.read(marker_fd, 65536)
         if os.read(marker_fd, 1):
