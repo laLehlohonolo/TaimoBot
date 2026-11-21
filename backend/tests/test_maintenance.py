@@ -8932,7 +8932,7 @@ def _make_restore_lock_unknown_state_test(exception_type, message):
         with patch.object(Path, "lstat", side_effect=exception_type(message)) as inspect:
             with patch.object(Path, "exists", side_effect=AssertionError("exists() must not decide lock state")):
                 self.assertTrue(is_restore_lock_active())
-        inspect.assert_called_once_with(marker)
+        inspect.assert_called_once_with()
     return test
 
 
