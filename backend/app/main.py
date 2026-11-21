@@ -67,6 +67,7 @@ from .safety import (
     is_emergency_stop_active
 )
 from .instruments import list_instruments, EXECUTION_ENABLED_SYMBOLS
+from .market_observation_store import list_market_observations
 
 
 @asynccontextmanager
@@ -1131,3 +1132,28 @@ def strategy_details(strategy_id: str, user=Depends(current_user)):
     if strategy is None:
         raise HTTPException(status_code=404, detail="Strategy not found.")
     return strategy
+
+
+@app.get("/market-observations")
+def market_observations_route(
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    limit: int = 100,
+    user=Depends(current_user),
+):
+    """List stored, validated market candles without creating signals or orders."""
+    del user  # Authentication is required; observations are currently shared research data.
+    try:
+        with get_connection() as connection:
+            observations = list_market_observations(
+                connection, symbol=symbol, timeframe=timeframe, limit=limit
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        "observations": observations,
+        "count": len(observations),
+        "read_only": True,
+        "execution_triggered": False,
+        "signals_generated": False,
+    }
