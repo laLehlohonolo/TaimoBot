@@ -9361,6 +9361,7 @@ def _make_restore_lock_marker_metadata_race_test(scenario):
                     os.replace(replacement, lock_path)
             elif scenario == "metadata_then_content_restore":
                 lock_path.chmod(0o400)
+                lock_path.chmod(original_mode & 0o777)
                 lock_path.write_bytes(original_bytes)
                 lock_path.chmod(original_mode & 0o777)
             elif scenario == "link_then_rename":
