@@ -1375,6 +1375,7 @@ def inspect_recovery_artifact_inventory(
                 artifact_snapshots[(str(directory), artifact_type, path.name)] = (
                     entry_metadata.st_dev, entry_metadata.st_ino, entry_metadata.st_mode,
                     entry_metadata.st_size, entry_metadata.st_mtime_ns,
+                    entry_metadata.st_ctime_ns, entry_metadata.st_nlink,
                 )
                 item = {
                     "file_name": path.name,
@@ -1572,6 +1573,7 @@ def inspect_recovery_artifact_inventory(
             current_identity = (
                 current.st_dev, current.st_ino, current.st_mode,
                 current.st_size, current.st_mtime_ns,
+                current.st_ctime_ns, current.st_nlink,
             )
             if current_identity != expected_identity:
                 raise OSError("recovery artifact identity changed after filesystem inspection")
@@ -1634,6 +1636,7 @@ def inspect_recovery_artifact_inventory(
             current_identity = (
                 current.st_dev, current.st_ino, current.st_mode,
                 current.st_size, current.st_mtime_ns,
+                current.st_ctime_ns, current.st_nlink,
             )
             if current_identity != expected_identity:
                 raise OSError("recovery artifact changed during final consistency fence")
@@ -1695,6 +1698,7 @@ def inspect_recovery_artifact_inventory(
             current_identity = (
                 current.st_dev, current.st_ino, current.st_mode,
                 current.st_size, current.st_mtime_ns,
+                current.st_ctime_ns, current.st_nlink,
             )
             if current_identity != expected_identity:
                 raise OSError("recovery artifact changed after final metadata verification")
@@ -1755,6 +1759,7 @@ def inspect_recovery_artifact_inventory(
             current_identity = (
                 current.st_dev, current.st_ino, current.st_mode,
                 current.st_size, current.st_mtime_ns,
+                current.st_ctime_ns, current.st_nlink,
             )
             if current_identity != expected_identity:
                 raise OSError("recovery artifact changed after terminal metadata verification")
@@ -1766,6 +1771,16 @@ def inspect_recovery_artifact_inventory(
                 )
                 if recorded and sha256_file(candidate) != recorded:
                     raise OSError("recovery artifact digest changed after terminal metadata verification")
+                # Hashing is not the final observation: an external process can
+                # replace or mutate the path immediately after sha256_file returns.
+                post_hash = candidate.stat(follow_symlinks=False)
+                post_hash_identity = (
+                    post_hash.st_dev, post_hash.st_ino, post_hash.st_mode,
+                    post_hash.st_size, post_hash.st_mtime_ns,
+                    post_hash.st_ctime_ns, post_hash.st_nlink,
+                )
+                if candidate.is_symlink() or post_hash_identity != expected_identity:
+                    raise OSError("recovery artifact changed immediately after final digest verification")
         assert_managed_directories_unchanged()
     except (OSError, ValueError) as error:
         return {
