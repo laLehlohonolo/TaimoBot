@@ -590,3 +590,66 @@ class StrategyLabSchemaTests(unittest.TestCase):
                 connection.execute(
                     "DELETE FROM market_backfill_review_audit WHERE review_id = 'review_test'"
                 )
+
+
+    def test_admin_backfill_run_is_confirmed_bounded_and_read_only(self):
+        from unittest.mock import AsyncMock, patch
+
+        path = "/admin/market-backfills/1HZ100V/M1/run"
+        payload = {"confirm_collection": True, "batch_size": 25}
+        self.assertEqual(
+            self.participant_client.post(path, json=payload).status_code, 403
+        )
+        for invalid in ("true", 1, None):
+            response = self.admin_client.post(
+                path, json={"confirm_collection": invalid, "batch_size": 25}
+            )
+            self.assertEqual(response.status_code, 422)
+        for invalid_size in (1, 501, True, 2.5):
+            response = self.admin_client.post(
+                path, json={"confirm_collection": True, "batch_size": invalid_size}
+            )
+            self.assertEqual(response.status_code, 422)
+
+        expected = {
+            "symbol": "1HZ100V",
+            "timeframe": "M1",
+            "status": "RUNNING",
+            "next_end_epoch": 3540,
+            "received_count": 25,
+            "inserted_count": 25,
+            "duplicate_count": 0,
+            "complete": False,
+            "read_only": True,
+            "execution_triggered": False,
+            "signals_generated": False,
+        }
+        with patch(
+            "app.main.run_backfill_batch_with_connection_factory",
+            new_callable=AsyncMock,
+            return_value=expected,
+        ) as worker:
+            response = self.admin_client.post(path, json=payload)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["received_count"], 25)
+        self.assertTrue(body["operator_triggered"])
+        self.assertFalse(body["backtest_eligible"])
+        self.assertFalse(body["execution_triggered"])
+        self.assertFalse(body["signals_generated"])
+        worker.assert_awaited_once()
+        args, kwargs = worker.await_args
+        self.assertEqual(args[2:4], ("1HZ100V", "M1"))
+        self.assertEqual(kwargs["batch_size"], 25)
+
+    def test_admin_backfill_run_rejects_non_deriv_and_unsupported_timeframe(self):
+        non_deriv = self.admin_client.post(
+            "/admin/market-backfills/XAUUSD/M1/run",
+            json={"confirm_collection": True, "batch_size": 10},
+        )
+        self.assertEqual(non_deriv.status_code, 400)
+        unsupported = self.admin_client.post(
+            "/admin/market-backfills/1HZ100V/M2/run",
+            json={"confirm_collection": True, "batch_size": 10},
+        )
+        self.assertEqual(unsupported.status_code, 400)
