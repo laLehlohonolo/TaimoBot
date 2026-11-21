@@ -212,6 +212,35 @@ def persist_backfill_batch(connection, request, candles):
     }
 
 
+def _hold_backfill_for_operator_review(
+    connection_factory, symbol, timeframe, expected_next_end_epoch, error
+):
+    """Move a failed in-flight batch to review without advancing its cursor."""
+    connection = connection_factory()
+    try:
+        connection.execute(
+            """
+            UPDATE market_backfill_checkpoints
+            SET status = 'GAP_REVIEW',
+                last_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE symbol = ? AND timeframe = ?
+              AND status = 'RUNNING' AND next_end_epoch = ?
+            """,
+            (
+                "Historical batch failed during provider collection or persistence ("
+                + type(error).__name__
+                + "); operator review required.",
+                symbol,
+                timeframe,
+                expected_next_end_epoch,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 async def run_backfill_batch_with_connection_factory(
     connection_factory, client, symbol, timeframe, *, batch_size=500, now_epoch=None
 ):
@@ -244,18 +273,31 @@ async def run_backfill_batch_with_connection_factory(
         finally:
             connection.close()
 
-    candles = await client.collect_candle_range(
-        request["symbol"], request["timeframe"],
-        request["start_epoch"], request["end_epoch"],
-        max_candles=request["batch_size"],
-    )
-    connection = connection_factory()
     try:
-        result = persist_backfill_batch(connection, request, candles)
-        connection.commit()
-        return result
-    finally:
-        connection.close()
+        candles = await client.collect_candle_range(
+            request["symbol"], request["timeframe"],
+            request["start_epoch"], request["end_epoch"],
+            max_candles=request["batch_size"],
+        )
+        connection = connection_factory()
+        try:
+            result = persist_backfill_batch(connection, request, candles)
+            connection.commit()
+            return result
+        finally:
+            connection.close()
+    except Exception as error:
+        # Never leave a failed provider request or malformed batch stuck in
+        # RUNNING. Only the same still-current cursor may be moved to review;
+        # a concurrent successful worker will already have advanced it.
+        _hold_backfill_for_operator_review(
+            connection_factory,
+            request["symbol"],
+            request["timeframe"],
+            request["expected_next_end_epoch"],
+            error,
+        )
+        raise
 
 
 async def run_backfill_batch(
