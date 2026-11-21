@@ -199,6 +199,21 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         self.assertFalse(body["signals_generated"])
         self.assertFalse(body["execution_triggered"])
 
+        # Metals use the same explicit NOT_CONFIGURED state until a
+        # broker-specific session calendar is sourced and reviewed.
+        metal_response = self.admin_client.get(
+            "/admin/brain/strategy-candidates/data-coverage",
+            params={"symbol": "XAUUSD", "timeframe": "M5"},
+        )
+        self.assertEqual(metal_response.status_code, 200)
+        metal_body = metal_response.json()
+        self.assertEqual(metal_body["session_calendar_status"], "NOT_CONFIGURED")
+        self.assertIsNone(metal_body["session_calendar_id"])
+        self.assertFalse(metal_body["session_adjusted_coverage_available"])
+        self.assertFalse(metal_body["session_calendar_applied"])
+        self.assertFalse(metal_body["eligible_for_backtest"])
+        self.assertFalse(metal_body["execution_triggered"])
+
     def test_market_data_quality_is_admin_only_and_never_enables_research_or_execution(self):
         params = {"symbol": "R_10", "timeframe": "M1"}
         self.assertEqual(
