@@ -171,6 +171,15 @@ class SessionCalendarTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot overlap"):
             validate_session_calendar_record(record)
 
+    def test_rejects_sunday_overnight_overlap_after_week_rollover(self):
+        record = self.valid_record()
+        record["weekly_sessions"] = [
+            {"weekday": 6, "start": "22:00", "end": "02:00"},
+            {"weekday": 0, "start": "01:00", "end": "03:00"},
+        ]
+        with self.assertRaisesRegex(ValueError, "cannot overlap"):
+            validate_session_calendar_record(record)
+
     def test_accepts_overnight_session_ending_at_midnight(self):
         record = self.valid_record()
         record["weekly_sessions"] = [
