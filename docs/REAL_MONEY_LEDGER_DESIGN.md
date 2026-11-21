@@ -15,17 +15,17 @@ No code in the paper execution path may import or invoke a real-money wallet ser
 
 ## 2. Proposed data model
 
-Use integer minor units (South African cents) for all ZAR amounts. Do not use binary floating-point for money.
+Use integer minor units for each transaction currency. Do not use binary floating-point for money. Currency precision is metadata-driven: ZAR, USD, EUR and GBP use 2 decimal places; KWD uses 3 decimal places. Store the currency code with every amount and validate the amount against that currency's exponent. Never assume all currencies use cents.
 
 ### `money_accounts`
 - `account_id` (opaque primary key)
 - `owner_user_id` (foreign key to participant)
-- `currency` (ISO currency code; initially ZAR only)
+- `currency` (ISO 4217 code; initial product-design set: ZAR, USD, EUR, GBP and KWD; actual funded availability remains provider/compliance-gated)
 - `account_type` (participant liability, provider clearing, fee revenue, suspense, etc.)
 - `status` (OPEN, FROZEN, CLOSED)
 - `created_at`
 
-A participant may have one ZAR wallet per legal product/account policy. Enforce uniqueness at the database level. Provider clearing, fee and suspense accounts are system-controlled, not participant wallets.
+A participant may hold one account per supported currency per legal product/account policy. Enforce uniqueness at the database level for `(owner_user_id, currency, account_type)` where appropriate. Each currency account is independent; never net or combine balances across currencies. Provider clearing, fee and suspense accounts are system-controlled, not participant wallets.
 
 ### `money_journals`
 - `journal_id` (primary key)
@@ -53,7 +53,7 @@ For every journal and currency, total debits must equal total credits. Enforce t
 - `kind` (DEPOSIT, WITHDRAWAL, REFUND, REVERSAL, FEE, ADJUSTMENT)
 - `amount_minor` (positive integer)
 - `fee_minor` (nonnegative integer)
-- `currency` (ZAR initially)
+- `currency` (ISO 4217 code for the transaction; never inferred from the participant's display preference)
 - `status` (state machine below)
 - `idempotency_key` (unique per operation scope)
 - `provider_id`, `provider_reference` (nullable, unique when supplied)
@@ -84,6 +84,16 @@ Store only the minimum provider data needed for audit and reconciliation. Do not
 ### `money_audit_events`
 Append-only operator and system audit events with actor, action, target, reason, timestamp and correlation ID. Do not put passwords, access tokens or full bank-account details in audit text.
 
+### Participant currency preference
+
+A future `participant_currency_preferences` record stores `owner_user_id`, `display_currency` (ZAR, USD, EUR, GBP or KWD) and `updated_at`. This preference affects presentation only. It does not create a wallet, convert funds, or change the currency of any posted transaction.
+
+### FX quote and conversion records (only when real FX is explicitly enabled)
+
+Store the quote owner, source/target currencies, source amount in minor units, quoted target amount in minor units, decimal-safe rate, fees/spread, rate source, quote timestamp, expiry and conversion transaction reference.
+
+A display conversion is indicative and must be labelled with its rate source and timestamp. An actual currency conversion is a separate, explicit participant-authorised transaction: show the quote, rate, fees/spread and expiry before confirmation; on confirmation, post both currency legs atomically with linked journal entries. Never create or imply an FX conversion from a display preference. If the rate is missing/stale, show only the original-currency balance.
+
 ## 3. Balance calculation
 
 Do not maintain a mutable wallet balance as the source of truth.
@@ -91,10 +101,10 @@ Do not maintain a mutable wallet balance as the source of truth.
 - Ledger balance is derived from posted journal lines for the participant liability account using the defined debit/credit convention.
 - Available balance = settled ledger balance minus active withdrawal holds and other legally permitted reserves.
 - Pending deposits are displayed separately and are not spendable until settled and posted.
-- Every account is single-currency. Never net balances across currencies.
+- Every account is single-currency. Never net balances across currencies. A participant's available balance is reported separately for each currency; an optional converted overview is informational only and is not withdrawable funds.
 - Reconciliation compares ledger totals, transaction state, provider settlement reports and bank settlement records.
 
-Use integer cents, bounded amounts, explicit currency and decimal-safe API serialization. Reject negative, zero, fractional-cent, NaN, infinity and out-of-range amounts.
+Use integer minor units, bounded amounts, explicit currency and decimal-safe API serialization. Validate precision using the currency exponent (including KWD's three decimal places). Reject negative, zero, excess fractional precision, NaN, infinity and out-of-range amounts.
 
 ## 4. Transaction state machines
 
@@ -166,6 +176,10 @@ Use a provider sandbox only after legal/provider approval. Tests must include:
 13. Real-money ledger code cannot be called by paper execution, copy trading, strategies or AI.
 14. Account freeze, closure, refund, dispute and audit export scenarios.
 
-## 8. Activation gate
+## 8. Multi-currency activation controls
+
+The participant display-currency preference may be implemented independently of real-money payment rails, provided it uses clearly labelled indicative rates and never changes funds. Funded multi-currency accounts and FX conversion remain disabled until the provider supports each currency and jurisdiction, the legal/compliance review approves the flow, custody and reconciliation are designed per currency, and explicit product-owner approval is recorded. Do not advertise KWD as a deposit/withdrawal option until those checks are complete.
+
+## 9. Activation gate
 
 This design is not permission to accept deposits or pay withdrawals. Implementation remains disabled until the product owner has approved a compliance-reviewed design, provider contract and sandbox plan. Production activation requires a separate explicit approval after independent security, financial reconciliation and regulatory sign-off.
