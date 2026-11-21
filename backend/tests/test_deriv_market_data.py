@@ -57,6 +57,20 @@ class DerivMarketDataAdapterTests(unittest.TestCase):
                         "msg_type": "active_symbols", "active_symbols": [record]
                     })
 
+    def test_active_symbols_requires_trade_count_and_symbol_type(self):
+        for field, value in (("trade_count", None), ("trade_count", -1),
+                             ("trade_count", True), ("underlying_symbol_type", "")):
+            record = self.active_record()
+            if value is None:
+                record.pop(field)
+            else:
+                record[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValueError):
+                    normalize_active_symbols_response({
+                        "msg_type": "active_symbols", "active_symbols": [record]
+                    })
+
     def test_deriv_candle_converts_epoch_and_marks_unverified(self):
         result = normalize_deriv_candle("1HZ100V", {
             "epoch": 1795256100, "open": 1000, "high": 1002,
