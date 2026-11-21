@@ -1676,10 +1676,6 @@ class PaperTradingTests(unittest.TestCase):
                     )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     # Take-profit validation matrix: invalid targets must never reserve risk
     # or create paper positions.
     def open_trade_with_target(self, order_id, side, take_profit):
@@ -1793,3 +1789,7 @@ if __name__ == "__main__":
 
         self.assertEqual(after_count, before_count)
         self.assertEqual(after_risk, before_risk)
+
+
+if __name__ == "__main__":
+    unittest.main()
