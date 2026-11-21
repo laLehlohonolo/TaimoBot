@@ -101,6 +101,7 @@ class MarketObservationStoreTests(unittest.TestCase):
             "2026-11-21T12:04:00+00:00",
         ):
             record = self.valid_record()
+            record["source"] = "deriv"
             record["timestamp"] = timestamp
             save_market_observation(self.connection, record)
         result = inspect_market_observation_quality(
@@ -117,6 +118,7 @@ class MarketObservationStoreTests(unittest.TestCase):
         from app.market_observation_store import inspect_market_observation_quality
 
         record = self.valid_record()
+        record["source"] = "deriv"
         record["timestamp"] = "2026-11-21T12:00:00+00:00"
         save_market_observation(self.connection, record)
         result = inspect_market_observation_quality(
