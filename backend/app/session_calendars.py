@@ -61,7 +61,7 @@ def validate_session_calendar_record(record):
     required = (
         "provider", "symbol", "timezone", "weekly_sessions", "holidays",
         "maintenance_windows", "effective_from", "effective_to", "source_url",
-        "retrieved_at", "reviewed_by", "version",
+        "retrieved_at", "submitted_by", "version",
     )
     missing = [field for field in required if field not in record]
     if missing:
@@ -95,9 +95,9 @@ def validate_session_calendar_record(record):
         raise ValueError("source_url must be an HTTPS reference.")
 
     retrieved_at = _aware_datetime(record["retrieved_at"], "retrieved_at")
-    reviewed_by = record["reviewed_by"]
-    if not isinstance(reviewed_by, str) or not reviewed_by.strip():
-        raise ValueError("reviewed_by must identify the intended reviewer.")
+    submitted_by = record["submitted_by"]
+    if not isinstance(submitted_by, str) or not submitted_by.strip():
+        raise ValueError("submitted_by must identify the intended reviewer.")
 
     weekly = record["weekly_sessions"]
     if not isinstance(weekly, list) or not weekly:
@@ -155,7 +155,7 @@ def validate_session_calendar_record(record):
         "effective_to": end_date.isoformat(),
         "source_url": source_url,
         "retrieved_at": retrieved_at,
-        "reviewed_by": reviewed_by.strip(),
+        "submitted_by": submitted_by.strip(),
         "version": version,
         "status": "PENDING_SOURCE_VERIFICATION",
         "source_verified": False,
