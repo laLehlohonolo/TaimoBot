@@ -171,6 +171,26 @@ def strategy_data_readiness(
     }
 
 
+@router.get("/data-coverage")
+def strategy_data_coverage(
+    symbol: str,
+    timeframe: str,
+    source: str | None = None,
+    user=Depends(current_user),
+):
+    """Admin-only, read-only historical candle coverage by source."""
+    require_admin(user)
+    from .market_observation_store import inspect_market_observation_coverage
+
+    try:
+        with get_connection() as connection:
+            return inspect_market_observation_coverage(
+                connection, symbol=symbol, timeframe=timeframe, source=source
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
 @router.get("/market-data-quality")
 def strategy_market_data_quality(
     symbol: str,
