@@ -1644,6 +1644,38 @@ class PaperTradingTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 422)
 
 
+    def test_position_size_rejects_malformed_numeric_inputs(self):
+        invalid_values = (None, "", "not-a-number", float("nan"))
+        valid_values = {
+            "account_balance": 10000,
+            "entry_price": 4000,
+            "stop_loss": 3990,
+            "risk_percent": 0.5,
+            "side": "BUY",
+        }
+        for field in ("account_balance", "entry_price", "stop_loss", "risk_percent"):
+            for invalid in invalid_values:
+                values = dict(valid_values)
+                values[field] = invalid
+                with self.subTest(field=field, value=repr(invalid)):
+                    with self.assertRaises(RiskError):
+                        calculate_position_size(**values)
+
+    def test_position_size_rejects_malformed_current_open_risk(self):
+        invalid_values = (None, "", "not-a-number", float("nan"))
+        for invalid in invalid_values:
+            with self.subTest(value=repr(invalid)):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=10000,
+                        entry_price=4000,
+                        stop_loss=3990,
+                        risk_percent=0.5,
+                        side="BUY",
+                        current_open_risk=invalid,
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
 
