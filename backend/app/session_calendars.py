@@ -100,8 +100,8 @@ def validate_session_calendar_record(record):
         raise ValueError("reviewed_by must identify the intended reviewer.")
 
     weekly = record["weekly_sessions"]
-    if not isinstance(weekly, list):
-        raise ValueError("weekly_sessions must be a list.")
+    if not isinstance(weekly, list) or not weekly:
+        raise ValueError("weekly_sessions must be a non-empty list of session intervals.")
     normalized_weekly = []
     occupied = {day: [] for day in range(7)}
     for index, session in enumerate(weekly):
