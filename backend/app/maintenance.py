@@ -2316,7 +2316,7 @@ def inspect_restore_lock() -> dict:
         ):
             raise ValueError("invalid restore marker metadata")
         offset_match = re.search(
-            r"([+-])(\\d{2}):(\\d{2})(?::(\\d{2})(?:\\.(\\d{1,6}))?)?$",
+            r"([+-])(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$",
             created_at,
         )
         if created_at.endswith("Z"):
