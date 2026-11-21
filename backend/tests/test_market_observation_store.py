@@ -90,5 +90,63 @@ class MarketObservationStoreTests(unittest.TestCase):
             list_market_observations(self.connection, timeframe="M2")
 
 
+
+    def test_quality_diagnostics_detect_missing_synthetic_candles(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import inspect_market_observation_quality
+
+        for timestamp in (
+            "2026-11-21T12:00:00+00:00",
+            "2026-11-21T12:01:00+00:00",
+            "2026-11-21T12:04:00+00:00",
+        ):
+            record = self.valid_record()
+            record["timestamp"] = timestamp
+            save_market_observation(self.connection, record)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1",
+            now=datetime(2026, 11, 21, 12, 5, 10, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["status"], "GAPS_DETECTED")
+        self.assertEqual(result["missing_candle_count"], 2)
+        self.assertEqual(result["missing_interval_count"], 1)
+        self.assertFalse(result["execution_eligible"])
+
+    def test_quality_diagnostics_mark_old_series_stale(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import inspect_market_observation_quality
+
+        record = self.valid_record()
+        record["timestamp"] = "2026-11-21T12:00:00+00:00"
+        save_market_observation(self.connection, record)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1",
+            now=datetime(2026, 11, 21, 12, 5, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["status"], "STALE")
+        self.assertTrue(result["stale"])
+
+    def test_quality_diagnostics_report_no_data_and_reject_non_synthetics(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import inspect_market_observation_quality
+
+        now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1", now=now
+        )
+        self.assertEqual(result["status"], "NO_DATA")
+        self.assertTrue(result["stale"])
+        with self.assertRaisesRegex(ValueError, "Deriv synthetic"):
+            inspect_market_observation_quality(self.connection, "XAUUSD", "M1", now=now)
+
+    def test_quality_diagnostics_require_timezone_aware_reference_time(self):
+        from datetime import datetime
+        from app.market_observation_store import inspect_market_observation_quality
+
+        with self.assertRaisesRegex(ValueError, "include a timezone"):
+            inspect_market_observation_quality(
+                self.connection, "1HZ100V", "M1", now=datetime(2026, 11, 21, 12, 0)
+            )
+
 if __name__ == "__main__":
     unittest.main()
