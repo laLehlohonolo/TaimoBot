@@ -127,6 +127,44 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         )
         self.assertEqual(unsupported.status_code, 400)
 
+    def test_market_data_quality_detects_real_stored_candle_gap_without_granting_eligibility(self):
+        from datetime import datetime, timedelta, timezone
+        from app.market_observation_store import save_market_observation
+
+        latest_minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        timestamps = [latest_minute - timedelta(minutes=3), latest_minute - timedelta(minutes=1)]
+        with database.get_connection() as connection:
+            for index, timestamp in enumerate(timestamps):
+                save_market_observation(connection, {
+                    "symbol": "R_10",
+                    "timeframe": "M1",
+                    "timestamp": timestamp.isoformat(),
+                    "source": "deriv",
+                    "open": 100.0 + index,
+                    "high": 102.0 + index,
+                    "low": 99.0 + index,
+                    "close": 101.0 + index,
+                    "volume": 0,
+                })
+
+        response = self.admin_client.get(
+            "/admin/brain/strategy-candidates/market-data-quality",
+            params={"symbol": "R_10", "timeframe": "M1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "GAPS_DETECTED")
+        self.assertEqual(body["observation_count"], 2)
+        self.assertEqual(body["missing_interval_count"], 1)
+        self.assertEqual(body["missing_candle_count"], 1)
+        self.assertEqual(body["missing_intervals"][0]["missing_candles"], 1)
+        self.assertFalse(body["provenance_verified"])
+        self.assertFalse(body["eligible_for_backtest"])
+        self.assertFalse(body["execution_eligible"])
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["signals_generated"])
+        self.assertFalse(body["execution_triggered"])
+
     def test_admin_can_create_review_and_reject_candidate(self):
         created = self.admin_client.post(
             "/admin/brain/strategy-candidates", json=self.candidate_payload()
