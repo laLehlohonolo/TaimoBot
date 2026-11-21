@@ -93,6 +93,82 @@ class MoneyLedgerCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(LedgerValidationError, "allowed range"):
             validate_journal_lines(lines)
 
+    def test_builds_balanced_compensating_reversal_without_mutating_original(self):
+        original = self.balanced_lines()
+        before = [dict(line) for line in original]
+        reversal = build_reversal_lines(original)
+        self.assertEqual(original, before)
+        self.assertEqual(reversal[0]["side"], "CREDIT")
+        self.assertEqual(reversal[1]["side"], "DEBIT")
+        self.assertEqual(reversal[0]["amount_minor"], 12550)
+        self.assertEqual(reversal[1]["amount_minor"], 12550)
+
+    def test_reversal_rejects_unbalanced_original(self):
+        lines = self.balanced_lines()
+        lines[0]["amount_minor"] -= 1
+        with self.assertRaisesRegex(LedgerValidationError, "debits must equal"):
+            build_reversal_lines(lines)
+
+    def test_deposit_requires_provider_confirmation_before_posting(self):
+        self.assertEqual(
+            validate_transaction_transition("DEPOSIT", "CREATED", "PENDING_PROVIDER"),
+            "PENDING_PROVIDER",
+        )
+        self.assertEqual(
+            validate_transaction_transition("DEPOSIT", "PENDING_PROVIDER", "CONFIRMED"),
+            "CONFIRMED",
+        )
+        self.assertEqual(
+            validate_transaction_transition("DEPOSIT", "CONFIRMED", "POSTED"),
+            "POSTED",
+        )
+
+    def test_deposit_cannot_skip_confirmation(self):
+        with self.assertRaisesRegex(LedgerValidationError, "Invalid deposit transition"):
+            validate_transaction_transition("DEPOSIT", "PENDING_PROVIDER", "POSTED")
+
+    def test_posted_deposit_can_only_be_reversed_as_compensation_or_reviewed(self):
+        self.assertEqual(
+            validate_transaction_transition("DEPOSIT", "POSTED", "REVERSED"),
+            "REVERSED",
+        )
+        with self.assertRaises(LedgerValidationError):
+            validate_transaction_transition("DEPOSIT", "REVERSED", "POSTED")
+
+    def test_withdrawal_requires_identity_review_and_approval_before_payout(self):
+        self.assertEqual(
+            validate_transaction_transition("WITHDRAWAL", "REQUESTED", "IDENTITY_CHECK_PENDING"),
+            "IDENTITY_CHECK_PENDING",
+        )
+        self.assertEqual(
+            validate_transaction_transition("WITHDRAWAL", "IDENTITY_CHECK_PENDING", "APPROVED"),
+            "APPROVED",
+        )
+        self.assertEqual(
+            validate_transaction_transition("WITHDRAWAL", "APPROVED", "PAYOUT_PENDING"),
+            "PAYOUT_PENDING",
+        )
+
+    def test_withdrawal_cannot_be_marked_paid_before_payout_pending(self):
+        with self.assertRaisesRegex(LedgerValidationError, "Invalid withdrawal transition"):
+            validate_transaction_transition("WITHDRAWAL", "APPROVED", "PAID")
+
+    def test_terminal_withdrawal_states_reject_further_transitions(self):
+        for status in ("REJECTED", "CANCELLED", "PAYOUT_FAILED"):
+            with self.subTest(status=status):
+                with self.assertRaises(LedgerValidationError):
+                    validate_transaction_transition("WITHDRAWAL", status, "PAID")
+
+    def test_unknown_transaction_kind_and_states_are_rejected(self):
+        for args in (
+            ("TRANSFER", "CREATED", "POSTED"),
+            ("DEPOSIT", "UNKNOWN", "POSTED"),
+            ("WITHDRAWAL", "REQUESTED", "UNKNOWN"),
+        ):
+            with self.subTest(args=args):
+                with self.assertRaises(LedgerValidationError):
+                    validate_transaction_transition(*args)
+
 
 if __name__ == "__main__":
     unittest.main()
