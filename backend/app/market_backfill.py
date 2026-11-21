@@ -35,8 +35,10 @@ async def run_backfill_batch(
         raise ValueError("Historical backfill currently supports Deriv synthetic indices only.")
     if timeframe not in TIMEFRAME_GRANULARITY_SECONDS:
         raise ValueError("Unsupported backfill timeframe.")
-    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 500:
-        raise ValueError("batch_size must be an integer between 1 and 500.")
+    # Explicit provider ranges require distinct start/end timestamps. With
+    # inclusive candle endpoints, a one-candle range cannot be represented.
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 2 <= batch_size <= 500:
+        raise ValueError("batch_size must be an integer between 2 and 500.")
     granularity = TIMEFRAME_GRANULARITY_SECONDS[timeframe]
     if now_epoch is not None and (
         isinstance(now_epoch, bool) or not isinstance(now_epoch, int) or now_epoch < 0
