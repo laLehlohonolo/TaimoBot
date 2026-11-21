@@ -5,6 +5,7 @@ There are deliberately no authorization, proposal, buy, sell, or trading methods
 """
 import asyncio
 import json
+import math
 
 import websockets
 
@@ -30,7 +31,7 @@ class DerivPublicMarketDataClient:
     """Small request/response client restricted to public, read-only data."""
 
     def __init__(self, timeout=DEFAULT_TIMEOUT_SECONDS):
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(float(timeout)) or timeout <= 0:
             raise ValueError("timeout must be a positive number.")
         self.timeout = float(timeout)
 
@@ -43,8 +44,12 @@ class DerivPublicMarketDataClient:
             ping_interval=20,
         ) as socket:
             await socket.send(json.dumps({**payload, "req_id": request_id}))
+            deadline = asyncio.get_running_loop().time() + self.timeout
             while True:
-                raw = await asyncio.wait_for(socket.recv(), timeout=self.timeout)
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError("Deriv response timed out.")
+                raw = await asyncio.wait_for(socket.recv(), timeout=remaining)
                 try:
                     response = json.loads(raw)
                 except (TypeError, json.JSONDecodeError) as exc:
@@ -105,7 +110,14 @@ class DerivPublicMarketDataClient:
         if normalized_symbol not in {item["symbol"] for item in active}:
             raise ValueError("Deriv does not currently report this symbol as active.")
         candles = await self.fetch_candles(normalized_symbol, timeframe, count=count)
-        results = [save_market_observation(connection, candle) for candle in candles]
+        connection.execute("SAVEPOINT deriv_market_sync")
+        try:
+            results = [save_market_observation(connection, candle) for candle in candles]
+            connection.execute("RELEASE SAVEPOINT deriv_market_sync")
+        except Exception:
+            connection.execute("ROLLBACK TO SAVEPOINT deriv_market_sync")
+            connection.execute("RELEASE SAVEPOINT deriv_market_sync")
+            raise
         return {
             "provider": "Deriv",
             "symbol": normalized_symbol,
