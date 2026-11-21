@@ -174,6 +174,49 @@ def persist_backfill_batch(connection, request, candles):
     }
 
 
+async def run_backfill_batch_with_connection_factory(
+    connection_factory, client, symbol, timeframe, *, batch_size=500, now_epoch=None
+):
+    """Run one batch while holding DB connections only for short local work.
+
+    connection_factory must return a fresh SQLite connection. The first
+    connection reads/prepares the cursor and is closed before provider I/O;
+    a second connection atomically persists observations and cursor progress.
+    """
+    connection = connection_factory()
+    try:
+        request = prepare_backfill_batch(
+            connection, symbol, timeframe,
+            batch_size=batch_size, now_epoch=now_epoch,
+        )
+    finally:
+        connection.close()
+
+    if request.get("complete"):
+        connection = connection_factory()
+        try:
+            checkpoint = get_backfill_checkpoint(
+                connection, request["symbol"], request["timeframe"]
+            )
+            return {
+                **checkpoint, "received_count": 0,
+                "inserted_count": 0, "complete": True,
+            }
+        finally:
+            connection.close()
+
+    candles = await client.collect_candle_range(
+        request["symbol"], request["timeframe"],
+        request["start_epoch"], request["end_epoch"],
+        max_candles=request["batch_size"],
+    )
+    connection = connection_factory()
+    try:
+        return persist_backfill_batch(connection, request, candles)
+    finally:
+        connection.close()
+
+
 async def run_backfill_batch(
     connection, client, symbol, timeframe, *, batch_size=500, now_epoch=None
 ):
