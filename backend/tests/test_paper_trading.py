@@ -2490,9 +2490,14 @@ class PaperTradingTests(unittest.TestCase):
             ],
         })
 
+        replay_active_socket = Socket(active_socket.response)
+        replay_history_socket = Socket(history_socket.response)
         with patch(
             "app.deriv_public_client.websockets.connect",
-            side_effect=[SocketContext(active_socket), SocketContext(history_socket)],
+            side_effect=[
+                SocketContext(active_socket), SocketContext(history_socket),
+                SocketContext(replay_active_socket), SocketContext(replay_history_socket),
+            ],
         ):
             sync = self.client.post(
                 "/market-observations/deriv-sync",
@@ -2501,8 +2506,23 @@ class PaperTradingTests(unittest.TestCase):
                     "confirm_collection": True,
                 },
             )
+            replay_sync = self.client.post(
+                "/market-observations/deriv-sync",
+                json={
+                    "symbol": "1HZ100V", "timeframe": "M1", "count": 2,
+                    "confirm_collection": True,
+                },
+            )
 
         self.assertEqual(sync.status_code, 200, sync.text)
+        self.assertEqual(replay_sync.status_code, 200, replay_sync.text)
+        replay_payload = replay_sync.json()
+        self.assertEqual(replay_payload["received_count"], 2)
+        self.assertEqual(replay_payload["inserted_count"], 0)
+        self.assertEqual(replay_payload["duplicate_count"], 2)
+        self.assertTrue(replay_payload["read_only"])
+        self.assertFalse(replay_payload["execution_triggered"])
+        self.assertFalse(replay_payload["signals_generated"])
         payload = sync.json()
         self.assertEqual(payload["received_count"], 2)
         self.assertEqual(payload["inserted_count"], 2)
