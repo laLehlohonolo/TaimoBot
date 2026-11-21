@@ -1349,7 +1349,7 @@ def inspect_recovery_artifact_inventory(
 
     artifacts: list[dict] = []
     seen_inodes: dict[tuple[int, int], str] = {}
-    artifact_snapshots: dict[tuple[str, str, str], tuple[int, int, int, int, int]] = {}
+    artifact_snapshots: dict[tuple[str, str, str], tuple[int, int, int, int, int, int, int]] = {}
     try:
         directories = [(root, "BACKUP")]
         if staging.exists():
