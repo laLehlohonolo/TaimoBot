@@ -13,6 +13,7 @@ import re
 import sqlite3
 import stat
 import time
+import tempfile
 import fcntl
 from contextlib import closing
 from datetime import datetime
@@ -1956,10 +1957,15 @@ def verify_restore_candidate(backup_path: Path, staging_path: Path) -> dict:
     """Verify a descriptor-pinned source snapshot in isolated staging; never replace live DB."""
     source = Path(backup_path)
     staging = Path(staging_path)
+    if source.resolve(strict=False) == staging.resolve(strict=False):
+        raise ValueError("Restore source and staging paths must be different.")
     staging.parent.mkdir(parents=True, exist_ok=True)
     staging.unlink(missing_ok=True)
 
-    snapshot = staging.with_name(f".{staging.name}.{uuid4().hex}.source.tmp")
+    # Keep the private source snapshot outside the managed backup/staging tree.
+    # Its TemporaryDirectory remains addressable even if that tree is renamed.
+    snapshot_directory = tempfile.TemporaryDirectory(prefix="taimobot-restore-source-")
+    snapshot = Path(snapshot_directory.name) / "source.sqlite3"
     source_fd = None
     snapshot_fd = None
 
@@ -2042,7 +2048,7 @@ def verify_restore_candidate(backup_path: Path, staging_path: Path) -> dict:
             os.close(snapshot_fd)
         if source_fd is not None:
             os.close(source_fd)
-        snapshot.unlink(missing_ok=True)
+        snapshot_directory.cleanup()
 
     return {
         "status": "RESTORE_CANDIDATE_VERIFIED",
