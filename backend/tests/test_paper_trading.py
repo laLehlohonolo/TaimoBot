@@ -2089,5 +2089,51 @@ class PaperTradingTests(unittest.TestCase):
         self.assertIn("observation-only", response.json()["detail"])
 
 
+    def test_market_observations_endpoint_is_authenticated_read_only_and_filterable(self):
+        from app.market_observation_store import save_market_observation
+
+        with database.get_connection() as connection:
+            save_market_observation(connection, {
+                "symbol": "1HZ100V",
+                "timeframe": "M1",
+                "timestamp": "2026-11-21T10:15:00+02:00",
+                "open": 1000,
+                "high": 1002,
+                "low": 999,
+                "close": 1001,
+                "volume": 0,
+                "source": "deriv-test",
+            })
+
+        response = self.client.get(
+            "/market-observations",
+            params={"symbol": "1hz100v", "timeframe": "M1", "limit": 10},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 1)
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertEqual(payload["observations"][0]["symbol"], "1HZ100V")
+        self.assertFalse(payload["observations"][0]["execution_eligible"])
+
+    def test_market_observations_endpoint_rejects_invalid_filters(self):
+        for params in (
+            {"symbol": "UNKNOWN"},
+            {"timeframe": "M2"},
+            {"limit": 1001},
+            {"limit": 0},
+        ):
+            with self.subTest(params=params):
+                response = self.client.get("/market-observations", params=params)
+                self.assertEqual(response.status_code, 400)
+
+    def test_market_observations_endpoint_requires_authentication(self):
+        self.client.headers.pop("Authorization", None)
+        response = self.client.get("/market-observations")
+        self.assertEqual(response.status_code, 401)
+
+
 if __name__ == "__main__":
     unittest.main()
