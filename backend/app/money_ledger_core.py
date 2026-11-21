@@ -24,8 +24,13 @@ def validate_journal_lines(
     Amounts are integer minor units (cents for ZAR). This function performs
     no persistence and does not create or move funds.
     """
-    if not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha():
-        raise LedgerValidationError("Currency must be a three-letter code.")
+    if (
+        not isinstance(currency, str)
+        or len(currency) != 3
+        or not currency.isascii()
+        or not currency.isalpha()
+    ):
+        raise LedgerValidationError("Currency must be a three-letter ASCII code.")
     normalized_currency = currency.upper()
 
     try:
@@ -72,6 +77,8 @@ def validate_journal_lines(
             "currency": normalized_currency,
         })
 
+    if debit_total > MAX_AMOUNT_MINOR or credit_total > MAX_AMOUNT_MINOR:
+        raise LedgerValidationError("Journal total is outside the supported amount range.")
     if debit_total != credit_total:
         raise LedgerValidationError("Journal debits must equal journal credits.")
 
