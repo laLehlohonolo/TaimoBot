@@ -2201,5 +2201,50 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+    def test_deriv_sync_provider_timeout_returns_gateway_timeout_without_persisting(self):
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(
+                side_effect=TimeoutError("provider timeout details")
+            )
+            client_class.return_value.persist_candles = Mock()
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.json()["detail"], "Deriv market-data request timed out.")
+        client_class.return_value.persist_candles.assert_not_called()
+
+    def test_deriv_sync_provider_rejection_returns_sanitized_bad_gateway_without_persisting(self):
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(
+                side_effect=RuntimeError("provider account or internal details")
+            )
+            client_class.return_value.persist_candles = Mock()
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "Deriv market-data provider rejected the request.")
+        self.assertNotIn("provider account", response.text)
+        client_class.return_value.persist_candles.assert_not_called()
+
+    def test_deriv_sync_network_failure_returns_sanitized_bad_gateway_without_persisting(self):
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(
+                side_effect=OSError("socket or network internals")
+            )
+            client_class.return_value.persist_candles = Mock()
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "Deriv market-data collection failed safely.")
+        self.assertNotIn("socket or network", response.text)
+        client_class.return_value.persist_candles.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
