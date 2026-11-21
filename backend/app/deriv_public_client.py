@@ -87,7 +87,7 @@ class DerivPublicMarketDataClient:
                 "style": "candles",
                 "granularity": TIMEFRAME_GRANULARITY_SECONDS[timeframe],
             },
-            expected_msg_type="history",
+            expected_msg_type="candles",
             request_id=2,
         )
         candles = response.get("candles")
