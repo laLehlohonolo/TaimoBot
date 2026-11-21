@@ -626,7 +626,7 @@ class StrategyLabSchemaTests(unittest.TestCase):
                 )
 
 
-    def test_backfill_review_retry_run_and_persistence_complete_as_one_admin_workflow(self):
+    def test_backfill_gap_review_retry_run_and_persistence_complete_as_one_admin_workflow(self):
         from datetime import datetime, timezone
         from unittest.mock import patch
 
@@ -635,24 +635,16 @@ class StrategyLabSchemaTests(unittest.TestCase):
                 """
                 INSERT INTO market_backfill_checkpoints (
                     symbol, timeframe, next_end_epoch, status,
-                    batches_completed, last_error
-                ) VALUES ('1HZ100V', 'M1', 3600, 'GAP_REVIEW', 2, 'Previous gap reviewed.')
+                    batches_completed
+                ) VALUES ('1HZ100V', 'M1', 3600, 'RUNNING', 2)
                 """
             )
 
-        review = self.admin_client.post(
-            "/admin/market-backfills/1HZ100V/M1/review",
-            json={
-                "decision": "RETRY_SAME_RANGE",
-                "confirm_retry": True,
-                "rationale": "Reviewed source gap; retry this exact historical range.",
-            },
-        )
-        self.assertEqual(review.status_code, 200)
-        self.assertEqual(review.json()["next_end_epoch"], 3600)
-        self.assertFalse(review.json()["cursor_advanced"])
-
         class DeterministicDerivClient:
+            def __init__(self, epochs):
+                self.epochs = epochs
+                self.assertions = None
+
             async def collect_candle_range(
                 self, symbol, timeframe, start_epoch, end_epoch, max_candles
             ):
@@ -671,14 +663,37 @@ class StrategyLabSchemaTests(unittest.TestCase):
                         "volume": 0,
                         "source": "deriv",
                     }
-                    for epoch in (3480, 3540, 3600)
+                    for epoch in self.epochs
                 ]
 
-        deterministic_client = DeterministicDerivClient()
+        incomplete_client = DeterministicDerivClient((3540, 3600))
+        complete_client = DeterministicDerivClient((3480, 3540, 3600))
         with patch(
             "app.main.DerivPublicMarketDataClient",
-            return_value=deterministic_client,
+            side_effect=[incomplete_client, complete_client],
         ):
+            incomplete_run = self.admin_client.post(
+                "/admin/market-backfills/1HZ100V/M1/run",
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+            self.assertEqual(incomplete_run.status_code, 200, incomplete_run.text)
+            self.assertEqual(incomplete_run.json()["status"], "GAP_REVIEW")
+            self.assertEqual(incomplete_run.json()["next_end_epoch"], 3600)
+            self.assertFalse(incomplete_run.json()["backtest_eligible"])
+            self.assertFalse(incomplete_run.json()["execution_triggered"])
+
+            review = self.admin_client.post(
+                "/admin/market-backfills/1HZ100V/M1/review",
+                json={
+                    "decision": "RETRY_SAME_RANGE",
+                    "confirm_retry": True,
+                    "rationale": "Reviewed source gap; retry this exact historical range.",
+                },
+            )
+            self.assertEqual(review.status_code, 200)
+            self.assertEqual(review.json()["next_end_epoch"], 3600)
+            self.assertFalse(review.json()["cursor_advanced"])
+
             run = self.admin_client.post(
                 "/admin/market-backfills/1HZ100V/M1/run",
                 json={"confirm_collection": True, "batch_size": 3},
@@ -686,17 +701,17 @@ class StrategyLabSchemaTests(unittest.TestCase):
 
         self.assertEqual(run.status_code, 200, run.text)
         body = run.json()
-        self.assertEqual(body["inserted_count"], 3)
-        self.assertEqual(body["batches_completed"], 3)
+        self.assertEqual(body["inserted_count"], 1)
+        self.assertEqual(body["duplicate_count"], 2)
+        self.assertEqual(body["batches_completed"], 4)
         self.assertEqual(body["next_end_epoch"], 3420)
         self.assertTrue(body["read_only"])
         self.assertFalse(body["backtest_eligible"])
         self.assertFalse(body["signals_generated"])
         self.assertFalse(body["execution_triggered"])
-        self.assertEqual(
-            deterministic_client.assertions,
-            ("1HZ100V", "M1", 3480, 3600, 3),
-        )
+        expected_request = ("1HZ100V", "M1", 3480, 3600, 3)
+        self.assertEqual(incomplete_client.assertions, expected_request)
+        self.assertEqual(complete_client.assertions, expected_request)
 
         with database.get_connection() as connection:
             checkpoint = connection.execute(
@@ -720,7 +735,7 @@ class StrategyLabSchemaTests(unittest.TestCase):
             ).fetchone()["count"]
         self.assertEqual(checkpoint["status"], "RUNNING")
         self.assertEqual(checkpoint["next_end_epoch"], 3420)
-        self.assertEqual(checkpoint["batches_completed"], 3)
+        self.assertEqual(checkpoint["batches_completed"], 4)
         self.assertEqual(observations, 3)
         self.assertEqual(reviews, 1)
 
