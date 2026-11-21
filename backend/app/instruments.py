@@ -111,6 +111,30 @@ INSTRUMENTS = MappingProxyType({
         "market_group": "volatility_indices",
         "execution_model": "NOT_CONFIGURED",
     }),
+    "1HZ15V": MappingProxyType({
+        "symbol": "1HZ15V",
+        "asset_class": "synthetic_index",
+        "provider": "Deriv",
+        "role": "initial_observation_candidate",
+        "market_group": "volatility_indices",
+        "execution_model": "NOT_CONFIGURED",
+    }),
+    "1HZ30V": MappingProxyType({
+        "symbol": "1HZ30V",
+        "asset_class": "synthetic_index",
+        "provider": "Deriv",
+        "role": "initial_observation_candidate",
+        "market_group": "volatility_indices",
+        "execution_model": "NOT_CONFIGURED",
+    }),
+    "1HZ90V": MappingProxyType({
+        "symbol": "1HZ90V",
+        "asset_class": "synthetic_index",
+        "provider": "Deriv",
+        "role": "initial_observation_candidate",
+        "market_group": "volatility_indices",
+        "execution_model": "NOT_CONFIGURED",
+    }),
 })
 
 # Values must be supplied by a verified broker/instrument adapter, never
