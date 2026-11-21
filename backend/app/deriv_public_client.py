@@ -129,12 +129,14 @@ class DerivPublicMarketDataClient:
             raise ValueError("Historical range bounds must be non-negative integer epochs.")
         if end_epoch <= start_epoch:
             raise ValueError("Historical range end must be after its start.")
-        if isinstance(max_candles, bool) or not isinstance(max_candles, int) or not 1 <= max_candles <= 500:
-            raise ValueError("max_candles must be an integer between 1 and 500.")
+        if isinstance(max_candles, bool) or not isinstance(max_candles, int) or not 2 <= max_candles <= 500:
+            raise ValueError("max_candles must be an integer between 2 and 500 for an explicit range.")
         granularity = TIMEFRAME_GRANULARITY_SECONDS[timeframe]
         if start_epoch % granularity or end_epoch % granularity:
             raise ValueError("Historical range bounds must align to the candle timeframe.")
-        if end_epoch - start_epoch > granularity * max_candles:
+        # Both endpoints are inclusive candle timestamps: N candles span
+        # exactly N - 1 intervals. Reject a range that could return N + 1.
+        if end_epoch - start_epoch > granularity * (max_candles - 1):
             raise ValueError("Historical range exceeds the bounded candle batch size.")
 
         response = await self._request(
