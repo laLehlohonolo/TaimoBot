@@ -2252,8 +2252,10 @@ class PaperTradingTests(unittest.TestCase):
             return save_observation(connection, candle)
 
         with patch("app.deriv_public_client.save_market_observation", side_effect=fail_second_insert):
-            with patch("app.main.DerivPublicMarketDataClient") as client_class:
-                client_class.return_value.collect_candles = AsyncMock(return_value=candles)
+            with patch(
+                "app.main.DerivPublicMarketDataClient.collect_candles",
+                new=AsyncMock(return_value=candles),
+            ):
                 response = self.client.post(
                     "/market-observations/deriv-sync",
                     json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
