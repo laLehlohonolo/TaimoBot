@@ -68,6 +68,9 @@ from .safety import (
 )
 from .instruments import list_instruments, EXECUTION_ENABLED_SYMBOLS
 from .market_observation_store import list_market_observations
+from .deriv_public_client import DerivPublicMarketDataClient
+from .market_observations import SUPPORTED_TIMEFRAMES
+from .instruments import get_instrument
 
 
 @asynccontextmanager
@@ -196,6 +199,13 @@ class StrategyKnowledgeRequest(BaseModel):
     entry_logic: str = Field(min_length=10, max_length=2000)
     exit_logic: str = Field(min_length=10, max_length=2000)
     risk_notes: str = Field(min_length=10, max_length=2000)
+
+
+class DerivMarketSyncRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9._/-]+$")
+    timeframe: str = Field(min_length=2, max_length=3)
+    count: int = Field(default=100, ge=1, le=100)
+    confirm_collection: bool
 
 
 @app.get("/instruments")
