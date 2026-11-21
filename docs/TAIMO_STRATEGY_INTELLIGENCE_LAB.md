@@ -135,3 +135,12 @@ The seven-day report and every later candidate report must be private to adminis
 ## Implementation status
 
 This document specifies the target capability. It does not claim that the Strategy Intelligence Lab, seven-day challenge scheduler, strategy backtesting harness, composite strategy engine, or candidate approval UI is implemented. Deliver these in tested stages, beginning with experiment records and a reproducible evaluation harness. Do not start the seven-day clock until the data and test infrastructure can support a truthful report.
+
+
+## Separation from the existing participant strategy library
+
+The current `backend/app/strategy_knowledge.py` and `/strategies` API are a participant-facing strategy-knowledge feature. They expose built-in reference techniques and a participant's own submitted notes, with records marked `UNVALIDATED`. They are not a private research repository, strategy execution engine, or administrator approval system.
+
+Do not place Brain's confidential hypotheses, candidate strategies, experiment data, private parameters, test results, source-code proposals or administrator decisions in that participant-facing store. Do not change its existing participant visibility rules to expose internal Brain records.
+
+Implement a separate, administrator-authorized research domain with distinct persistence and API boundaries. At minimum it needs versioned strategy candidates, experiment runs, immutable evaluation results, evidence/data-snapshot references, review decisions, staging records, release records and rollback references. Every read and write must enforce administrator permissions on the backend, with audit logging. Participant routes must have no query path to this domain. Add explicit negative authorization tests proving that ordinary participants cannot list, retrieve, infer or mutate any internal candidate, experiment, report or approval record.
