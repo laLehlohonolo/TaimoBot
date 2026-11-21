@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, Field, StrictFloat
+from pydantic import BaseModel, Field, StrictFloat, StrictInt
 
 from .database import init_db, get_connection
 from .maintenance_scheduler import (
@@ -204,7 +204,7 @@ class StrategyKnowledgeRequest(BaseModel):
 class DerivMarketSyncRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9._/-]+$")
     timeframe: str = Field(min_length=2, max_length=3)
-    count: int = Field(default=100, ge=1, le=100)
+    count: StrictInt = Field(default=100, ge=1, le=100)
     confirm_collection: bool
 
 
