@@ -117,8 +117,6 @@ def list_calendars(symbol: str | None = None, user=Depends(current_user)):
 def get_calendar(calendar_id: str, user=Depends(current_user)):
     require_admin(user)
     with get_connection() as connection:
-        # Serialize review transitions so two administrators cannot race approvals.
-        connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
             "SELECT * FROM brain_session_calendars WHERE calendar_id = ?", (calendar_id,)
         ).fetchone()
@@ -138,6 +136,8 @@ def decide_calendar(calendar_id: str, request: CalendarDecision, user=Depends(cu
     require_admin(user)
     now = datetime.now(timezone.utc).isoformat()
     with get_connection() as connection:
+        # Serialize review transitions so two administrators cannot race approvals.
+        connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
             "SELECT * FROM brain_session_calendars WHERE calendar_id = ?", (calendar_id,)
         ).fetchone()
