@@ -117,6 +117,8 @@ def list_calendars(symbol: str | None = None, user=Depends(current_user)):
 def get_calendar(calendar_id: str, user=Depends(current_user)):
     require_admin(user)
     with get_connection() as connection:
+        # Serialize review transitions so two administrators cannot race approvals.
+        connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
             "SELECT * FROM brain_session_calendars WHERE calendar_id = ?", (calendar_id,)
         ).fetchone()
@@ -163,8 +165,11 @@ def decide_calendar(calendar_id: str, request: CalendarDecision, user=Depends(cu
                 raise HTTPException(status_code=400, detail="HTTPS approval evidence_url is required.")
             new_status = "APPROVED"
         elif request.decision == "REQUEST_CHANGES":
-            if status in ("APPROVED", "REJECTED"):
-                raise HTTPException(status_code=409, detail="Final calendar decisions cannot be changed.")
+            if status != "SOURCE_VERIFIED_PENDING_APPROVAL":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Only a source-verified calendar can be returned for changes.",
+                )
             new_status = "PENDING_SOURCE_VERIFICATION"
         else:
             if status in ("APPROVED", "REJECTED"):
