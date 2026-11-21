@@ -320,5 +320,68 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
                     )
 
 
+    async def test_provider_failure_moves_same_cursor_to_operator_review(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            def factory():
+                connection = sqlite3.connect(database_file.name)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                return connection
+
+            class FailingClient(FakeRangeClient):
+                async def collect_candle_range(self, *args, **kwargs):
+                    raise TimeoutError("provider timeout")
+
+            with self.assertRaises(TimeoutError):
+                await run_backfill_batch_with_connection_factory(
+                    factory, FailingClient([]), "1HZ100V", "M1",
+                    batch_size=3, now_epoch=3600,
+                )
+            connection = factory()
+            try:
+                checkpoint = get_backfill_checkpoint(connection, "1HZ100V", "M1")
+                count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM market_observations"
+                ).fetchone()["count"]
+            finally:
+                connection.close()
+            self.assertEqual(checkpoint["status"], "GAP_REVIEW")
+            self.assertEqual(checkpoint["next_end_epoch"], 3600)
+            self.assertEqual(checkpoint["batches_completed"], 0)
+            self.assertIn("TimeoutError", checkpoint["last_error"])
+            self.assertEqual(count, 0)
+
+    async def test_invalid_provider_batch_moves_same_cursor_to_operator_review(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            def factory():
+                connection = sqlite3.connect(database_file.name)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                return connection
+
+            invalid = candle(3540)
+            invalid["high"] = 1
+            invalid["low"] = 2
+            client = FakeRangeClient([candle(3480), invalid, candle(3600)])
+            with self.assertRaises(ValueError):
+                await run_backfill_batch_with_connection_factory(
+                    factory, client, "1HZ100V", "M1",
+                    batch_size=3, now_epoch=3600,
+                )
+            connection = factory()
+            try:
+                checkpoint = get_backfill_checkpoint(connection, "1HZ100V", "M1")
+                count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM market_observations"
+                ).fetchone()["count"]
+            finally:
+                connection.close()
+            self.assertEqual(checkpoint["status"], "GAP_REVIEW")
+            self.assertEqual(checkpoint["next_end_epoch"], 3600)
+            self.assertEqual(checkpoint["batches_completed"], 0)
+            self.assertIn("ValueError", checkpoint["last_error"])
+            self.assertEqual(count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
