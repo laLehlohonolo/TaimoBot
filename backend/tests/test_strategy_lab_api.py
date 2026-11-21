@@ -98,6 +98,52 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         self.assertTrue(body["read_only"])
         self.assertFalse(body["execution_triggered"])
 
+    def test_data_readiness_reports_real_inventory_without_trusting_source_labels(self):
+        from app.market_observation_store import save_market_observation
+
+        base = {
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "open": 2000.0,
+            "high": 2002.0,
+            "low": 1999.0,
+            "close": 2001.0,
+            "volume": 0,
+        }
+        with database.get_connection() as connection:
+            save_market_observation(connection, {
+                **base, "timestamp": "2026-11-21T10:00:00Z", "source": "provider-labelled-live"
+            })
+            save_market_observation(connection, {
+                **base, "timestamp": "2026-11-21T10:05:00Z", "source": "provider-labelled-replay"
+            })
+
+        response = self.admin_client.get(
+            "/admin/brain/strategy-candidates/data-readiness",
+            params={"symbol": "XAUUSD", "timeframe": "M5"},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["data_available"])
+        self.assertEqual(body["observation_count"], 2)
+        self.assertEqual(body["source_count"], 2)
+        self.assertEqual(body["provenance_status_count"], 1)
+        self.assertEqual(body["earliest_timestamp"], "2026-11-21T10:00:00+00:00")
+        self.assertEqual(body["latest_timestamp"], "2026-11-21T10:05:00+00:00")
+        self.assertEqual(
+            {item["source"] for item in body["provenance_breakdown"]},
+            {"provider-labelled-live", "provider-labelled-replay"},
+        )
+        self.assertTrue(all(
+            item["provenance_status"] == "UNVERIFIED_EXTERNAL_INPUT"
+            for item in body["provenance_breakdown"]
+        ))
+        self.assertFalse(body["provenance_verified"])
+        self.assertFalse(body["eligible_for_backtest"])
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["signals_generated"])
+        self.assertFalse(body["execution_triggered"])
+
     def test_market_data_quality_is_admin_only_and_never_enables_research_or_execution(self):
         params = {"symbol": "R_10", "timeframe": "M1"}
         self.assertEqual(
