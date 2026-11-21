@@ -67,6 +67,8 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["version"], 1)
         self.assertEqual(body["status"], "PENDING_SOURCE_VERIFICATION")
+        self.assertTrue(body["record"]["submitted_by"])
+        self.assertEqual(body["record"]["submitted_by"], body["submitted_by"])
         self.assertFalse(body["source_verified"])
         self.assertFalse(body["admin_reviewed"])
         self.assertFalse(body["session_calendar_applied"])
@@ -138,6 +140,11 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
                     "UPDATE brain_session_calendars SET record_json = '{}' WHERE calendar_id = ?",
+                    (body["calendar_id"],),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE brain_session_calendars SET status = 'APPROVED' WHERE calendar_id = ?",
                     (body["calendar_id"],),
                 )
             with self.assertRaises(sqlite3.IntegrityError):
