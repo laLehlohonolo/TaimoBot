@@ -71,6 +71,84 @@ def list_market_observations(connection, symbol=None, timeframe=None, limit=100)
     ]
 
 
+def inspect_market_observation_coverage(connection, symbol, timeframe, source=None):
+    """Measure stored candle coverage per source; never assert source authenticity."""
+    from datetime import datetime
+    from .instruments import get_instrument
+    from .market_observations import SUPPORTED_TIMEFRAMES
+
+    instrument = get_instrument(symbol)
+    if timeframe not in SUPPORTED_TIMEFRAMES:
+        raise ValueError("Unsupported observation timeframe.")
+    seconds = {
+        "M1": 60, "M5": 300, "M15": 900, "M30": 1800,
+        "H1": 3600, "H4": 14400, "D1": 86400,
+    }[timeframe]
+    clauses = ["symbol = ?", "timeframe = ?"]
+    params = [instrument["symbol"], timeframe]
+    if source is not None:
+        if not isinstance(source, str) or not source.strip() or len(source.strip()) > 120:
+            raise ValueError("source must contain 1 to 120 non-whitespace characters.")
+        clauses.append("source = ?")
+        params.append(source.strip())
+    rows = connection.execute(
+        "SELECT source, observed_at FROM market_observations WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY source, observed_at",
+        params,
+    ).fetchall()
+
+    by_source = {}
+    for row in rows:
+        by_source.setdefault(row["source"], []).append(
+            datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00"))
+        )
+
+    reports = []
+    for source_name, timestamps in sorted(by_source.items()):
+        unique = sorted(set(timestamps))
+        first, last = unique[0], unique[-1]
+        unaligned = [
+            stamp for stamp in unique
+            if abs(stamp.timestamp() % seconds) > 1e-6
+            and abs(stamp.timestamp() % seconds - seconds) > 1e-6
+        ]
+        expected = int((last - first).total_seconds() // seconds) + 1
+        cadence_valid = not unaligned
+        missing = max(0, expected - len(unique)) if cadence_valid else None
+        reports.append({
+            "source": source_name,
+            "observation_count": len(timestamps),
+            "unique_timestamp_count": len(unique),
+            "duplicate_timestamp_count": len(timestamps) - len(unique),
+            "first_timestamp": first.isoformat(),
+            "last_timestamp": last.isoformat(),
+            "expected_candle_count": expected if cadence_valid else None,
+            "missing_candle_count": missing,
+            "coverage_percent": round(
+                (len(unique) / expected) * 100, 2
+            ) if cadence_valid and expected else None,
+            "unaligned_timestamp_count": len(unaligned),
+            "cadence_valid": cadence_valid,
+            "provenance_status": "UNVERIFIED_EXTERNAL_INPUT",
+            "provenance_verified": False,
+            "eligible_for_backtest": False,
+            "execution_eligible": False,
+        })
+    return {
+        "symbol": instrument["symbol"],
+        "timeframe": timeframe,
+        "source_filter": source.strip() if source is not None else None,
+        "source_count": len(reports),
+        "sources": reports,
+        "read_only": True,
+        "provenance_verified": False,
+        "eligible_for_backtest": False,
+        "signals_generated": False,
+        "execution_triggered": False,
+    }
+
+
 def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
     """Report freshness and missing intervals for a continuous Deriv synthetic series."""
     from datetime import datetime, timezone
