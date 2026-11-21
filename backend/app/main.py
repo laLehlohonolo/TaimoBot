@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, Field, StrictFloat, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt
 
 from .database import init_db, get_connection
 from .maintenance_scheduler import (
@@ -205,6 +205,12 @@ class StrategyKnowledgeRequest(BaseModel):
     entry_logic: str = Field(min_length=10, max_length=2000)
     exit_logic: str = Field(min_length=10, max_length=2000)
     risk_notes: str = Field(min_length=10, max_length=2000)
+
+
+class BackfillReviewRequest(BaseModel):
+    decision: Literal["RETRY_SAME_RANGE"]
+    confirm_retry: StrictBool
+    rationale: str = Field(min_length=10, max_length=1000)
 
 
 class DerivMarketSyncRequest(BaseModel):
@@ -1148,6 +1154,99 @@ def strategy_details(strategy_id: str, user=Depends(current_user)):
     if strategy is None:
         raise HTTPException(status_code=404, detail="Strategy not found.")
     return strategy
+
+
+@app.get("/admin/market-backfills")
+def list_market_backfill_checkpoints(user=Depends(current_user)):
+    """Admin-only read access to durable historical backfill checkpoints."""
+    require_admin(user)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT symbol, timeframe, next_end_epoch, status,
+                   earliest_observed_at, latest_observed_at,
+                   batches_completed, last_error, updated_at
+            FROM market_backfill_checkpoints
+            ORDER BY symbol, timeframe
+            """
+        ).fetchall()
+    return {
+        "checkpoints": [dict(row) for row in rows],
+        "read_only": True,
+        "backtest_eligible": False,
+        "execution_triggered": False,
+    }
+
+
+@app.post("/admin/market-backfills/{symbol}/{timeframe}/review")
+def review_market_backfill(
+    symbol: str,
+    timeframe: str,
+    request: BackfillReviewRequest,
+    user=Depends(current_user),
+):
+    """Authorize one audited retry of the same held range; never skip a gap."""
+    require_admin(user)
+    if request.confirm_retry is not True:
+        raise HTTPException(status_code=400, detail="Explicit retry confirmation is required.")
+    try:
+        instrument = get_instrument(symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices support historical backfill.")
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported backfill timeframe.")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        checkpoint = connection.execute(
+            """
+            SELECT next_end_epoch, status
+            FROM market_backfill_checkpoints
+            WHERE symbol = ? AND timeframe = ?
+            """,
+            (instrument["symbol"], timeframe),
+        ).fetchone()
+        if checkpoint is None:
+            raise HTTPException(status_code=404, detail="Backfill checkpoint not found.")
+        if checkpoint["status"] != "GAP_REVIEW" or checkpoint["next_end_epoch"] is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Only a held gap-review checkpoint can be authorized for retry.",
+            )
+        connection.execute(
+            """
+            INSERT INTO market_backfill_review_audit (
+                review_id, symbol, timeframe, decision, rationale, decided_by
+            ) VALUES (?, ?, ?, 'RETRY_SAME_RANGE', ?, ?)
+            """,
+            (str(uuid4()), instrument["symbol"], timeframe,
+             request.rationale.strip(), user["user_id"]),
+        )
+        updated = connection.execute(
+            """
+            UPDATE market_backfill_checkpoints
+            SET status = 'RUNNING', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE symbol = ? AND timeframe = ? AND status = 'GAP_REVIEW'
+              AND next_end_epoch = ?
+            """,
+            (instrument["symbol"], timeframe, checkpoint["next_end_epoch"]),
+        )
+        if updated.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Checkpoint changed during review.")
+        return {
+            "symbol": instrument["symbol"],
+            "timeframe": timeframe,
+            "status": "RUNNING",
+            "next_end_epoch": checkpoint["next_end_epoch"],
+            "decision": "RETRY_SAME_RANGE",
+            "cursor_advanced": False,
+            "read_only": True,
+            "backtest_eligible": False,
+            "execution_triggered": False,
+            "signals_generated": False,
+        }
 
 
 @app.post("/market-observations/deriv-sync")
