@@ -95,3 +95,17 @@ def validate_broker_specifications(specifications):
         raise ValueError("Minimum volume cannot exceed maximum volume.")
 
     return normalized
+
+
+# Execution approval is deliberately narrower than catalogue membership.
+EXECUTION_ENABLED_SYMBOLS = frozenset({"XAUUSD"})
+
+
+def require_execution_approval(symbol):
+    """Reject observation-only or unknown instruments at every order boundary."""
+    normalized = str(symbol).strip().upper()
+    if normalized not in EXECUTION_ENABLED_SYMBOLS:
+        raise ValueError(
+            "Instrument is observation-only and is not approved for paper execution."
+        )
+    return normalized
