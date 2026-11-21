@@ -2135,6 +2135,47 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
 
+
+    def test_market_observation_quality_endpoint_is_authenticated_read_only(self):
+        from app.market_observation_store import save_market_observation
+
+        with database.get_connection() as connection:
+            save_market_observation(connection, {
+                "symbol": "1HZ100V", "timeframe": "M1",
+                "timestamp": "2026-11-21T10:15:00+02:00",
+                "open": 1000, "high": 1002, "low": 999, "close": 1001,
+                "volume": 0, "source": "deriv",
+            })
+        response = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "STALE")
+        self.assertTrue(payload["stale"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["execution_eligible"])
+
+    def test_market_observation_quality_endpoint_rejects_invalid_instruments_and_timeframes(self):
+        for params in (
+            {"symbol": "XAUUSD", "timeframe": "M1"},
+            {"symbol": "1HZ100V", "timeframe": "M2"},
+        ):
+            with self.subTest(params=params):
+                response = self.client.get("/market-observations/quality", params=params)
+                self.assertEqual(response.status_code, 400)
+
+    def test_market_observation_quality_endpoint_requires_authentication(self):
+        self.client.headers.pop("Authorization", None)
+        response = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(response.status_code, 401)
+
     def test_deriv_sync_endpoint_is_authenticated_confirmed_bounded_and_read_only(self):
         candles = [
             {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:15:00+00:00",
