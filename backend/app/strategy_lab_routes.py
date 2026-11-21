@@ -171,6 +171,33 @@ def strategy_data_readiness(
     }
 
 
+@router.get("/market-data-quality")
+def strategy_market_data_quality(
+    symbol: str,
+    timeframe: str,
+    user=Depends(current_user),
+):
+    """Admin-only, read-only freshness, cadence and gap diagnostics for synthetic feeds."""
+    require_admin(user)
+    from .market_observation_store import inspect_market_observation_quality
+
+    try:
+        with get_connection() as connection:
+            report = inspect_market_observation_quality(
+                connection, symbol=symbol, timeframe=timeframe
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        **report,
+        "read_only": True,
+        "provenance_verified": False,
+        "eligible_for_backtest": False,
+        "signals_generated": False,
+        "execution_triggered": False,
+    }
+
+
 @router.get("/{candidate_id}")
 def get_candidate(candidate_id: str, user=Depends(current_user)):
     require_admin(user)
