@@ -121,6 +121,16 @@ class ParticipantDisplayCurrencyApiTests(unittest.TestCase):
         current = self.client.get("/participant/currency-preference", headers=self.headers)
         self.assertIn(current.json()["currency"], ("USD", "EUR"))
 
+    def test_confirmation_rejects_coerced_non_boolean_values(self):
+        for value in ("true", 1, "yes", None):
+            with self.subTest(value=value):
+                response = self.client.post(
+                    "/participant/currency-preference",
+                    json={"currency": "ZAR", "confirmed": value},
+                    headers=self.headers,
+                )
+                self.assertEqual(response.status_code, 422)
+
     def test_unsupported_currency_is_rejected(self):
         response = self.client.post(
             "/participant/currency-preference",
