@@ -92,6 +92,29 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "more candles than requested"):
                 await DerivPublicMarketDataClient().fetch_candles("1HZ100V", "M1", count=2)
 
+    async def test_rejects_deriv_candles_out_of_order_or_with_duplicate_timestamps(self):
+        response = self.history_response()
+        response["candles"] = list(reversed(response["candles"]))
+        socket = FakeSocket(response)
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            with self.assertRaisesRegex(ValueError, "strictly ordered and unique"):
+                await DerivPublicMarketDataClient().fetch_candles("1HZ100V", "M1", count=2)
+
+        response = self.history_response()
+        response["candles"][1]["epoch"] = response["candles"][0]["epoch"]
+        socket = FakeSocket(response)
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            with self.assertRaisesRegex(ValueError, "strictly ordered and unique"):
+                await DerivPublicMarketDataClient().fetch_candles("1HZ100V", "M1", count=2)
+
+    async def test_rejects_deriv_candle_timestamp_not_aligned_to_timeframe(self):
+        response = self.history_response()
+        response["candles"][0]["epoch"] += 1
+        socket = FakeSocket(response)
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            with self.assertRaisesRegex(ValueError, "not aligned to its timeframe"):
+                await DerivPublicMarketDataClient().fetch_candles("1HZ100V", "M1", count=2)
+
     async def test_rejects_non_deriv_symbols_invalid_timeframes_and_counts_before_network(self):
         client = DerivPublicMarketDataClient()
         for args in (("EURUSD", "M1", 10), ("1HZ100V", "M2", 10),
