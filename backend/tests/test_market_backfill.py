@@ -2,7 +2,9 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
+from app.deriv_public_client import DerivPublicMarketDataClient
 from app.database import ensure_market_observation_schema
 from app.market_backfill import (
     get_backfill_checkpoint, prepare_backfill_batch,
@@ -568,6 +570,55 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(count, 6)
             self.assertEqual(checkpoint["batches_completed"], 2)
             self.assertEqual(checkpoint["next_end_epoch"], 3240)
+
+
+    async def test_exhausted_deriv_retries_hold_backfill_cursor_for_operator_review(self):
+        class FailingSocketContext:
+            async def __aenter__(self):
+                raise OSError("temporary Deriv connection failure")
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            def factory():
+                connection = sqlite3.connect(database_file.name, timeout=10)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                return connection
+
+            client = DerivPublicMarketDataClient(timeout=1)
+            with patch(
+                "app.deriv_public_client.websockets.connect",
+                side_effect=[
+                    FailingSocketContext(),
+                    FailingSocketContext(),
+                    FailingSocketContext(),
+                ],
+            ) as connect, patch(
+                "app.deriv_public_client.asyncio.sleep", new_callable=AsyncMock
+            ):
+                with self.assertRaisesRegex(OSError, "temporary Deriv connection failure"):
+                    await run_backfill_batch_with_connection_factory(
+                        factory, client, "1HZ100V", "M1",
+                        batch_size=3, now_epoch=3600,
+                    )
+
+            self.assertEqual(connect.call_count, 3)
+            connection = factory()
+            try:
+                checkpoint = get_backfill_checkpoint(connection, "1HZ100V", "M1")
+                count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM market_observations"
+                ).fetchone()["count"]
+            finally:
+                connection.close()
+
+            self.assertEqual(checkpoint["status"], "GAP_REVIEW")
+            self.assertEqual(checkpoint["next_end_epoch"], 3600)
+            self.assertEqual(checkpoint["batches_completed"], 0)
+            self.assertIn("OSError", checkpoint["last_error"])
+            self.assertEqual(count, 0)
 
 if __name__ == "__main__":
     unittest.main()
