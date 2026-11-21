@@ -3150,6 +3150,18 @@ def verify_restore_execution_readiness_under_lock(
     }
     if after_hashes != expected_artifact_hashes:
         raise ValueError("Restore artifact changed during locked preflight.")
+
+    # The lock must still be the same active owner after every read-only
+    # readiness and fingerprint check. A concurrent release or marker swap
+    # invalidates this preflight result.
+    final_lock_state = inspect_restore_lock()
+    if (
+        final_lock_state.get("status") != "RESTORE_LOCK_ACTIVE"
+        or final_lock_state.get("plan_id") != plan_id
+        or final_lock_state.get("lock_token") != lock_token
+    ):
+        raise RuntimeError("The matching restore lock did not remain active through locked preflight.")
+
     return {
         **result,
         "status": "RESTORE_EXECUTION_LOCKED_PREFLIGHT_PASSED",
