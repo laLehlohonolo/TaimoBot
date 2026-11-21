@@ -45,6 +45,8 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
             "pip_size": 2,
             "exchange_is_open": 1,
             "is_trading_suspended": 0,
+            "trade_count": 0,
+            "underlying_symbol_type": "stockindex",
         }
 
     def history_response(self):
