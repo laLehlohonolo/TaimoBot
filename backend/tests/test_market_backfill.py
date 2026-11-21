@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -381,6 +382,57 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(checkpoint["batches_completed"], 0)
             self.assertIn("ValueError", checkpoint["last_error"])
             self.assertEqual(count, 0)
+
+
+    async def test_concurrent_workers_cannot_persist_the_same_checkpoint_batch_twice(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            def factory():
+                connection = sqlite3.connect(database_file.name, timeout=10)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                return connection
+
+            arrivals = 0
+            both_fetching = asyncio.Event()
+            candles = [candle(3480), candle(3540), candle(3600)]
+
+            class BarrierClient(FakeRangeClient):
+                async def collect_candle_range(self, *args, **kwargs):
+                    nonlocal arrivals
+                    arrivals += 1
+                    if arrivals == 2:
+                        both_fetching.set()
+                    await asyncio.wait_for(both_fetching.wait(), timeout=3)
+                    return await super().collect_candle_range(*args, **kwargs)
+
+            client = BarrierClient(candles)
+            outcomes = await asyncio.gather(
+                *[
+                    run_backfill_batch_with_connection_factory(
+                        factory, client, "1HZ100V", "M1",
+                        batch_size=3, now_epoch=3600,
+                    )
+                    for _ in range(2)
+                ],
+                return_exceptions=True,
+            )
+            successes = [item for item in outcomes if isinstance(item, dict)]
+            failures = [item for item in outcomes if isinstance(item, Exception)]
+            connection = factory()
+            try:
+                checkpoint = get_backfill_checkpoint(connection, "1HZ100V", "M1")
+                count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM market_observations"
+                ).fetchone()["count"]
+            finally:
+                connection.close()
+            self.assertEqual(len(successes), 1)
+            self.assertEqual(len(failures), 1)
+            self.assertIsInstance(failures[0], RuntimeError)
+            self.assertEqual(checkpoint["batches_completed"], 1)
+            self.assertEqual(checkpoint["next_end_epoch"], 3420)
+            self.assertEqual(checkpoint["status"], "RUNNING")
+            self.assertEqual(count, 3)
 
 
 if __name__ == "__main__":
