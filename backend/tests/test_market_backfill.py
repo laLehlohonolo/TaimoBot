@@ -435,5 +435,90 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(count, 3)
 
 
+    async def test_process_restart_after_preparation_retries_same_durable_cursor(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            def factory():
+                connection = sqlite3.connect(database_file.name, timeout=10)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                return connection
+
+            # Process A durably prepares a batch, then exits before contacting
+            # the provider. The RUNNING cursor must survive and remain reusable.
+            first_process = factory()
+            request = prepare_backfill_batch(
+                first_process, "1HZ100V", "M1", batch_size=3, now_epoch=3600,
+            )
+            first_process.commit()
+            first_process.close()
+
+            second_process = factory()
+            try:
+                checkpoint = get_backfill_checkpoint(second_process, "1HZ100V", "M1")
+                self.assertEqual(checkpoint["status"], "RUNNING")
+                self.assertEqual(
+                    checkpoint["next_end_epoch"],
+                    request["expected_next_end_epoch"],
+                )
+            finally:
+                second_process.close()
+
+            client = FakeRangeClient([candle(3480), candle(3540), candle(3600)])
+            result = await run_backfill_batch_with_connection_factory(
+                factory, client, "1HZ100V", "M1",
+                batch_size=3, now_epoch=3600,
+            )
+            self.assertEqual(result["inserted_count"], 3)
+            self.assertEqual(result["batches_completed"], 1)
+            self.assertEqual(result["next_end_epoch"], 3420)
+
+    async def test_uncommitted_batch_writes_roll_back_and_restart_replays_same_range(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            def factory():
+                connection = sqlite3.connect(database_file.name, timeout=10)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                return connection
+
+            preparing = factory()
+            request = prepare_backfill_batch(
+                preparing, "1HZ100V", "M1", batch_size=3, now_epoch=3600,
+            )
+            preparing.commit()
+            preparing.close()
+
+            # Simulate termination after inserts/cursor update but before the
+            # transaction commit: closing the connection must roll everything back.
+            interrupted = factory()
+            try:
+                persist_backfill_batch(
+                    interrupted, request,
+                    [candle(3480), candle(3540), candle(3600)],
+                )
+            finally:
+                interrupted.close()
+
+            restarted = factory()
+            try:
+                checkpoint = get_backfill_checkpoint(restarted, "1HZ100V", "M1")
+                count = restarted.execute(
+                    "SELECT COUNT(*) AS count FROM market_observations"
+                ).fetchone()["count"]
+                self.assertEqual(checkpoint["status"], "RUNNING")
+                self.assertEqual(checkpoint["next_end_epoch"], 3600)
+                self.assertEqual(checkpoint["batches_completed"], 0)
+                self.assertEqual(count, 0)
+            finally:
+                restarted.close()
+
+            replay = FakeRangeClient([candle(3480), candle(3540), candle(3600)])
+            result = await run_backfill_batch_with_connection_factory(
+                factory, replay, "1HZ100V", "M1",
+                batch_size=3, now_epoch=3600,
+            )
+            self.assertEqual(result["inserted_count"], 3)
+            self.assertEqual(result["batches_completed"], 1)
+            self.assertEqual(result["next_end_epoch"], 3420)
+
 if __name__ == "__main__":
     unittest.main()
