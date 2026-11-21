@@ -1156,10 +1156,25 @@ async def trigger_deriv_market_sync(request: DerivMarketSyncRequest, user=Depend
             raise ValueError("Only catalogued Deriv synthetic indices can be collected.")
         if request.timeframe not in SUPPORTED_TIMEFRAMES:
             raise ValueError("Unsupported observation timeframe.")
+        client = DerivPublicMarketDataClient()
+        candles = await client.collect_candles(
+            instrument["symbol"], request.timeframe, count=request.count
+        )
+        # Do not hold a SQLite connection while waiting on the external WebSocket.
         with get_connection() as connection:
-            result = await DerivPublicMarketDataClient().discover_and_store_candles(
-                connection, instrument["symbol"], request.timeframe, count=request.count
-            )
+            observations = client.persist_candles(connection, candles)
+        result = {
+            "provider": "Deriv",
+            "symbol": instrument["symbol"],
+            "timeframe": request.timeframe,
+            "received_count": len(candles),
+            "inserted_count": sum(1 for item in observations if item["inserted"]),
+            "duplicate_count": sum(1 for item in observations if not item["inserted"]),
+            "read_only": True,
+            "execution_triggered": False,
+            "signals_generated": False,
+            "observations": observations,
+        }
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except TimeoutError as error:
