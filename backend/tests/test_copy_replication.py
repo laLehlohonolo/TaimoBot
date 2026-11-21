@@ -67,10 +67,10 @@ class CopyTradeReplicationTests(unittest.TestCase):
             json={
                 "account_id": "SOURCE",
                 "client_order_id": "API-SOURCE-001",
-                "symbol": "EURUSD",
+                "symbol": "XAUUSD",
                 "side": "BUY",
-                "entry_price": 1.1,
-                "stop_loss": 1.09,
+                "entry_price": 4000,
+                "stop_loss": 3990,
                 "risk_percent": 0.5
             }
         )
