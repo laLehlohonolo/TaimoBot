@@ -2,7 +2,7 @@
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from pathlib import Path
@@ -2133,6 +2133,59 @@ class PaperTradingTests(unittest.TestCase):
         self.client.headers.pop("Authorization", None)
         response = self.client.get("/market-observations")
         self.assertEqual(response.status_code, 401)
+
+
+    def test_deriv_sync_endpoint_is_authenticated_confirmed_bounded_and_read_only(self):
+        result = {
+            "provider": "Deriv", "symbol": "1HZ100V", "timeframe": "M1",
+            "received_count": 2, "inserted_count": 2, "duplicate_count": 0,
+            "read_only": True, "execution_triggered": False,
+            "signals_generated": False, "observations": [],
+        }
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.discover_and_store_candles = AsyncMock(return_value=result)
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["operator_triggered"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["signals_generated"])
+        client_class.return_value.discover_and_store_candles.assert_awaited_once()
+
+    def test_deriv_sync_endpoint_requires_explicit_confirmation_and_rejects_non_deriv_symbols(self):
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            unconfirmed = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": False},
+            )
+            unsupported = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "EURUSD", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(unconfirmed.status_code, 400)
+        self.assertEqual(unsupported.status_code, 400)
+        client_class.assert_not_called()
+
+    def test_deriv_sync_endpoint_requires_authentication(self):
+        self.client.headers.pop("Authorization", None)
+        response = self.client.post(
+            "/market-observations/deriv-sync",
+            json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_deriv_sync_endpoint_enforces_admin_authorization(self):
+        from fastapi import HTTPException
+        with patch("app.main.require_admin", side_effect=HTTPException(status_code=403, detail="Admin only")):
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 403)
 
 
 if __name__ == "__main__":
