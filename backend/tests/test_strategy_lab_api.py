@@ -149,6 +149,7 @@ class StrategyLabSchemaTests(unittest.TestCase):
         import sqlite3
         import uuid
         with database.get_connection() as connection:
+            candidate_id = "candidate_" + uuid.uuid4().hex
             connection.execute(
                 """
                 INSERT INTO brain_strategy_candidates (
@@ -160,16 +161,31 @@ class StrategyLabSchemaTests(unittest.TestCase):
                     'Entry logic is sufficiently detailed for validation.',
                     'Exit logic is sufficiently detailed for validation.',
                     'Invalidation conditions are sufficiently detailed.',
-                    'Risk notes preserve all existing hard limits.', 'RESEARCH', 'admin')
+                    'Risk notes preserve all existing hard limits.', 'RESEARCH', ?)
                 """,
-                ("candidate_" + uuid.uuid4().hex,),
+                (candidate_id, "system-test-admin"),
+            )
+            # Use a valid actor row so these failures prove the immutability triggers,
+            # rather than a foreign-key constraint.
+            connection.execute(
+                """
+                INSERT INTO users (user_id, email, password_hash)
+                VALUES ('system-test-admin', 'system-test-admin@taimobot.local', 'test-hash')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO brain_strategy_candidate_decisions (
+                    decision_id, candidate_id, decision, rationale, decided_by
+                ) VALUES ('decision_test', ?, 'REJECT', 'A valid rejection rationale.', 'system-test-admin')
+                """,
+                (candidate_id,),
             )
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
-                    """
-                    INSERT INTO brain_strategy_candidate_decisions (
-                        decision_id, candidate_id, decision, rationale, decided_by
-                    ) VALUES ('decision_test', ?, 'REJECT', 'A valid rejection rationale.', 'admin')
-                    """,
-                    ("candidate_" + "0" * 32,),
+                    "UPDATE brain_strategy_candidate_decisions SET rationale = 'changed' WHERE decision_id = 'decision_test'"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "DELETE FROM brain_strategy_candidate_decisions WHERE decision_id = 'decision_test'"
                 )
