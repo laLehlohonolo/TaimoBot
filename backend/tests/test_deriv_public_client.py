@@ -125,6 +125,18 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Deriv synthetic"):
             normalize_deriv_candle("XAUUSD", candle, "M1")
 
+    async def test_active_symbol_metadata_must_match_catalogued_asset_class(self):
+        record = self.active_record()
+        record["market"] = "forex"
+        socket = FakeSocket({
+            "msg_type": "active_symbols",
+            "req_id": 1,
+            "active_symbols": [record],
+        })
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            with self.assertRaisesRegex(ValueError, "market metadata does not match"):
+                await DerivPublicMarketDataClient().discover_synthetic_symbols()
+
     async def test_rejects_non_deriv_symbols_invalid_timeframes_and_counts_before_network(self):
         client = DerivPublicMarketDataClient()
         for args in (("EURUSD", "M1", 10), ("1HZ100V", "M2", 10),
