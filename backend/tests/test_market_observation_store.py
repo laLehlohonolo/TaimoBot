@@ -443,5 +443,27 @@ class MarketObservationStoreTests(unittest.TestCase):
                 self.assertFalse(report["execution_triggered"])
 
 
+    def test_every_catalogued_instrument_requires_an_explicit_session_calendar(self):
+        from app.instruments import list_instruments
+        from app.market_observation_store import inspect_market_observation_coverage
+
+        for instrument in list_instruments():
+            symbol = instrument["symbol"]
+            with self.subTest(symbol=symbol):
+                report = inspect_market_observation_coverage(
+                    self.connection, symbol, "M1"
+                )
+                self.assertEqual(report["session_calendar_status"], "NOT_CONFIGURED")
+                self.assertIsNone(report["session_calendar_id"])
+                self.assertFalse(report["session_adjusted_coverage_available"])
+                self.assertEqual(
+                    report["session_calendar_policy"],
+                    "INSTRUMENT_SPECIFIC_CALENDAR_REQUIRED",
+                )
+                self.assertFalse(report["session_calendar_applied"])
+                self.assertFalse(report["eligible_for_backtest"])
+                self.assertFalse(report["execution_triggered"])
+
+
 if __name__ == "__main__":
     unittest.main()
