@@ -1144,6 +1144,39 @@ def strategy_details(strategy_id: str, user=Depends(current_user)):
     return strategy
 
 
+@app.post("/market-observations/deriv-sync")
+async def trigger_deriv_market_sync(request: DerivMarketSyncRequest, user=Depends(current_user)):
+    """Admin-triggered, bounded Deriv candle collection; never generates signals or orders."""
+    require_admin(user)
+    if not request.confirm_collection:
+        raise HTTPException(status_code=400, detail="Explicit collection confirmation is required.")
+    try:
+        instrument = get_instrument(request.symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices can be collected.")
+        if request.timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported observation timeframe.")
+        with get_connection() as connection:
+            result = await DerivPublicMarketDataClient().discover_and_store_candles(
+                connection, instrument["symbol"], request.timeframe, count=request.count
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except TimeoutError as error:
+        raise HTTPException(status_code=504, detail="Deriv market-data request timed out.") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail="Deriv market-data provider rejected the request.") from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="Deriv market-data collection failed safely.") from error
+    return {
+        **result,
+        "operator_triggered": True,
+        "read_only": True,
+        "execution_triggered": False,
+        "signals_generated": False,
+    }
+
+
 @app.get("/market-observations")
 def market_observations_route(
     symbol: str | None = None,
