@@ -1227,6 +1227,42 @@ def list_market_backfill_checkpoints(user=Depends(current_user)):
     }
 
 
+@app.get("/admin/market-backfills/{symbol}/{timeframe}/reviews")
+def list_market_backfill_reviews(
+    symbol: str,
+    timeframe: str,
+    user=Depends(current_user),
+):
+    """Admin-only immutable history of operator decisions for a backfill."""
+    require_admin(user)
+    try:
+        instrument = get_instrument(symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices support historical backfill.")
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported backfill timeframe.")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT review_id, symbol, timeframe, decision, rationale,
+                   decided_by, created_at
+            FROM market_backfill_review_audit
+            WHERE symbol = ? AND timeframe = ?
+            ORDER BY created_at DESC, review_id DESC
+            """,
+            (instrument["symbol"], timeframe),
+        ).fetchall()
+    return {
+        "reviews": [dict(row) for row in rows],
+        "count": len(rows),
+        "read_only": True,
+        "backtest_eligible": False,
+        "execution_triggered": False,
+    }
+
+
 @app.post("/admin/market-backfills/{symbol}/{timeframe}/review")
 def review_market_backfill(
     symbol: str,
