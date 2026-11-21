@@ -157,7 +157,12 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
         path = "/admin/brain/session-calendars"
         body = self.admin.post(path, json=self.payload()).json()
         decision_path = f"{path}/{body['calendar_id']}/decisions"
-        for evidence_url in ("http://broker.example.test/source", "https://", "https:///missing-host"):
+        for evidence_url in (
+            "http://broker.example.test/source",
+            "https://",
+            "https:///missing-host",
+            "https://[",
+        ):
             response = self.admin.post(decision_path, json={
                 "decision": "VERIFY_SOURCE",
                 "rationale": "The evidence URL must be a valid HTTPS location.",
