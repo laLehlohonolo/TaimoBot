@@ -37,6 +37,38 @@ class DerivPublicMarketDataClient:
         self.timeout = float(timeout)
 
     async def _request(self, payload, expected_msg_type, request_id):
+        """Retry only transient transport failures within a finite total deadline."""
+        loop = asyncio.get_running_loop()
+        max_attempts = 3
+        backoffs = (0.25, 0.5)
+        total_deadline = loop.time() + (self.timeout * max_attempts) + sum(backoffs)
+        transient_errors = (
+            TimeoutError,
+            OSError,
+            websockets.exceptions.ConnectionClosed,
+        )
+
+        for attempt in range(max_attempts):
+            remaining = total_deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError("Deriv request exceeded its total retry deadline.")
+            try:
+                return await asyncio.wait_for(
+                    self._request_once(payload, expected_msg_type, request_id),
+                    timeout=min(self.timeout, remaining),
+                )
+            except transient_errors:
+                if attempt == max_attempts - 1:
+                    raise
+                delay = backoffs[attempt]
+                remaining = total_deadline - loop.time()
+                if remaining <= delay:
+                    raise TimeoutError("Deriv request exceeded its total retry deadline.")
+                await asyncio.sleep(delay)
+
+        raise TimeoutError("Deriv request exhausted its retry attempts.")
+
+    async def _request_once(self, payload, expected_msg_type, request_id):
         """Open one public socket, issue one read-only request, and close it."""
         async with websockets.connect(
             DERIV_PUBLIC_WS_URL,
