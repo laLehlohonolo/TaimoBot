@@ -129,6 +129,42 @@ class ParticipantDisplayCurrencyApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
+    def test_selection_survives_database_reinitialisation_and_fresh_login(self):
+        selected = self.client.post(
+            "/participant/currency-preference",
+            json={"currency": "KWD", "confirmed": True},
+            headers=self.headers,
+        )
+        self.assertEqual(selected.status_code, 201)
+        selected_at = selected.json()["selected_at"]
+
+        # Re-running the idempotent schema initialisation must not erase the choice.
+        init_db()
+
+        # Authenticate again to ensure the preference belongs to the participant,
+        # rather than relying on the original in-memory client/session.
+        fresh_client = TestClient(app)
+        try:
+            login = fresh_client.post(
+                "/auth/login",
+                json={"email": "currency@example.com", "password": "StrongPassphrase123!"},
+            )
+            self.assertEqual(login.status_code, 200)
+            fresh_headers = {
+                "Authorization": "Bearer " + login.json()["access_token"]
+            }
+            restored = fresh_client.get(
+                "/participant/currency-preference",
+                headers=fresh_headers,
+            )
+        finally:
+            fresh_client.close()
+
+        self.assertEqual(restored.status_code, 200)
+        self.assertTrue(restored.json()["locked"])
+        self.assertEqual(restored.json()["currency"], "KWD")
+        self.assertEqual(restored.json()["selected_at"], selected_at)
+
     def test_database_prevents_update_and_delete(self):
         self.client.post(
             "/participant/currency-preference",
