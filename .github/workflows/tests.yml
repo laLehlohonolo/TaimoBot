@@ -120,6 +120,8 @@ jobs:
         run: python scripts/run_restore_lock_unknown_state.py
       - name: Run twenty locked-preflight final lock ownership checks sequentially
         run: python scripts/run_locked_preflight_final_lock_races.py
+      - name: Run twenty approved restore preflight final-fence checks sequentially
+        run: python scripts/run_approved_preflight_final_fence.py
       - name: Run twenty live database symlink preflight checks sequentially
         run: python scripts/run_live_database_symlink_preflight.py
       - name: Run backend tests
