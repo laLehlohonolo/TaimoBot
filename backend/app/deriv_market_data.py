@@ -58,6 +58,8 @@ def normalize_active_symbols_response(payload):
         if not all(isinstance(value, str) and value.strip()
                    for value in (market, subgroup, submarket, display_name, symbol_type)):
             raise ValueError("Deriv symbol metadata is incomplete.")
+        if market.strip().lower() != instrument["asset_class"]:
+            raise ValueError("Deriv symbol market metadata does not match the instrument catalogue.")
         if isinstance(trade_count, bool) or not isinstance(trade_count, int) or trade_count < 0:
             raise ValueError("trade_count must be a non-negative integer.")
         for flag in ("exchange_is_open", "is_trading_suspended"):
