@@ -2332,16 +2332,34 @@ def inspect_restore_lock() -> dict:
             os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
-        if not __import__("stat").S_ISREG(os.fstat(guard_fd).st_mode):
+        guard_open_stat = os.fstat(guard_fd)
+        if not __import__("stat").S_ISREG(guard_open_stat.st_mode):
             return {"status": "RESTORE_LOCK_UNSAFE_GUARD", "marker_present": True}
+
+        def guard_identity(metadata):
+            return (
+                metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                metadata.st_nlink, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns,
+            )
+
+        guard_identity_at_open = guard_identity(guard_open_stat)
+        guard_path_at_open = guard_path.lstat()
+        if (
+            not __import__("stat").S_ISREG(guard_path_at_open.st_mode)
+            or guard_identity(guard_path_at_open) != guard_identity_at_open
+        ):
+            raise OSError("Restore guard path changed while it was opened.")
+
         try:
             fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             status = "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW"
         except BlockingIOError:
             status = "RESTORE_LOCK_ACTIVE"
 
-        # Re-check both the pathname identity and bytes after the lock probe.
-        # This prevents a concurrent marker swap/edit from being labelled stale.
+        # Re-check marker and guard descriptor/path identities after the OS
+        # lock probe. The guard must still be the same regular file that was
+        # opened, not merely another regular file at the same pathname.
         current_stat = lock_path.lstat()
         current_identity = (
             current_stat.st_dev, current_stat.st_ino, current_stat.st_mode,
@@ -2356,6 +2374,15 @@ def inspect_restore_lock() -> dict:
             current_bytes = b""
         if current_identity != marker_identity or current_bytes != marker_bytes:
             status = "RESTORE_LOCK_CHANGED_DURING_INSPECTION"
+
+        guard_path_after = guard_path.lstat()
+        guard_fd_after = os.fstat(guard_fd)
+        if (
+            not __import__("stat").S_ISREG(guard_path_after.st_mode)
+            or guard_identity(guard_path_after) != guard_identity_at_open
+            or guard_identity(guard_fd_after) != guard_identity_at_open
+        ):
+            status = "RESTORE_LOCK_GUARD_UNINSPECTABLE"
     except FileNotFoundError:
         status = "RESTORE_LOCK_CHANGED_DURING_INSPECTION"
     except OSError:
