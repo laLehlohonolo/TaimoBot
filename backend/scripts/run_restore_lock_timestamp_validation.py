@@ -1,4 +1,4 @@
-"""Run twenty invalid restore-lock timestamp checks sequentially."""
+"""Run twenty-four invalid restore-lock timestamp checks sequentially."""
 import importlib.util
 import sys
 from pathlib import Path
@@ -20,10 +20,10 @@ CASES = sorted(
 def main():
     suite = unittest.TestSuite(module.DailyMaintenanceTests(name) for name in CASES)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if not result.wasSuccessful() or result.testsRun != 20:
-        print(f"RESTORE LOCK TIMESTAMP VALIDATION: {result.testsRun}/20")
+    if not result.wasSuccessful() or result.testsRun != 24:
+        print(f"RESTORE LOCK TIMESTAMP VALIDATION: {result.testsRun}/24")
         return 1
-    print("TAIMOBOT RESTORE LOCK TIMESTAMP VALIDATION: 20/20 PASSED SEQUENTIALLY.")
+    print("TAIMOBOT RESTORE LOCK TIMESTAMP VALIDATION: 24/24 PASSED SEQUENTIALLY.")
     return 0
 
 
