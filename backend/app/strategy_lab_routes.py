@@ -103,28 +103,6 @@ def list_candidates(user=Depends(current_user)):
     return {"count": len(rows), "candidates": [_candidate_dict(row) for row in rows]}
 
 
-@router.get("/{candidate_id}")
-def get_candidate(candidate_id: str, user=Depends(current_user)):
-    require_admin(user)
-    with get_connection() as connection:
-        row = connection.execute(
-            "SELECT * FROM brain_strategy_candidates WHERE candidate_id = ?",
-            (candidate_id,),
-        ).fetchone()
-        decisions = connection.execute(
-            """
-            SELECT decision_id, decision, rationale, decided_by, created_at
-            FROM brain_strategy_candidate_decisions
-            WHERE candidate_id = ?
-            ORDER BY created_at, decision_id
-            """,
-            (candidate_id,),
-        ).fetchall()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Strategy candidate not found.")
-    return {**_candidate_dict(row), "decisions": [dict(item) for item in decisions]}
-
-
 @router.get("/data-readiness")
 def strategy_data_readiness(
     symbol: str,
@@ -191,6 +169,28 @@ def strategy_data_readiness(
         "signals_generated": False,
         "execution_triggered": False,
     }
+
+
+@router.get("/{candidate_id}")
+def get_candidate(candidate_id: str, user=Depends(current_user)):
+    require_admin(user)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM brain_strategy_candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        decisions = connection.execute(
+            """
+            SELECT decision_id, decision, rationale, decided_by, created_at
+            FROM brain_strategy_candidate_decisions
+            WHERE candidate_id = ?
+            ORDER BY created_at, decision_id
+            """,
+            (candidate_id,),
+        ).fetchall()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Strategy candidate not found.")
+    return {**_candidate_dict(row), "decisions": [dict(item) for item in decisions]}
 
 
 @router.post("/{candidate_id}/decisions", status_code=201)
