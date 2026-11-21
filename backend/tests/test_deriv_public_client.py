@@ -89,6 +89,40 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
             "style": "candles", "granularity": 60, "req_id": 2,
         }])
 
+    async def test_fetch_candle_range_uses_explicit_bounded_start_and_end(self):
+        response = self.history_response()
+        socket = FakeSocket(response)
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            candles = await DerivPublicMarketDataClient().fetch_candle_range(
+                "1HZ100V", "M1", 1795256100, 1795256160, max_candles=2
+            )
+        self.assertEqual(len(candles), 2)
+        self.assertEqual(socket.sent, [{
+            "ticks_history": "1HZ100V", "start": 1795256100,
+            "end": "1795256160", "style": "candles",
+            "granularity": 60, "req_id": 3,
+        }])
+
+    async def test_fetch_candle_range_rejects_oversized_and_unaligned_windows(self):
+        client = DerivPublicMarketDataClient()
+        with self.assertRaisesRegex(ValueError, "exceeds the bounded"):
+            await client.fetch_candle_range(
+                "1HZ100V", "M1", 0, 60 * 501, max_candles=500
+            )
+        with self.assertRaisesRegex(ValueError, "align"):
+            await client.fetch_candle_range(
+                "1HZ100V", "M1", 1, 61, max_candles=2
+            )
+
+    async def test_fetch_candle_range_rejects_provider_candles_outside_requested_window(self):
+        response = self.history_response()
+        socket = FakeSocket(response)
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            with self.assertRaisesRegex(ValueError, "outside the requested"):
+                await DerivPublicMarketDataClient().fetch_candle_range(
+                    "1HZ100V", "M1", 1795256160, 1795256220, max_candles=2
+                )
+
     async def test_rejects_provider_candle_batch_larger_than_requested(self):
         response = self.history_response()
         response["candles"] = response["candles"] * 2
