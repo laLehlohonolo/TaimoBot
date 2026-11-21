@@ -141,6 +141,12 @@ def inspect_market_observation_coverage(connection, symbol, timeframe, source=No
         "source_filter": source.strip() if source is not None else None,
         "source_count": len(reports),
         "sources": reports,
+        "coverage_basis": "continuous_elapsed_time_between_first_and_last_candles",
+        "session_calendar_applied": False,
+        "coverage_caveat": (
+            "This is a raw elapsed-time coverage estimate. Exchange, OTC, holiday, "
+            "maintenance and instrument-specific trading sessions are not excluded."
+        ),
         "read_only": True,
         "provenance_verified": False,
         "eligible_for_backtest": False,
