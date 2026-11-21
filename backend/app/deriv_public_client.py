@@ -100,10 +100,21 @@ class DerivPublicMarketDataClient:
             raise ValueError("Deriv history response must contain a candle list.")
         if len(candles) > count:
             raise ValueError("Deriv returned more candles than requested.")
-        return [
+        normalized = [
             normalize_deriv_candle(instrument["symbol"], candle, timeframe, source="deriv")
             for candle in candles
         ]
+        granularity = TIMEFRAME_GRANULARITY_SECONDS[timeframe]
+        previous_epoch = None
+        for observation in normalized:
+            observed_at = datetime.fromisoformat(observation["timestamp"].replace("Z", "+00:00"))
+            epoch = observed_at.timestamp()
+            if not math.isclose(epoch % granularity, 0.0, abs_tol=1e-6):
+                raise ValueError("Deriv candle timestamp is not aligned to its timeframe.")
+            if previous_epoch is not None and epoch <= previous_epoch:
+                raise ValueError("Deriv candles must be strictly ordered and unique.")
+            previous_epoch = epoch
+        return normalized
 
     async def collect_candles(self, symbol, timeframe, count=100):
         """Fetch and validate provider data without holding or opening a database connection."""
