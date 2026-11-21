@@ -168,7 +168,7 @@ def validate_session_calendar_record(record):
 
 
 def assess_session_calendar_readiness(symbol, calendar=None):
-    """Only an explicitly verified and admin-reviewed record can be ready."""
+    """Report review state without activating coverage, backtests, or execution."""
     normalized_symbol = get_instrument(symbol)["symbol"]
     candidate = calendar if calendar is not None else SESSION_CALENDARS.get(normalized_symbol)
     if not isinstance(candidate, dict):
@@ -181,9 +181,9 @@ def assess_session_calendar_readiness(symbol, calendar=None):
             "execution_eligible": False,
         }
 
-    ready = (
+    approved_for_separate_integration_review = (
         candidate.get("symbol") == normalized_symbol
-        and candidate.get("status") == "VERIFIED"
+        and candidate.get("status") == "APPROVED"
         and candidate.get("source_verified") is True
         and candidate.get("admin_reviewed") is True
         and isinstance(candidate.get("version"), int)
@@ -192,11 +192,17 @@ def assess_session_calendar_readiness(symbol, calendar=None):
     )
     return {
         "symbol": normalized_symbol,
-        "status": "READY" if ready else "PENDING_VERIFICATION",
-        "session_calendar_id": (
-            candidate.get("calendar_id") if ready else None
+        "status": (
+            "APPROVED_PENDING_INTEGRATION_REVIEW"
+            if approved_for_separate_integration_review
+            else "PENDING_VERIFICATION"
         ),
-        "session_adjusted_coverage_available": ready,
+        "session_calendar_id": (
+            candidate.get("calendar_id")
+            if approved_for_separate_integration_review
+            else None
+        ),
+        "session_adjusted_coverage_available": False,
         "backtest_eligible": False,
         "execution_eligible": False,
     }
