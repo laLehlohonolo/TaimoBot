@@ -157,7 +157,7 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
         connection.execute("""
             CREATE TRIGGER reject_second_deriv_candle
             BEFORE INSERT ON market_observations
-            WHEN NEW.observed_at = '2026-11-21T11:36:00+00:00'
+            WHEN NEW.observed_at = '2026-11-21T10:16:00+00:00'
             BEGIN SELECT RAISE(ABORT, 'test batch failure'); END;
         """)
         contexts = [
