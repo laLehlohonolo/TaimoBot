@@ -122,3 +122,46 @@ Administrator account recovery must be stricter than participant recovery: verif
 5. Withdrawal request and first-withdrawal approval workflow only after legal, compliance, provider, custody, security, and reconciliation launch gates pass.
 
 This document records requirements and sequencing. It does not claim these capabilities or real-money transfers are already implemented.
+
+
+## Administrator participant approval, suspension, and permanent disqualification
+
+Registration and administrator admission are separate stages. A successful email-link confirmation proves control of the registered email address only; it does not automatically activate a participant account or prove identity/address.
+
+- After email verification, place the participant in ADMIN_REVIEW_PENDING (or the applicable identity/address review state) and create an item in the administrator approval queue.
+- The queue shows the participant reference number, submitted legal name, masked identity number, email-verification status, identity/address check statuses, subscription tier requested, submission time, and outstanding review items. Full ID numbers and source documents are available only to specifically authorised reviewers when necessary, with access logging.
+- The administrator can APPROVE, REJECT, or KEEP_PENDING / REQUEST_MORE_INFORMATION. Each decision requires a reason, actor, timestamp and audit event. A pending account cannot trade. Approval grants only the explicitly approved account access; it does not bypass identity, address, compliance, product-entitlement or real-money launch requirements.
+- Provide a participant-facing status and secure channel to respond to requests for more information. Do not expose internal risk notes or sensitive reviewer commentary.
+- Use at least two distinct statuses: account admission (PENDING_ADMIN_REVIEW, ACTIVE, SUSPENDED, DISQUALIFIED) and verification (email, identity, address and compliance). Do not let an administrator mark an unverified identity as verified merely by approving account admission.
+- A participant may be suspended for suspected misuse, abuse, security concerns or policy violations. Suspension immediately blocks new trading and other privileged activity, revokes active sessions where appropriate, and preserves records for investigation. Record a reason category, evidence references, actor, timestamp, scope and review date.
+- Permanent disqualification is a high-impact action. Require explicit confirmation, a reason and evidence reference; apply a second authorised reviewer/step-up approval where feasible. Provide an appeal or correction route and a documented review process for mistaken identity or compromised accounts.
+- Do not use a raw ID number as a public or reversible blacklist key. Where a lawful, necessary prevention-of-re-registration control is approved, use a keyed cryptographic HMAC of a normalised identity value in a tightly restricted service, separate from ordinary participant records. Never expose this value in dashboards, logs or APIs. Define lawful basis, retention, access, correction and appeal controls under POPIA and applicable law before activation.
+- Account closure, suspension or disqualification must not erase ledger history, audit records, evidence subject to retention, or unresolved financial obligations. Preserve immutable records and apply the approved retention/deletion schedule. A ban must not be used to confiscate funds or bypass a lawful dispute/withdrawal process.
+- Enforce all decisions in backend authorization and trading/execution gates; frontend-only disabling is insufficient. The Risk/Execution layer remains authoritative.
+
+## Global bot operating control and maintenance announcements
+
+The administrator control centre must provide a platform-wide operating control, protected by administrator MFA and step-up confirmation:
+
+- RUNNING: eligible participants may use permitted paper/demo trading features, subject to all existing risk and account controls.
+- PAUSED / MAINTENANCE: block all new trade entries and new participant-initiated trading actions platform-wide. Cancel eligible unfilled entry orders safely. Do not abruptly terminate protective position management: stop-loss/take-profit enforcement, emergency risk controls, reconciliation, monitoring and safe exit handling must continue for any open positions. If the system cannot guarantee protective management during an upgrade, it must first enter a tested safe state and prevent new exposure.
+- STOPPED / EMERGENCY: invoke the emergency trading stop, block new exposure immediately and preserve the defined safe handling of existing positions. This is distinct from taking the web application or database offline.
+- RESUME: require an authorised administrator, a recorded reason, successful health/readiness checks, data freshness checks, and confirmation that the approved software version is deployed. Resume must not automatically reopen old signals or replay stale orders.
+
+The control must be enforced server-side at the order-intake and execution boundaries, not merely by hiding buttons. It must be durable across application restarts, fail closed if its state cannot be read, and be protected against duplicate or conflicting administrator commands. Every state change records the administrator, prior/new state, reason, timestamp, affected services, software version and correlation ID. Provide a visible status banner and a read-only status endpoint for participant clients.
+
+Maintenance scheduling and email communication:
+
+- The administrator can prepare a maintenance announcement with start time, expected end time, timezone (default Africa/Johannesburg), reason, affected services and whether trading will be paused. Show a preview and recipient count before sending.
+- The administrator can send the announcement to all eligible registered participant email addresses, with sensible suppression for bounced, unsubscribed or otherwise ineligible addresses. Do not disclose recipient lists; use a compliant bulk-email provider and appropriate privacy/marketing preferences.
+- Support a test email, scheduled send, cancellation before send, delivery/bounce reporting and an auditable send record. Never claim every email was delivered merely because a provider accepted the batch.
+- Templates must distinguish planned maintenance, delay/extension, completion and emergency interruption. Send an update if the expected end time changes materially.
+- A maintenance announcement does not itself pause trading. The administrator must explicitly schedule or activate the operating control, and the interface must clearly show whether the bot is RUNNING, PAUSED or STOPPED.
+- The 23:00–00:00 Africa/Johannesburg intelligence window remains a separate scheduled research/refresh process. It must coordinate with backup/restore maintenance and must not silently pause trading or alter execution permissions.
+
+## Delivery sequence additions
+
+6. Participant admission queue with approve/reject/hold and secure evidence review, including backend authorization and audit tests.
+7. Suspension and permanent-disqualification workflows with session revocation, safe trading block, appeal/correction handling, privacy controls and immutable audit history.
+8. Global RUNNING/PAUSED/STOPPED operating control, tested safe handling of open positions, durable state, fail-closed behaviour, concurrency tests and emergency-stop integration.
+9. Maintenance announcement composer and compliant bulk email workflow, including preview, recipient eligibility, delivery status and audit trail.
