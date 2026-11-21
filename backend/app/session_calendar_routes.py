@@ -7,6 +7,7 @@ session-adjusted coverage, signals, or execution.
 import json
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -35,6 +36,18 @@ class CalendarDecision(BaseModel):
     decision: str = Field(pattern=r"^(VERIFY_SOURCE|APPROVE_CALENDAR|REQUEST_CHANGES|REJECT)$")
     rationale: str = Field(min_length=10, max_length=3000)
     evidence_url: str | None = Field(default=None, max_length=2000)
+
+
+def _is_https_evidence_url(value):
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value)
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+    )
 
 
 def _calendar_response(row):
@@ -148,8 +161,11 @@ def decide_calendar(calendar_id: str, request: CalendarDecision, user=Depends(cu
         if request.decision == "VERIFY_SOURCE":
             if status != "PENDING_SOURCE_VERIFICATION":
                 raise HTTPException(status_code=409, detail="Calendar is not awaiting source verification.")
-            if not request.evidence_url or not request.evidence_url.startswith("https://"):
-                raise HTTPException(status_code=400, detail="HTTPS evidence_url is required for source verification.")
+            if not _is_https_evidence_url(request.evidence_url):
+                raise HTTPException(
+                    status_code=400,
+                    detail="A valid HTTPS evidence URL with a hostname is required for source verification.",
+                )
             new_status = "SOURCE_VERIFIED_PENDING_APPROVAL"
         elif request.decision == "APPROVE_CALENDAR":
             if status != "SOURCE_VERIFIED_PENDING_APPROVAL":
@@ -161,8 +177,11 @@ def decide_calendar(calendar_id: str, request: CalendarDecision, user=Depends(cu
             ).fetchone()
             if verifier is None or verifier["decided_by"] == actor:
                 raise HTTPException(status_code=409, detail="A different administrator must approve the verified calendar.")
-            if not request.evidence_url or not request.evidence_url.startswith("https://"):
-                raise HTTPException(status_code=400, detail="HTTPS approval evidence_url is required.")
+            if not _is_https_evidence_url(request.evidence_url):
+                raise HTTPException(
+                    status_code=400,
+                    detail="A valid HTTPS approval evidence URL with a hostname is required.",
+                )
             new_status = "APPROVED"
         elif request.decision == "REQUEST_CHANGES":
             if status != "SOURCE_VERIFIED_PENDING_APPROVAL":
