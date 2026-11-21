@@ -8,6 +8,7 @@ from app.deriv_public_client import (
     DERIV_PUBLIC_WS_URL,
     DerivPublicMarketDataClient,
 )
+from app.deriv_market_data import normalize_deriv_candle
 from app.market_observation_store import list_market_observations
 
 
@@ -114,6 +115,11 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
             with self.assertRaisesRegex(ValueError, "not aligned to its timeframe"):
                 await DerivPublicMarketDataClient().fetch_candles("1HZ100V", "M1", count=2)
+
+    async def test_deriv_candle_normalizer_rejects_non_deriv_instruments(self):
+        candle = {"epoch": 1795256100, "open": 1000, "high": 1002, "low": 999, "close": 1001}
+        with self.assertRaisesRegex(ValueError, "Deriv synthetic"):
+            normalize_deriv_candle("XAUUSD", candle, "M1")
 
     async def test_rejects_non_deriv_symbols_invalid_timeframes_and_counts_before_network(self):
         client = DerivPublicMarketDataClient()
