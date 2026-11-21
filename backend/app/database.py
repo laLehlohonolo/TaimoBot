@@ -471,6 +471,84 @@ def ensure_strategy_lab_schema(connection):
     )
 
 
+
+def ensure_session_calendar_schema(connection):
+    """Create immutable, versioned calendar records and append-only review history."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS brain_session_calendars (
+            calendar_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version > 0),
+            status TEXT NOT NULL CHECK (status IN (
+                'PENDING_SOURCE_VERIFICATION',
+                'SOURCE_VERIFIED_PENDING_APPROVAL',
+                'APPROVED', 'REJECTED'
+            )),
+            record_json TEXT NOT NULL,
+            submitted_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(provider, symbol, version),
+            FOREIGN KEY (submitted_by) REFERENCES users(user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_brain_session_calendars_symbol
+            ON brain_session_calendars(symbol, provider, version DESC);
+
+        CREATE TABLE IF NOT EXISTS brain_session_calendar_decisions (
+            decision_id TEXT PRIMARY KEY,
+            calendar_id TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN (
+                'VERIFY_SOURCE', 'APPROVE_CALENDAR', 'REQUEST_CHANGES', 'REJECT'
+            )),
+            rationale TEXT NOT NULL,
+            evidence_url TEXT,
+            decided_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (calendar_id) REFERENCES brain_session_calendars(calendar_id),
+            FOREIGN KEY (decided_by) REFERENCES users(user_id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_decision_update
+        BEFORE UPDATE ON brain_session_calendar_decisions
+        BEGIN
+            SELECT RAISE(ABORT, 'Session calendar decision history is append-only.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_decision_delete
+        BEFORE DELETE ON brain_session_calendar_decisions
+        BEGIN
+            SELECT RAISE(ABORT, 'Session calendar decision history is append-only.');
+        END;
+
+        CREATE TABLE IF NOT EXISTS brain_session_calendar_audit (
+            event_id TEXT PRIMARY KEY,
+            calendar_id TEXT NOT NULL,
+            actor_user_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (calendar_id) REFERENCES brain_session_calendars(calendar_id),
+            FOREIGN KEY (actor_user_id) REFERENCES users(user_id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_audit_update
+        BEFORE UPDATE ON brain_session_calendar_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Session calendar audit history is append-only.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_audit_delete
+        BEFORE DELETE ON brain_session_calendar_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Session calendar audit history is append-only.');
+        END;
+        """
+    )
+
+
 def init_db():
     """Create tables and safely migrate existing paper-trading data."""
 
@@ -692,6 +770,7 @@ def init_db():
         seed_strategy_knowledge(connection)
         ensure_market_observation_schema(connection)
         ensure_strategy_lab_schema(connection)
+        ensure_session_calendar_schema(connection)
 
         migrate_trade_columns(connection)
         migrate_trade_cost_ledger(connection)
