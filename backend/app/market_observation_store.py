@@ -113,9 +113,16 @@ def inspect_market_observation_coverage(connection, symbol, timeframe, source=No
             if abs(stamp.timestamp() % seconds) > 1e-6
             and abs(stamp.timestamp() % seconds - seconds) > 1e-6
         ]
-        expected = int((last - first).total_seconds() // seconds) + 1
         cadence_valid = not unaligned
-        missing = max(0, expected - len(unique)) if cadence_valid else None
+        # A single observation has no measurable interval. Reporting 100%
+        # coverage for it would turn "one candle exists" into a false quality
+        # signal, so require at least two unique timestamps before estimating.
+        measurable_span = len(unique) >= 2 and cadence_valid
+        expected = (
+            int((last - first).total_seconds() // seconds) + 1
+            if measurable_span else None
+        )
+        missing = max(0, expected - len(unique)) if measurable_span else None
         reports.append({
             "source": source_name,
             "observation_count": len(timestamps),
@@ -123,11 +130,15 @@ def inspect_market_observation_coverage(connection, symbol, timeframe, source=No
             "duplicate_timestamp_count": len(timestamps) - len(unique),
             "first_timestamp": first.isoformat(),
             "last_timestamp": last.isoformat(),
-            "expected_candle_count": expected if cadence_valid else None,
+            "expected_candle_count": expected,
             "missing_candle_count": missing,
             "coverage_percent": round(
                 (len(unique) / expected) * 100, 2
-            ) if cadence_valid and expected else None,
+            ) if measurable_span and expected else None,
+            "coverage_status": (
+                "MEASURABLE" if measurable_span
+                else ("INVALID_CADENCE" if not cadence_valid else "INSUFFICIENT_SPAN")
+            ),
             "unaligned_timestamp_count": len(unaligned),
             "cadence_valid": cadence_valid,
             "provenance_status": "UNVERIFIED_EXTERNAL_INPUT",
