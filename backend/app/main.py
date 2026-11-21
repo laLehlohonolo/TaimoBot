@@ -446,6 +446,65 @@ def approve_maintenance_restore(request: MaintenanceRestoreApproveRequest, user=
 
         with get_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+
+            # Re-read the exact plan and immutable artifact fingerprints while
+            # holding the write transaction. This closes the gap between the
+            # initial filesystem validation and the status compare-and-set.
+            current_plan = connection.execute(
+                """
+                SELECT backup_file, staging_file, pre_restore_backup_file,
+                       status, created_at
+                FROM maintenance_restore_plans WHERE plan_id = ?
+                """,
+                (request.plan_id,),
+            ).fetchone()
+            expected_plan_state = (
+                str(selected_backup), str(staging_file),
+                str(pre_restore_backup), "PREPARED", plan["created_at"],
+            )
+            actual_plan_state = (
+                current_plan["backup_file"], current_plan["staging_file"],
+                current_plan["pre_restore_backup_file"], current_plan["status"],
+                current_plan["created_at"],
+            ) if current_plan is not None else None
+            if actual_plan_state != expected_plan_state:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="Restore plan metadata changed during approval; prepare a new plan.",
+                )
+
+            current_artifact_hashes = connection.execute(
+                """
+                SELECT source_sha256, staged_sha256, rollback_sha256
+                FROM maintenance_restore_artifacts WHERE plan_id = ?
+                """,
+                (request.plan_id,),
+            ).fetchone()
+            actual_hash_state = (
+                current_artifact_hashes["source_sha256"],
+                current_artifact_hashes["staged_sha256"],
+                current_artifact_hashes["rollback_sha256"],
+            ) if current_artifact_hashes is not None else None
+            if actual_hash_state != expected_hashes:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="Restore artifact fingerprints changed during approval; prepare a new plan.",
+                )
+
+            final_hashes = (
+                sha256_file(selected_backup),
+                sha256_file(staging_file),
+                sha256_file(pre_restore_backup),
+            )
+            if final_hashes != expected_hashes:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="A recovery artifact changed during approval; prepare a new plan.",
+                )
+
             updated = connection.execute(
                 """
                 UPDATE maintenance_restore_plans SET status = 'APPROVED'
