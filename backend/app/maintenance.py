@@ -3157,8 +3157,14 @@ def verify_restore_execution_readiness_under_lock(
     final_lock_state = inspect_restore_lock()
     if (
         final_lock_state.get("status") != "RESTORE_LOCK_ACTIVE"
+        or final_lock_state.get("marker_present") is not True
         or final_lock_state.get("plan_id") != plan_id
         or final_lock_state.get("lock_token") != lock_token
+        or isinstance(final_lock_state.get("process_id"), bool)
+        or not isinstance(final_lock_state.get("process_id"), int)
+        or final_lock_state.get("process_id", 0) <= 0
+        or not isinstance(final_lock_state.get("created_at"), str)
+        or not final_lock_state.get("created_at")
     ):
         raise RuntimeError("The matching restore lock did not remain active through locked preflight.")
 
