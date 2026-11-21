@@ -28,6 +28,8 @@ class MoneyLedgerCoreTests(unittest.TestCase):
         lines[0]["amount_minor"] = 1
         self.assertIsInstance(result, tuple)
         self.assertEqual(result[0]["amount_minor"], 12550)
+        with self.assertRaises(TypeError):
+            result[0]["amount_minor"] = 1
 
     def test_rejects_unbalanced_journal(self):
         lines = self.balanced_lines()
