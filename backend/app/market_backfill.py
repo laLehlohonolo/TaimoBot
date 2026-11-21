@@ -121,7 +121,8 @@ def persist_backfill_batch(connection, request, candles):
         timestamp = datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00"))
         epoch = int(timestamp.timestamp())
         if (
-            epoch % granularity
+            timestamp.microsecond != 0
+            or epoch % granularity
             or epoch < request["start_epoch"]
             or epoch > request["end_epoch"]
         ):
