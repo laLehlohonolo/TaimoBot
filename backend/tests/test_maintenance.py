@@ -8444,3 +8444,114 @@ _REAL_INVENTORY_POST_TERMINAL_METADATA_FS_RACE_CASES = [
 for _test_name, _scenario in _REAL_INVENTORY_POST_TERMINAL_METADATA_FS_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_real_inventory_post_terminal_metadata_fs_race_test(_scenario))
 
+
+
+def _make_post_digest_return_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("post-digest-" + scenario)
+        backup = self._make_inventory_backup(root, "taimobot-post-digest.sqlite3")
+        staging = root / "recovery-staging"
+        if scenario == "staging_remove":
+            staging.mkdir()
+            self._make_inventory_backup(staging, "preexisting-stage.sqlite3")
+        self._create_inventory_metadata_tables()
+        real_hash = maintenance_module.sha256_file
+        calls = {"count": 0, "mutated": False}
+
+        def mutate_after_digest():
+            if scenario == "append":
+                with backup.open("ab") as handle: handle.write(b"late")
+            elif scenario == "rewrite":
+                data = backup.read_bytes()
+                backup.write_bytes(bytes([data[0] ^ 1]) + data[1:])
+            elif scenario == "touch":
+                os.utime(backup, None)
+            elif scenario == "chmod":
+                backup.chmod(0o600)
+            elif scenario == "replace":
+                replacement = self._make_inventory_backup(Path(self.temp_dir.name) / ("replacement-" + scenario), backup.name)
+                replacement.replace(backup)
+            elif scenario == "delete":
+                backup.unlink()
+            elif scenario == "symlink":
+                backup.unlink(); backup.symlink_to(root / "missing-target.sqlite3")
+            elif scenario == "hardlink":
+                os.link(backup, root / "late-hardlink.sqlite3")
+            elif scenario == "rename":
+                backup.rename(root / "renamed.sqlite3")
+            elif scenario == "directory":
+                backup.unlink(); backup.mkdir()
+            elif scenario == "external_symlink":
+                external = self._make_inventory_backup(Path(self.temp_dir.name) / "external-post-digest", "external.sqlite3")
+                backup.unlink(); backup.symlink_to(external)
+            elif scenario == "sidecar":
+                Path(str(backup) + "-wal").write_bytes(b"late wal")
+            elif scenario == "temp_add":
+                (root / ".taimobot-late.tmp").write_text("partial")
+            elif scenario == "staging_add":
+                staging.mkdir(); self._make_inventory_backup(staging, "late-stage.sqlite3")
+            elif scenario == "staging_remove":
+                shutil.rmtree(staging)
+            elif scenario == "same_bytes_replace":
+                replacement = Path(self.temp_dir.name) / "same-bytes-replacement.sqlite3"
+                replacement.write_bytes(backup.read_bytes()); replacement.replace(backup)
+            elif scenario == "truncate_restore":
+                original = backup.read_bytes()
+                with backup.open("r+b") as handle: handle.truncate(1)
+                backup.write_bytes(original)
+            elif scenario == "replace_twice":
+                one = self._make_inventory_backup(Path(self.temp_dir.name) / "replacement-one", backup.name)
+                one.replace(backup)
+                two = self._make_inventory_backup(Path(self.temp_dir.name) / "replacement-two", backup.name)
+                two.replace(backup)
+            elif scenario == "directory_swap":
+                backup.rename(root / "moved.sqlite3")
+                replacement = self._make_inventory_backup(Path(self.temp_dir.name) / "directory-swap", backup.name)
+                replacement.replace(backup)
+            elif scenario == "add_nested":
+                (root / "late-nested").mkdir()
+            calls["mutated"] = True
+
+        def hash_then_mutate(path):
+            digest = real_hash(path)
+            calls["count"] += 1
+            # One backup is hashed during inventory and in each of the three
+            # final fences. Mutate only after the terminal fence's digest returns.
+            if calls["count"] == 4:
+                mutate_after_digest()
+            return digest
+
+        with patch.object(maintenance_module, "sha256_file", side_effect=hash_then_mutate):
+            response = self._call_real_inventory_api(root)
+        payload = response.json()
+        self.assertTrue(calls["mutated"], calls)
+        self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED", payload)
+        self.assertEqual(payload["orphaned_artifacts"], [])
+
+    return test
+
+
+_POST_DIGEST_RETURN_RACE_CASES = [
+    ("test_post_digest_append", "append"),
+    ("test_post_digest_rewrite", "rewrite"),
+    ("test_post_digest_touch", "touch"),
+    ("test_post_digest_chmod", "chmod"),
+    ("test_post_digest_replace", "replace"),
+    ("test_post_digest_delete", "delete"),
+    ("test_post_digest_symlink", "symlink"),
+    ("test_post_digest_hardlink", "hardlink"),
+    ("test_post_digest_rename", "rename"),
+    ("test_post_digest_directory", "directory"),
+    ("test_post_digest_external_symlink", "external_symlink"),
+    ("test_post_digest_sidecar", "sidecar"),
+    ("test_post_digest_temp_add", "temp_add"),
+    ("test_post_digest_staging_add", "staging_add"),
+    ("test_post_digest_staging_remove", "staging_remove"),
+    ("test_post_digest_same_bytes_replace", "same_bytes_replace"),
+    ("test_post_digest_truncate_restore", "truncate_restore"),
+    ("test_post_digest_replace_twice", "replace_twice"),
+    ("test_post_digest_directory_swap", "directory_swap"),
+    ("test_post_digest_nested_add", "add_nested"),
+]
+for _test_name, _scenario in _POST_DIGEST_RETURN_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_post_digest_return_race_test(_scenario))
