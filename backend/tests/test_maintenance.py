@@ -8820,7 +8820,7 @@ def _make_live_database_symlink_preflight_test(scenario):
             elif scenario == "dangling":
                 link.symlink_to(root / "missing-target.sqlite3")
             elif scenario == "external":
-                outside = root.parent / (root.name + "-outside.sqlite3")
+                outside = root / "external-target.sqlite3"
                 shutil.copy2(valid_live_target, outside)
                 link.symlink_to(outside)
             elif scenario == "unicode":
