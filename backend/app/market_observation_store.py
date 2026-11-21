@@ -108,7 +108,9 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
             "status": "NO_DATA", "observation_count": 0,
             "latest_timestamp": None, "age_seconds": None,
             "stale_after_seconds": granularity_seconds * 2,
-            "stale": True, "missing_interval_count": 0,
+            "stale": True, "future_data": False,
+            "future_observation_count": 0, "future_by_seconds": None,
+            "missing_interval_count": 0,
             "missing_candle_count": 0, "missing_intervals": [],
             "checked_at": checked_at.isoformat(),
             "execution_eligible": False,
@@ -120,9 +122,15 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
         for row in rows
     ]
     latest = timestamps[-1]
+    future_timestamps = [timestamp for timestamp in timestamps if timestamp > checked_at]
+    future_data = bool(future_timestamps)
+    future_by_seconds = (
+        max((timestamp - checked_at).total_seconds() for timestamp in future_timestamps)
+        if future_data else None
+    )
     age_seconds = max(0.0, (checked_at - latest).total_seconds())
     stale_after_seconds = granularity_seconds * 2
-    stale = age_seconds > stale_after_seconds
+    stale = future_data or age_seconds > stale_after_seconds
     missing_intervals = []
     missing_interval_count = 0
     missing_candle_count = 0
@@ -140,12 +148,18 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
                         "missing_candles": missing,
                     })
 
-    status = "STALE" if stale else ("GAPS_DETECTED" if missing_candle_count else "FRESH")
+    status = (
+        "FUTURE_DATA" if future_data
+        else ("STALE" if stale else ("GAPS_DETECTED" if missing_candle_count else "FRESH"))
+    )
     return {
         "symbol": instrument["symbol"], "timeframe": timeframe,
         "status": status, "observation_count": len(timestamps),
         "latest_timestamp": latest.isoformat(), "age_seconds": age_seconds,
         "stale_after_seconds": stale_after_seconds, "stale": stale,
+        "future_data": future_data,
+        "future_observation_count": len(future_timestamps),
+        "future_by_seconds": future_by_seconds,
         "missing_interval_count": missing_interval_count,
         "missing_candle_count": missing_candle_count,
         "missing_intervals": missing_intervals,
