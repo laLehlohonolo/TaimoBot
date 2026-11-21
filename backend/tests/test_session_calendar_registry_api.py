@@ -113,8 +113,15 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
             self.participant.get(f"{path}/{first['calendar_id']}").status_code, 403
         )
 
-    def test_calendar_decisions_and_audit_are_append_only(self):
+    def test_calendar_records_decisions_and_audit_are_immutable(self):
         body = self.admin.post("/admin/brain/session-calendars", json=self.payload()).json()
+        decision_path = f"/admin/brain/session-calendars/{body['calendar_id']}/decisions"
+        verified = self.admin.post(decision_path, json={
+            "decision": "VERIFY_SOURCE",
+            "rationale": "Source verification recorded for append-only history.",
+            "evidence_url": "https://broker.example.test/trading-hours",
+        })
+        self.assertEqual(verified.status_code, 201)
         with database.get_connection() as connection:
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
@@ -124,9 +131,46 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
                 connection.execute("DELETE FROM brain_session_calendar_audit")
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
+                    "UPDATE brain_session_calendar_decisions SET rationale = 'ALTERED'"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("DELETE FROM brain_session_calendar_decisions")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
                     "UPDATE brain_session_calendars SET record_json = '{}' WHERE calendar_id = ?",
                     (body["calendar_id"],),
                 )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "DELETE FROM brain_session_calendars WHERE calendar_id = ?",
+                    (body["calendar_id"],),
+                )
+
+    def test_change_request_requires_source_verified_state_and_restarts_review(self):
+        path = "/admin/brain/session-calendars"
+        body = self.admin.post(path, json=self.payload()).json()
+        decision_path = f"{path}/{body['calendar_id']}/decisions"
+        invalid = self.admin.post(decision_path, json={
+            "decision": "REQUEST_CHANGES",
+            "rationale": "This request must not be accepted before source verification.",
+        })
+        self.assertEqual(invalid.status_code, 409)
+        verified = self.admin.post(decision_path, json={
+            "decision": "VERIFY_SOURCE",
+            "rationale": "The source publication was checked and requires a correction.",
+            "evidence_url": "https://broker.example.test/trading-hours",
+        })
+        self.assertEqual(verified.status_code, 201)
+        changed = self.admin.post(decision_path, json={
+            "decision": "REQUEST_CHANGES",
+            "rationale": "The provider's maintenance schedule requires clarification.",
+        })
+        self.assertEqual(changed.status_code, 201)
+        self.assertEqual(changed.json()["status"], "PENDING_SOURCE_VERIFICATION")
+        self.assertFalse(changed.json()["source_verified"])
+        self.assertFalse(changed.json()["admin_reviewed"])
+        self.assertFalse(changed.json()["backtest_eligible"])
+        self.assertFalse(changed.json()["execution_eligible"])
 
 
 if __name__ == "__main__":
