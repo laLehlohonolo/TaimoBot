@@ -91,18 +91,18 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
             active_connections = set()
 
+            class TrackedConnection(sqlite3.Connection):
+                def close(self):
+                    active_connections.discard(id(self))
+                    return super().close()
+
             def connection_factory():
-                connection = sqlite3.connect(database_file.name)
+                connection = sqlite3.connect(
+                    database_file.name, factory=TrackedConnection
+                )
                 connection.row_factory = sqlite3.Row
                 ensure_market_observation_schema(connection)
                 active_connections.add(id(connection))
-                original_close = connection.close
-
-                def close():
-                    active_connections.discard(id(connection))
-                    original_close()
-
-                connection.close = close
                 return connection
 
             # Initialize the durable database schema before the worker starts.
