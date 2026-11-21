@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from .instruments import get_instrument
 from .market_observation_store import save_market_observation
+from .market_observations import normalize_market_observation
 from .deriv_public_client import TIMEFRAME_GRANULARITY_SECONDS
 
 
@@ -107,6 +108,29 @@ def persist_backfill_batch(connection, request, candles):
     if len(candles) > request["batch_size"]:
         raise ValueError("Provider returned more candles than the prepared batch permits.")
 
+    # Validate the entire provider response before writing any rows. This
+    # protects the durable cursor even if a client adapter returns malformed,
+    # duplicated, misaligned, or out-of-range candles.
+    normalized_candles = [
+        normalize_market_observation(item) for item in candles
+    ]
+    candle_epochs = []
+    for item in normalized_candles:
+        if item["symbol"] != instrument["symbol"] or item["timeframe"] != timeframe:
+            raise ValueError("Provider candle does not match the requested symbol and timeframe.")
+        timestamp = datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00"))
+        epoch = int(timestamp.timestamp())
+        if (
+            epoch % granularity
+            or epoch < request["start_epoch"]
+            or epoch > request["end_epoch"]
+        ):
+            raise ValueError("Provider candle timestamp is outside the aligned requested range.")
+        candle_epochs.append(epoch)
+    if len(candle_epochs) != len(set(candle_epochs)):
+        raise ValueError("Provider returned duplicate candle timestamps.")
+    normalized_candles.sort(key=lambda item: item["timestamp"])
+
     checkpoint = get_backfill_checkpoint(connection, instrument["symbol"], timeframe)
     if (
         checkpoint is None
@@ -117,9 +141,9 @@ def persist_backfill_batch(connection, request, candles):
 
     connection.execute("SAVEPOINT market_backfill_batch")
     try:
-        results = [save_market_observation(connection, item) for item in candles]
-        earliest = min((item["timestamp"] for item in candles), default=None)
-        latest = max((item["timestamp"] for item in candles), default=None)
+        results = [save_market_observation(connection, item) for item in normalized_candles]
+        earliest = min((item["timestamp"] for item in normalized_candles), default=None)
+        latest = max((item["timestamp"] for item in normalized_candles), default=None)
         previous_earliest = checkpoint["earliest_observed_at"]
         previous_latest = checkpoint["latest_observed_at"]
         earliest = min(previous_earliest, earliest) if previous_earliest and earliest else (previous_earliest or earliest)
