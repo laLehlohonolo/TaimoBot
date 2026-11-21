@@ -69,3 +69,84 @@ def list_market_observations(connection, symbol=None, timeframe=None, limit=100)
         }
         for row in rows
     ]
+
+
+def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
+    """Report freshness and missing intervals for a continuous Deriv synthetic series."""
+    from datetime import datetime, timezone
+    from .instruments import get_instrument
+    from .market_observations import SUPPORTED_TIMEFRAMES
+
+    instrument = get_instrument(symbol)
+    if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+        raise ValueError("Quality diagnostics currently support Deriv synthetic indices only.")
+    if timeframe not in SUPPORTED_TIMEFRAMES:
+        raise ValueError("Unsupported observation timeframe.")
+
+    granularity_seconds = {
+        "M1": 60, "M5": 300, "M15": 900, "M30": 1800,
+        "H1": 3600, "H4": 14400, "D1": 86400,
+    }[timeframe]
+    checked_at = now or datetime.now(timezone.utc)
+    if checked_at.tzinfo is None or checked_at.utcoffset() is None:
+        raise ValueError("Diagnostic reference time must include a timezone.")
+    checked_at = checked_at.astimezone(timezone.utc)
+
+    rows = connection.execute(
+        """
+        SELECT observed_at
+        FROM market_observations
+        WHERE symbol = ? AND timeframe = ? AND source = 'deriv'
+        ORDER BY observed_at ASC
+        """,
+        (instrument["symbol"], timeframe),
+    ).fetchall()
+
+    if not rows:
+        return {
+            "symbol": instrument["symbol"], "timeframe": timeframe,
+            "status": "NO_DATA", "observation_count": 0,
+            "latest_timestamp": None, "age_seconds": None,
+            "stale_after_seconds": granularity_seconds * 2,
+            "stale": True, "missing_interval_count": 0,
+            "missing_candle_count": 0, "missing_intervals": [],
+            "checked_at": checked_at.isoformat(),
+            "execution_eligible": False,
+        }
+
+    timestamps = [
+        datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00"))
+        .astimezone(timezone.utc)
+        for row in rows
+    ]
+    latest = timestamps[-1]
+    age_seconds = max(0.0, (checked_at - latest).total_seconds())
+    stale_after_seconds = granularity_seconds * 2
+    stale = age_seconds > stale_after_seconds
+    missing_intervals = []
+    missing_candle_count = 0
+    for previous, current in zip(timestamps, timestamps[1:]):
+        elapsed = (current - previous).total_seconds()
+        if elapsed > granularity_seconds:
+            missing = max(0, round(elapsed / granularity_seconds) - 1)
+            if missing:
+                missing_candle_count += missing
+                if len(missing_intervals) < 50:
+                    missing_intervals.append({
+                        "after": previous.isoformat(),
+                        "before": current.isoformat(),
+                        "missing_candles": missing,
+                    })
+
+    status = "STALE" if stale else ("GAPS_DETECTED" if missing_candle_count else "FRESH")
+    return {
+        "symbol": instrument["symbol"], "timeframe": timeframe,
+        "status": status, "observation_count": len(timestamps),
+        "latest_timestamp": latest.isoformat(), "age_seconds": age_seconds,
+        "stale_after_seconds": stale_after_seconds, "stale": stale,
+        "missing_interval_count": sum(1 for item in missing_intervals),
+        "missing_candle_count": missing_candle_count,
+        "missing_intervals": missing_intervals,
+        "checked_at": checked_at.isoformat(),
+        "execution_eligible": False,
+    }
