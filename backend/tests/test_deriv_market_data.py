@@ -38,7 +38,11 @@ class DerivMarketDataAdapterTests(unittest.TestCase):
         self.assertTrue(all(item["execution_model"] == "NOT_CONFIGURED" for item in result))
 
     def test_all_catalogued_synthetic_symbols_are_in_provider_filter(self):
-        self.assertEqual(len(DERIV_SYNTHETIC_SYMBOLS), 10)
+        self.assertEqual(DERIV_SYNTHETIC_SYMBOLS, {
+            "R_10", "R_25", "R_50", "R_75", "R_100",
+            "1HZ10V", "1HZ15V", "1HZ25V", "1HZ30V",
+            "1HZ50V", "1HZ75V", "1HZ90V", "1HZ100V",
+        })
 
     def test_rejects_wrong_response_type_or_missing_symbol_list(self):
         for payload in ({}, {"msg_type": "tick", "active_symbols": []},
