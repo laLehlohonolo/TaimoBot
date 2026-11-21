@@ -125,6 +125,74 @@ def get_candidate(candidate_id: str, user=Depends(current_user)):
     return {**_candidate_dict(row), "decisions": [dict(item) for item in decisions]}
 
 
+@router.get("/data-readiness")
+def strategy_data_readiness(
+    symbol: str,
+    timeframe: str,
+    user=Depends(current_user),
+):
+    """Admin-only, read-only inventory of market data available for research."""
+    require_admin(user)
+    from .instruments import get_instrument
+    from .market_observations import SUPPORTED_TIMEFRAMES
+
+    try:
+        instrument = get_instrument(symbol)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if timeframe not in SUPPORTED_TIMEFRAMES:
+        raise HTTPException(status_code=400, detail="Unsupported observation timeframe.")
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS observation_count,
+                   MIN(observed_at) AS earliest_timestamp,
+                   MAX(observed_at) AS latest_timestamp,
+                   COUNT(DISTINCT source) AS source_count,
+                   COUNT(DISTINCT provenance_status) AS provenance_status_count
+            FROM market_observations
+            WHERE symbol = ? AND timeframe = ?
+            """,
+            (instrument["symbol"], timeframe),
+        ).fetchone()
+        provenance = connection.execute(
+            """
+            SELECT source, provenance_status, COUNT(*) AS count
+            FROM market_observations
+            WHERE symbol = ? AND timeframe = ?
+            GROUP BY source, provenance_status
+            ORDER BY source, provenance_status
+            """,
+            (instrument["symbol"], timeframe),
+        ).fetchall()
+
+    count = row["observation_count"]
+    return {
+        "symbol": instrument["symbol"],
+        "timeframe": timeframe,
+        "observation_count": count,
+        "earliest_timestamp": row["earliest_timestamp"],
+        "latest_timestamp": row["latest_timestamp"],
+        "source_count": row["source_count"],
+        "provenance_status_count": row["provenance_status_count"],
+        "provenance_breakdown": [dict(item) for item in provenance],
+        "data_available": count > 0,
+        "provenance_verified": bool(count) and all(
+            item["provenance_status"] == "VERIFIED"
+            for item in provenance
+        ),
+        "eligible_for_backtest": False,
+        "eligibility_note": (
+            "Backtesting remains disabled until feed provenance, candle continuity, "
+            "cost assumptions and deterministic replay are independently validated."
+        ),
+        "read_only": True,
+        "signals_generated": False,
+        "execution_triggered": False,
+    }
+
+
 @router.post("/{candidate_id}/decisions", status_code=201)
 def decide_candidate(candidate_id: str, request: CandidateDecisionRequest, user=Depends(current_user)):
     require_admin(user)
