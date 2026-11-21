@@ -155,6 +155,26 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone()["count"]
         self.assertEqual(stored, 0)
 
+    async def test_prepared_batch_cannot_be_narrowed_to_skip_checkpoint_candles(self):
+        request = prepare_backfill_batch(
+            self.connection, "1HZ100V", "M1", batch_size=3, now_epoch=3600,
+        )
+        altered_end = {**request, "end_epoch": 3540}
+        altered_start = {**request, "start_epoch": 3540}
+        for altered in (altered_end, altered_start):
+            with self.subTest(request=altered):
+                with self.assertRaisesRegex(ValueError, "range was altered"):
+                    persist_backfill_batch(
+                        self.connection, altered, [candle(3540)]
+                    )
+        checkpoint = get_backfill_checkpoint(self.connection, "1HZ100V", "M1")
+        self.assertEqual(checkpoint["next_end_epoch"], 3600)
+        self.assertEqual(checkpoint["batches_completed"], 0)
+        stored = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM market_observations"
+        ).fetchone()["count"]
+        self.assertEqual(stored, 0)
+
     async def test_incomplete_nonempty_batch_is_held_for_gap_review(self):
         client = FakeRangeClient([candle(3480), candle(3600)])
         result = await run_backfill_batch(
