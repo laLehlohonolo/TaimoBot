@@ -8975,3 +8975,67 @@ def test_restore_lock_confirmed_absence_is_the_only_unlocked_state(self):
 DailyMaintenanceTests.test_restore_lock_confirmed_absence_is_the_only_unlocked_state = (
     test_restore_lock_confirmed_absence_is_the_only_unlocked_state
 )
+
+
+def _make_locked_preflight_final_lock_race_test(scenario, overrides):
+    def test(self):
+        backup_dir, source, staged, rollback, hashes = (
+            self._make_locked_restore_artifacts("final-lock-" + scenario)
+        )
+        plan_id = "a" * 32
+        lock = acquire_restore_lock(plan_id)
+        original_inspect = maintenance_module.inspect_restore_lock
+        initial_state = original_inspect()
+        final_state = {**initial_state, **overrides}
+        try:
+            with patch(
+                "app.maintenance.inspect_restore_lock",
+                side_effect=[initial_state, final_state],
+            ) as inspect:
+                with self.assertRaisesRegex(
+                    RuntimeError, "did not remain active through locked preflight"
+                ):
+                    verify_restore_execution_readiness_under_lock(
+                        source, staged, rollback,
+                        plan_id=plan_id,
+                        lock_token=lock["lock_token"],
+                        external_processes_stopped=True,
+                        expected_artifact_hashes=hashes,
+                        backup_dir=backup_dir,
+                        live_database_path=database.DB_PATH,
+                    )
+                self.assertEqual(inspect.call_count, 2, scenario)
+            self.assertTrue(is_restore_lock_active(), scenario)
+        finally:
+            release_restore_lock(lock["lock_token"])
+    return test
+
+
+_LOCKED_PREFLIGHT_FINAL_LOCK_RACE_CASES = [
+    ("test_locked_preflight_final_lock_missing", {"status": "NO_RESTORE_LOCK", "marker_present": False}),
+    ("test_locked_preflight_final_lock_abandoned", {"status": "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW"}),
+    ("test_locked_preflight_final_lock_uninspectable", {"status": "RESTORE_LOCK_UNINSPECTABLE"}),
+    ("test_locked_preflight_final_lock_unreadable", {"status": "RESTORE_LOCK_METADATA_UNREADABLE"}),
+    ("test_locked_preflight_final_lock_unsafe_marker", {"status": "RESTORE_LOCK_UNSAFE_MARKER"}),
+    ("test_locked_preflight_final_lock_unsafe_guard", {"status": "RESTORE_LOCK_UNSAFE_GUARD"}),
+    ("test_locked_preflight_final_lock_changed", {"status": "RESTORE_LOCK_CHANGED_DURING_INSPECTION"}),
+    ("test_locked_preflight_final_lock_guard_uninspectable", {"status": "RESTORE_LOCK_GUARD_UNINSPECTABLE"}),
+    ("test_locked_preflight_final_lock_wrong_plan", {"plan_id": "b" * 32}),
+    ("test_locked_preflight_final_lock_wrong_token", {"lock_token": "c" * 32}),
+    ("test_locked_preflight_final_lock_empty_plan", {"plan_id": None}),
+    ("test_locked_preflight_final_lock_empty_token", {"lock_token": None}),
+    ("test_locked_preflight_final_lock_marker_absent", {"marker_present": False}),
+    ("test_locked_preflight_final_lock_stale_process", {"status": "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW", "process_id": 999999999}),
+    ("test_locked_preflight_final_lock_unknown_status", {"status": "RESTORE_LOCK_STATE_UNKNOWN"}),
+    ("test_locked_preflight_final_lock_wrong_plan_and_token", {"plan_id": "d" * 32, "lock_token": "e" * 32}),
+    ("test_locked_preflight_final_lock_wrong_token_and_absent_marker", {"lock_token": "f" * 32, "marker_present": False}),
+    ("test_locked_preflight_final_lock_wrong_plan_and_active_status", {"plan_id": "0" * 32, "status": "RESTORE_LOCK_ACTIVE"}),
+    ("test_locked_preflight_final_lock_missing_owner_pid", {"process_id": None}),
+    ("test_locked_preflight_final_lock_missing_created_at", {"created_at": None}),
+]
+for _name, _overrides in _LOCKED_PREFLIGHT_FINAL_LOCK_RACE_CASES:
+    setattr(
+        DailyMaintenanceTests,
+        _name,
+        _make_locked_preflight_final_lock_race_test(_name, _overrides),
+    )
