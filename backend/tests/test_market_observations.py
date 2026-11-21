@@ -25,7 +25,7 @@ class MarketObservationValidationTests(unittest.TestCase):
         self.assertFalse(result["execution_eligible"])
 
     def test_all_catalogued_symbols_can_be_observed_but_unknown_symbols_cannot(self):
-        for symbol in ("XAUUSD", "EURUSD", "GBPUSD"):
+        for symbol in ("XAUUSD", "EURUSD", "GBPUSD", "R_10", "R_25", "R_50", "R_75", "R_100", "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"):
             with self.subTest(symbol=symbol):
                 record = self.valid_record()
                 record["symbol"] = symbol
