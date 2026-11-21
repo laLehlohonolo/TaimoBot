@@ -131,6 +131,30 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
                 check.close()
             self.assertEqual(checkpoint["next_end_epoch"], 3420)
 
+    async def test_rejects_out_of_range_misaligned_and_mismatched_provider_candles(self):
+        request = prepare_backfill_batch(
+            self.connection, "1HZ100V", "M1", batch_size=3, now_epoch=3600,
+        )
+        invalid_batches = [
+            [candle(3420)],  # Outside the requested [3480, 3600] range.
+            [{**candle(3480), "timeframe": "M5"}],
+            [{**candle(3480), "symbol": "1HZ10V"}],
+            [{**candle(3480), "timestamp": "1970-01-01T00:58:01+00:00"}],
+            [candle(3480), candle(3480)],  # Duplicate timestamps.
+            [{**candle(3480), "timestamp": "1970-01-01T00:58:00.500000+00:00"}],
+        ]
+        for candles in invalid_batches:
+            with self.subTest(candles=candles):
+                with self.assertRaises(ValueError):
+                    persist_backfill_batch(self.connection, request, candles)
+        checkpoint = get_backfill_checkpoint(self.connection, "1HZ100V", "M1")
+        self.assertEqual(checkpoint["next_end_epoch"], 3600)
+        self.assertEqual(checkpoint["batches_completed"], 0)
+        stored = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM market_observations"
+        ).fetchone()["count"]
+        self.assertEqual(stored, 0)
+
     async def test_backfill_persists_candles_and_moves_durable_cursor_backwards(self):
         client = FakeRangeClient([candle(3480), candle(3540), candle(3600)])
         result = await run_backfill_batch(
