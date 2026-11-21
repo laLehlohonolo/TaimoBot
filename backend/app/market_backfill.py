@@ -38,9 +38,11 @@ async def run_backfill_batch(
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 500:
         raise ValueError("batch_size must be an integer between 1 and 500.")
     granularity = TIMEFRAME_GRANULARITY_SECONDS[timeframe]
-    current_epoch = int(now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp())
-    if isinstance(now_epoch, bool) or current_epoch < 0:
-        raise ValueError("now_epoch must be a non-negative epoch.")
+    if now_epoch is not None and (
+        isinstance(now_epoch, bool) or not isinstance(now_epoch, int) or now_epoch < 0
+    ):
+        raise ValueError("now_epoch must be a non-negative integer epoch.")
+    current_epoch = now_epoch if now_epoch is not None else int(datetime.now(timezone.utc).timestamp())
     current_epoch = current_epoch // granularity * granularity
 
     connection.execute(
@@ -80,9 +82,11 @@ async def run_backfill_batch(
             latest = previous_latest or latest
 
         if start_epoch == 0:
-            status = "COMPLETE"
-            next_end = None
-            error = None
+            # Reaching the Unix epoch is not evidence that the provider has
+            # returned its earliest retained history. Never label this complete.
+            status = "GAP_REVIEW"
+            next_end = end_epoch
+            error = "Reached the epoch-zero boundary; provider history coverage requires review."
         elif not candles:
             status = "GAP_REVIEW"
             next_end = end_epoch
