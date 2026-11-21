@@ -187,5 +187,29 @@ class MarketObservationStoreTests(unittest.TestCase):
                 self.connection, "1HZ100V", "M1", now=datetime(2026, 11, 21, 12, 0)
             )
 
+
+    def test_quality_diagnostics_do_not_estimate_gaps_across_unaligned_candles(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import inspect_market_observation_quality
+
+        for timestamp in (
+            "2026-11-21T12:00:30+00:00",
+            "2026-11-21T12:03:00+00:00",
+        ):
+            record = self.valid_record()
+            record["source"] = "deriv"
+            record["timestamp"] = timestamp
+            save_market_observation(self.connection, record)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1",
+            now=datetime(2026, 11, 21, 12, 4, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["status"], "INVALID_CADENCE")
+        self.assertEqual(result["unaligned_observation_count"], 1)
+        self.assertEqual(result["missing_interval_count"], 0)
+        self.assertEqual(result["missing_candle_count"], 0)
+        self.assertEqual(result["missing_intervals"], [])
+        self.assertFalse(result["execution_eligible"])
+
 if __name__ == "__main__":
     unittest.main()
