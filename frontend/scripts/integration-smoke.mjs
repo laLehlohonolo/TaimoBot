@@ -1,5 +1,28 @@
 const API = "http://127.0.0.1:4173/api";
 
+function getSastClockParts() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Africa/Johannesburg",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date());
+  return Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, Number(part.value)]));
+}
+
+async function waitUntilMaintenanceEnds() {
+  const now = getSastClockParts();
+  if (now.hour !== 23) return;
+  const waitMs = ((60 - now.minute) * 60 - now.second) * 1000 - (Date.now() % 1000) + 1000;
+  console.log("MAINTENANCE: SAST 23:00-00:00 is active; waiting until 00:00 before paper-order integration checks.");
+  await new Promise(resolve => setTimeout(resolve, waitMs));
+  if (getSastClockParts().hour === 23) {
+    throw new Error("Maintenance window did not end when expected; refusing to bypass the trading safeguard.");
+  }
+  console.log("PASS: Maintenance window ended; continuing paper-order integration checks.");
+}
+
 async function waitForApi() {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
@@ -107,6 +130,8 @@ console.log("PASS: Account overview endpoint works.");
 const risk = await request("/accounts/" + encodeURIComponent(accountId) + "/risk", { token });
 assert(risk.response.status === 200 && risk.payload.maximum_risk_percent === 1, "Risk endpoint did not report the enforced 1% cap.");
 console.log("PASS: Account risk endpoint reports the 1% maximum.");
+
+await waitUntilMaintenanceEnds();
 
 const firstOrderId = "INT-ORDER-1-" + unique;
 const secondOrderId = "INT-ORDER-2-" + unique;
