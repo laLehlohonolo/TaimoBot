@@ -8446,6 +8446,70 @@ for _test_name, _scenario in _REAL_INVENTORY_POST_TERMINAL_METADATA_FS_RACE_CASE
 
 
 
+
+
+def _make_managed_directory_metadata_race_test(mode, target):
+    def test(self):
+        root = Path(self.temp_dir.name) / ("directory-metadata-" + target + "-" + oct(mode))
+        self._make_inventory_backup(root, "taimobot-directory-metadata.sqlite3")
+        staging = root / "recovery-staging"
+        staging.mkdir()
+        self._make_inventory_backup(staging, "taimobot-staged-directory-metadata.sqlite3")
+        self._create_inventory_metadata_tables()
+        target_path = root if target == "root" else staging
+        original_mode = target_path.stat(follow_symlinks=False).st_mode & 0o7777
+        original_get_connection = database.get_connection
+        calls = {"connections": 0, "mutated": False}
+
+        @contextmanager
+        def mutate_directory_after_terminal_metadata(*args, **kwargs):
+            calls["connections"] += 1
+            with original_get_connection(*args, **kwargs) as connection:
+                yield connection
+            if calls["connections"] == 5 and not calls["mutated"]:
+                target_path.chmod(mode)
+                calls["mutated"] = True
+
+        try:
+            with patch.object(database, "get_connection", side_effect=mutate_directory_after_terminal_metadata):
+                response = self._call_real_inventory_api(root)
+            payload = response.json()
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(calls["mutated"], calls)
+            self.assertEqual(payload["status"], "RECOVERY_ARTIFACT_INVENTORY_BLOCKED", payload)
+            self.assertEqual(payload["orphaned_artifacts"], [])
+        finally:
+            target_path.chmod(original_mode)
+
+    return test
+
+
+_MANAGED_DIRECTORY_METADATA_RACE_CASES = [
+    ("test_directory_metadata_root_mode_000", 0o000, "root"),
+    ("test_directory_metadata_root_mode_400", 0o400, "root"),
+    ("test_directory_metadata_root_mode_500", 0o500, "root"),
+    ("test_directory_metadata_root_mode_600", 0o600, "root"),
+    ("test_directory_metadata_root_mode_700", 0o700, "root"),
+    ("test_directory_metadata_root_mode_711", 0o711, "root"),
+    ("test_directory_metadata_root_mode_750", 0o750, "root"),
+    ("test_directory_metadata_root_mode_755", 0o755, "root"),
+    ("test_directory_metadata_root_mode_770", 0o770, "root"),
+    ("test_directory_metadata_root_mode_777", 0o777, "root"),
+    ("test_directory_metadata_staging_mode_000", 0o000, "staging"),
+    ("test_directory_metadata_staging_mode_400", 0o400, "staging"),
+    ("test_directory_metadata_staging_mode_500", 0o500, "staging"),
+    ("test_directory_metadata_staging_mode_600", 0o600, "staging"),
+    ("test_directory_metadata_staging_mode_700", 0o700, "staging"),
+    ("test_directory_metadata_staging_mode_711", 0o711, "staging"),
+    ("test_directory_metadata_staging_mode_750", 0o750, "staging"),
+    ("test_directory_metadata_staging_mode_755", 0o755, "staging"),
+    ("test_directory_metadata_staging_mode_770", 0o770, "staging"),
+    ("test_directory_metadata_staging_mode_777", 0o777, "staging"),
+]
+for _test_name, _mode, _target in _MANAGED_DIRECTORY_METADATA_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_managed_directory_metadata_race_test(_mode, _target))
+
+
 def _make_post_digest_return_race_test(scenario):
     def test(self):
         root = Path(self.temp_dir.name) / ("post-digest-" + scenario)
