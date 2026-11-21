@@ -1,9 +1,9 @@
 """Instrument catalogue and broker-specification readiness checks.
 
-This module is deliberately informational: it does not enable instruments for
-execution or change the existing paper-trading order path. New instruments
-must remain observation-only until a broker adapter supplies verified,
-account-currency-aware contract specifications.
+This module separates catalogue membership from explicit paper-execution
+approval. Observation candidates remain non-executable until a broker adapter
+supplies verified, account-currency-aware contract specifications and the
+execution allowlist is deliberately updated.
 """
 import math
 from types import MappingProxyType
