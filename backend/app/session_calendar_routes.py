@@ -41,13 +41,16 @@ class CalendarDecision(BaseModel):
 def _is_https_evidence_url(value):
     if not isinstance(value, str):
         return False
-    parsed = urlparse(value)
-    return (
-        parsed.scheme == "https"
-        and bool(parsed.hostname)
-        and parsed.username is None
-        and parsed.password is None
-    )
+    try:
+        parsed = urlparse(value)
+        return (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except ValueError:
+        return False
 
 
 def _calendar_response(row):
