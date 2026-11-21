@@ -138,12 +138,14 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
                         batch_size=3, now_epoch=invalid,
                     )
 
-    async def test_rejects_unbounded_or_invalid_batch_size(self):
-        with self.assertRaisesRegex(ValueError, "batch_size"):
-            await run_backfill_batch(
-                self.connection, FakeRangeClient([]), "1HZ100V", "M1",
-                batch_size=501, now_epoch=120,
-            )
+    async def test_rejects_unbounded_or_unrepresentable_batch_size(self):
+        for invalid in (1, 501, True, 2.5):
+            with self.subTest(batch_size=invalid):
+                with self.assertRaisesRegex(ValueError, "batch_size"):
+                    await run_backfill_batch(
+                        self.connection, FakeRangeClient([]), "1HZ100V", "M1",
+                        batch_size=invalid, now_epoch=120,
+                    )
 
 
 if __name__ == "__main__":
