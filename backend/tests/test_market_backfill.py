@@ -1,10 +1,12 @@
 import sqlite3
+import tempfile
 import unittest
 
 from app.database import ensure_market_observation_schema
 from app.market_backfill import (
     get_backfill_checkpoint, prepare_backfill_batch,
     persist_backfill_batch, run_backfill_batch,
+    run_backfill_batch_with_connection_factory,
 )
 
 
@@ -84,6 +86,50 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
         checkpoint = get_backfill_checkpoint(self.connection, "1HZ100V", "M1")
         self.assertEqual(checkpoint["batches_completed"], 1)
         self.assertEqual(checkpoint["next_end_epoch"], 3420)
+
+    async def test_worker_closes_database_connections_during_provider_fetch(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            active_connections = set()
+
+            def connection_factory():
+                connection = sqlite3.connect(database_file.name)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                active_connections.add(id(connection))
+                original_close = connection.close
+
+                def close():
+                    active_connections.discard(id(connection))
+                    original_close()
+
+                connection.close = close
+                return connection
+
+            # Initialize the durable database schema before the worker starts.
+            initial = connection_factory()
+            initial.close()
+
+            class ConnectionCheckingClient(FakeRangeClient):
+                async def collect_candle_range(self, *args, **kwargs):
+                    self.assert_no_connections = len(active_connections) == 0
+                    return await super().collect_candle_range(*args, **kwargs)
+
+            client = ConnectionCheckingClient(
+                [candle(3480), candle(3540), candle(3600)]
+            )
+            result = await run_backfill_batch_with_connection_factory(
+                connection_factory, client, "1HZ100V", "M1",
+                batch_size=3, now_epoch=3600,
+            )
+            self.assertTrue(client.assert_no_connections)
+            self.assertEqual(active_connections, set())
+            self.assertEqual(result["inserted_count"], 3)
+            check = connection_factory()
+            try:
+                checkpoint = get_backfill_checkpoint(check, "1HZ100V", "M1")
+            finally:
+                check.close()
+            self.assertEqual(checkpoint["next_end_epoch"], 3420)
 
     async def test_backfill_persists_candles_and_moves_durable_cursor_backwards(self):
         client = FakeRangeClient([candle(3480), candle(3540), candle(3600)])
