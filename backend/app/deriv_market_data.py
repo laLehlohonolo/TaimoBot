@@ -12,7 +12,7 @@ from .market_observations import normalize_market_observation
 
 DERIV_SYNTHETIC_SYMBOLS = frozenset({
     "R_10", "R_25", "R_50", "R_75", "R_100",
-    "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
+    "1HZ10V", "1HZ15V", "1HZ25V", "1HZ30V", "1HZ50V", "1HZ75V", "1HZ90V", "1HZ100V",
 })
 
 
@@ -53,15 +53,21 @@ def normalize_active_symbols_response(payload):
         subgroup = record.get("subgroup")
         submarket = record.get("submarket")
         display_name = record.get("underlying_symbol_name")
+        symbol_type = record.get("underlying_symbol_type")
+        trade_count = record.get("trade_count")
         if not all(isinstance(value, str) and value.strip()
-                   for value in (market, subgroup, submarket, display_name)):
+                   for value in (market, subgroup, submarket, display_name, symbol_type)):
             raise ValueError("Deriv symbol metadata is incomplete.")
+        if isinstance(trade_count, bool) or not isinstance(trade_count, int) or trade_count < 0:
+            raise ValueError("trade_count must be a non-negative integer.")
         for flag in ("exchange_is_open", "is_trading_suspended"):
             if record.get(flag) not in (0, 1) or isinstance(record.get(flag), bool):
                 raise ValueError(flag + " must be 0 or 1.")
         discovered.append({
             **instrument,
             "display_name": display_name.strip(),
+            "underlying_symbol_type": symbol_type.strip(),
+            "trade_count": trade_count,
             "market": market.strip(),
             "subgroup": subgroup.strip(),
             "submarket": submarket.strip(),
