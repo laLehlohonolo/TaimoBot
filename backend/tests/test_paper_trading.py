@@ -1933,5 +1933,43 @@ class PaperTradingTests(unittest.TestCase):
                     )
 
 
+    def test_position_size_rejects_quantities_below_supported_precision(self):
+        cases = (
+            (1e-10, 10, 1, 0.25),
+            (2e-10, 20, 2, 0.25),
+            (3e-10, 30, 3, 0.25),
+            (4e-10, 40, 4, 0.25),
+            (5e-10, 50, 5, 0.25),
+            (6e-10, 60, 6, 0.25),
+            (7e-10, 70, 7, 0.25),
+            (8e-10, 80, 8, 0.25),
+            (9e-10, 90, 9, 0.25),
+            (1e-9, 100, 10, 0.25),
+            (2e-10, 10, 1, 0.50),
+            (3e-10, 20, 2, 0.50),
+            (4e-10, 30, 3, 0.50),
+            (5e-10, 40, 4, 0.50),
+            (6e-10, 50, 5, 0.50),
+            (7e-10, 60, 6, 0.50),
+            (8e-10, 70, 7, 0.50),
+            (9e-10, 80, 8, 0.50),
+            (1e-9, 90, 9, 0.50),
+            (2e-9, 100, 10, 0.50),
+        )
+        for balance, entry, stop, risk_percent in cases:
+            with self.subTest(
+                balance=balance, entry=entry, stop=stop,
+                risk_percent=risk_percent
+            ):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=balance,
+                        entry_price=entry,
+                        stop_loss=stop,
+                        risk_percent=risk_percent,
+                        side="BUY",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
