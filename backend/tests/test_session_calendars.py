@@ -29,7 +29,7 @@ class SessionCalendarTests(unittest.TestCase):
             "effective_to": "2027-12-31",
             "source_url": "https://broker.example.test/instrument-specifications",
             "retrieved_at": "2026-11-21T20:00:00+02:00",
-            "reviewed_by": "admin-review-pending",
+            "submitted_by": "admin-review-pending",
             "version": 1,
         }
 
