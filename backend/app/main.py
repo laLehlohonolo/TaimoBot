@@ -66,6 +66,7 @@ from .safety import (
     deactivate_emergency_stop,
     is_emergency_stop_active
 )
+from .instruments import list_instruments, EXECUTION_ENABLED_SYMBOLS
 
 
 @asynccontextmanager
@@ -194,6 +195,30 @@ class StrategyKnowledgeRequest(BaseModel):
     entry_logic: str = Field(min_length=10, max_length=2000)
     exit_logic: str = Field(min_length=10, max_length=2000)
     risk_notes: str = Field(min_length=10, max_length=2000)
+
+
+@app.get("/instruments")
+def instrument_readiness(user=Depends(current_user)):
+    """Read-only catalogue and paper-execution readiness; no market feed is implied."""
+    instruments = []
+    for instrument in list_instruments():
+        symbol = instrument["symbol"]
+        execution_enabled = symbol in EXECUTION_ENABLED_SYMBOLS
+        instruments.append({
+            **instrument,
+            "paper_execution_status": (
+                "PAPER_EXECUTION_ENABLED" if execution_enabled else "OBSERVATION_ONLY"
+            ),
+            "market_data_status": "NOT_CONNECTED",
+            "broker_specifications_status": "NOT_CONFIGURED",
+            "sizing_mode": "ABSTRACT_PAPER_UNITS" if execution_enabled else "DISABLED",
+        })
+    return {
+        "mode": "paper_trading",
+        "read_only": True,
+        "execution_triggered": False,
+        "instruments": instruments,
+    }
 
 
 @app.get("/")
