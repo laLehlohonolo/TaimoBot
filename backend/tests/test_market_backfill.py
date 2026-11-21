@@ -2,7 +2,10 @@ import sqlite3
 import unittest
 
 from app.database import ensure_market_observation_schema
-from app.market_backfill import get_backfill_checkpoint, run_backfill_batch
+from app.market_backfill import (
+    get_backfill_checkpoint, prepare_backfill_batch,
+    persist_backfill_batch, run_backfill_batch,
+)
 
 
 class FakeRangeClient:
@@ -38,6 +41,49 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         self.connection.close()
+
+    async def test_prepare_fetch_persist_uses_separate_database_connections(self):
+        request = prepare_backfill_batch(
+            self.connection, "1HZ100V", "M1", batch_size=3, now_epoch=3600,
+        )
+        self.connection.close()
+        candles = [candle(3480), candle(3540), candle(3600)]
+        # The provider phase runs with no database connection held.
+        client = FakeRangeClient(candles)
+        fetched = await client.collect_candle_range(
+            request["symbol"], request["timeframe"],
+            request["start_epoch"], request["end_epoch"],
+            max_candles=request["batch_size"],
+        )
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+        ensure_market_observation_schema(self.connection)
+        # Simulate the same durable checkpoint created by the preparation phase.
+        self.connection.execute(
+            """INSERT INTO market_backfill_checkpoints
+               (symbol, timeframe, next_end_epoch, status)
+               VALUES (?, ?, ?, 'RUNNING')""",
+            ("1HZ100V", "M1", request["expected_next_end_epoch"]),
+        )
+        result = persist_backfill_batch(self.connection, request, fetched)
+        self.assertEqual(result["inserted_count"], 3)
+        self.assertEqual(result["next_end_epoch"], 3420)
+
+    async def test_stale_prepared_batch_cannot_advance_checkpoint_twice(self):
+        first_request = prepare_backfill_batch(
+            self.connection, "1HZ100V", "M1", batch_size=3, now_epoch=3600,
+        )
+        second_request = prepare_backfill_batch(
+            self.connection, "1HZ100V", "M1", batch_size=3, now_epoch=3600,
+        )
+        candles = [candle(3480), candle(3540), candle(3600)]
+        first = persist_backfill_batch(self.connection, first_request, candles)
+        self.assertEqual(first["batches_completed"], 1)
+        with self.assertRaisesRegex(RuntimeError, "changed during collection"):
+            persist_backfill_batch(self.connection, second_request, candles)
+        checkpoint = get_backfill_checkpoint(self.connection, "1HZ100V", "M1")
+        self.assertEqual(checkpoint["batches_completed"], 1)
+        self.assertEqual(checkpoint["next_end_epoch"], 3420)
 
     async def test_backfill_persists_candles_and_moves_durable_cursor_backwards(self):
         client = FakeRangeClient([candle(3480), candle(3540), candle(3600)])
