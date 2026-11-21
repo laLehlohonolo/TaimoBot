@@ -103,13 +103,18 @@ class DerivPublicMarketDataClient:
             for candle in candles
         ]
 
-    async def discover_and_store_candles(self, connection, symbol, timeframe, count=100):
-        """Discover symbol availability, fetch candles, and persist them as research data."""
+    async def collect_candles(self, symbol, timeframe, count=100):
+        """Fetch and validate provider data without holding or opening a database connection."""
         normalized_symbol = get_instrument(symbol)["symbol"]
         active = await self.discover_synthetic_symbols()
         if normalized_symbol not in {item["symbol"] for item in active}:
             raise ValueError("Deriv does not currently report this symbol as active.")
-        candles = await self.fetch_candles(normalized_symbol, timeframe, count=count)
+        return await self.fetch_candles(normalized_symbol, timeframe, count=count)
+
+    def persist_candles(self, connection, candles):
+        """Persist a fully collected candle batch atomically using a short DB transaction."""
+        if not isinstance(candles, list):
+            raise ValueError("candles must be a list of normalized observations.")
         connection.execute("SAVEPOINT deriv_market_sync")
         try:
             results = [save_market_observation(connection, candle) for candle in candles]
@@ -118,6 +123,13 @@ class DerivPublicMarketDataClient:
             connection.execute("ROLLBACK TO SAVEPOINT deriv_market_sync")
             connection.execute("RELEASE SAVEPOINT deriv_market_sync")
             raise
+        return results
+
+    async def discover_and_store_candles(self, connection, symbol, timeframe, count=100):
+        """Compatibility helper; production routes should collect before opening the DB."""
+        normalized_symbol = get_instrument(symbol)["symbol"]
+        candles = await self.collect_candles(normalized_symbol, timeframe, count=count)
+        results = self.persist_candles(connection, candles)
         return {
             "provider": "Deriv",
             "symbol": normalized_symbol,
