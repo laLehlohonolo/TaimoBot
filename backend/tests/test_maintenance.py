@@ -9132,3 +9132,149 @@ for _name, _artifact_label, _mutation in _APPROVED_PREFLIGHT_FINAL_FENCE_CASES:
             _name, _artifact_label, _mutation
         ),
     )
+
+
+def _make_restore_approval_transaction_race_test(scenario):
+    def test(self):
+        from app import main as main_module
+        from app.main import MaintenanceRestoreApproveRequest, approve_maintenance_restore
+        from fastapi import HTTPException
+
+        plan_id = "c" * 32
+        backup_dir, source, staged, rollback = self._create_restore_approval_fixture(plan_id)
+        inventory = self._ready_restore_inventory(backup_dir, source, staged, rollback)
+        real_get_connection = main_module.get_connection
+        calls = {"count": 0}
+
+        def mutate_after_validation():
+            with sqlite3.connect(str(database.DB_PATH)) as connection:
+                if scenario == "plan_source_path":
+                    connection.execute(
+                        "UPDATE maintenance_restore_plans SET backup_file=? WHERE plan_id=?",
+                        (str(backup_dir / "changed-source.sqlite3"), plan_id),
+                    )
+                elif scenario == "plan_staged_path":
+                    connection.execute(
+                        "UPDATE maintenance_restore_plans SET staging_file=? WHERE plan_id=?",
+                        (str(backup_dir / "recovery-staging" / "changed-staged.sqlite3"), plan_id),
+                    )
+                elif scenario == "plan_rollback_path":
+                    connection.execute(
+                        "UPDATE maintenance_restore_plans SET pre_restore_backup_file=? WHERE plan_id=?",
+                        (str(backup_dir / "changed-rollback.sqlite3"), plan_id),
+                    )
+                elif scenario == "plan_created_at":
+                    connection.execute(
+                        "UPDATE maintenance_restore_plans SET created_at=? WHERE plan_id=?",
+                        (datetime.now(ZoneInfo("Africa/Johannesburg")).isoformat(), plan_id),
+                    )
+                elif scenario == "plan_status":
+                    connection.execute(
+                        "UPDATE maintenance_restore_plans SET status='EXPIRED' WHERE plan_id=?",
+                        (plan_id,),
+                    )
+                elif scenario in ("hash_source", "hash_staged", "hash_rollback"):
+                    column = {
+                        "hash_source": "source_sha256",
+                        "hash_staged": "staged_sha256",
+                        "hash_rollback": "rollback_sha256",
+                    }[scenario]
+                    connection.execute(
+                        f"UPDATE maintenance_restore_artifacts SET {column}=? WHERE plan_id=?",
+                        ("0" * 64, plan_id),
+                    )
+                elif scenario == "artifact_row_delete":
+                    connection.execute(
+                        "DELETE FROM maintenance_restore_artifacts WHERE plan_id=?", (plan_id,)
+                    )
+                elif scenario == "plan_row_delete":
+                    connection.execute(
+                        "DELETE FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+                    )
+
+            target = {
+                "source_append": source,
+                "source_rewrite": source,
+                "source_truncate": source,
+                "source_replace": source,
+                "staged_append": staged,
+                "staged_rewrite": staged,
+                "staged_truncate": staged,
+                "staged_replace": staged,
+                "rollback_append": rollback,
+                "rollback_rewrite": rollback,
+                "rollback_truncate": rollback,
+                "rollback_replace": rollback,
+            }.get(scenario)
+            if target is not None:
+                original = target.read_bytes()
+                if scenario.endswith("_append"):
+                    target.write_bytes(original + b"changed-after-validation")
+                elif scenario.endswith("_rewrite"):
+                    target.write_bytes(bytes([original[0] ^ 0xFF]) + original[1:])
+                elif scenario.endswith("_truncate"):
+                    target.write_bytes(original[:-1])
+                elif scenario.endswith("_replace"):
+                    replacement = target.with_name(target.name + ".race-replacement")
+                    replacement.write_bytes(original + b"-replacement")
+                    replacement.replace(target)
+
+        def intercepted_get_connection():
+            calls["count"] += 1
+            connection = real_get_connection()
+            if calls["count"] == 2:
+                mutate_after_validation()
+            return connection
+
+        with patch("app.main.BACKUP_DIR", backup_dir), patch(
+            "app.main.require_admin"
+        ), patch(
+            "app.main.inspect_recovery_candidates", side_effect=inventory
+        ), patch(
+            "app.main.get_connection", side_effect=intercepted_get_connection
+        ):
+            with self.assertRaises(HTTPException) as rejected:
+                approve_maintenance_restore(
+                    MaintenanceRestoreApproveRequest(plan_id=plan_id, confirm_approval=True),
+                    {"email": "approver@example.com"},
+                )
+
+        self.assertEqual(rejected.exception.status_code, 409, scenario)
+        self.assertEqual(calls["count"], 2, scenario)
+        with database.get_connection() as connection:
+            row = connection.execute(
+                "SELECT status FROM maintenance_restore_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()
+        self.assertTrue(row is None or row["status"] != "APPROVED", scenario)
+
+    return test
+
+
+_RESTORE_APPROVAL_TRANSACTION_RACE_CASES = [
+    ("test_restore_approval_transaction_plan_source_path_race", "plan_source_path"),
+    ("test_restore_approval_transaction_plan_staged_path_race", "plan_staged_path"),
+    ("test_restore_approval_transaction_plan_rollback_path_race", "plan_rollback_path"),
+    ("test_restore_approval_transaction_plan_created_at_race", "plan_created_at"),
+    ("test_restore_approval_transaction_plan_status_race", "plan_status"),
+    ("test_restore_approval_transaction_source_hash_metadata_race", "hash_source"),
+    ("test_restore_approval_transaction_staged_hash_metadata_race", "hash_staged"),
+    ("test_restore_approval_transaction_rollback_hash_metadata_race", "hash_rollback"),
+    ("test_restore_approval_transaction_artifact_row_delete_race", "artifact_row_delete"),
+    ("test_restore_approval_transaction_plan_row_delete_race", "plan_row_delete"),
+    ("test_restore_approval_transaction_source_append_race", "source_append"),
+    ("test_restore_approval_transaction_source_rewrite_race", "source_rewrite"),
+    ("test_restore_approval_transaction_source_truncate_race", "source_truncate"),
+    ("test_restore_approval_transaction_source_replace_race", "source_replace"),
+    ("test_restore_approval_transaction_staged_append_race", "staged_append"),
+    ("test_restore_approval_transaction_staged_rewrite_race", "staged_rewrite"),
+    ("test_restore_approval_transaction_staged_truncate_race", "staged_truncate"),
+    ("test_restore_approval_transaction_staged_replace_race", "staged_replace"),
+    ("test_restore_approval_transaction_rollback_append_race", "rollback_append"),
+    ("test_restore_approval_transaction_rollback_rewrite_race", "rollback_rewrite"),
+]
+for _name, _scenario in _RESTORE_APPROVAL_TRANSACTION_RACE_CASES:
+    setattr(
+        DailyMaintenanceTests,
+        _name,
+        _make_restore_approval_transaction_race_test(_scenario),
+    )
