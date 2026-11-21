@@ -355,9 +355,6 @@ class MarketObservationStoreTests(unittest.TestCase):
         self.assertFalse(result["eligible_for_backtest"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
     def test_coverage_reports_single_candle_as_one_hundred_percent_for_that_observed_span(self):
         from app.market_observation_store import inspect_market_observation_coverage
 
@@ -426,3 +423,5 @@ if __name__ == "__main__":
                 self.connection, "1HZ100V", "M2"
             )
 
+if __name__ == "__main__":
+    unittest.main()
