@@ -9039,3 +9039,96 @@ for _name, _overrides in _LOCKED_PREFLIGHT_FINAL_LOCK_RACE_CASES:
         _name,
         _make_locked_preflight_final_lock_race_test(_name, _overrides),
     )
+
+
+def _make_approved_preflight_final_fence_test(scenario, artifact_label=None, mutation=None):
+    def test(self):
+        zone = ZoneInfo("Africa/Johannesburg")
+        now = datetime.now(zone)
+        backup_dir, source, staged, rollback, hashes = (
+            self._make_locked_restore_artifacts("approved-final-" + scenario)
+        )
+        plan_id = "b" * 32
+        plan = {
+            "plan_id": plan_id,
+            "backup_file": str(source),
+            "staging_file": str(staged),
+            "pre_restore_backup_file": str(rollback),
+            "status": "APPROVED",
+            "created_at": now.isoformat(),
+        }
+        artifact_paths = {"source": source, "staged": staged, "rollback": rollback}
+        acquired = {"lock": None}
+
+        def readiness(*args, **kwargs):
+            if mutation == "activate_lock":
+                acquired["lock"] = acquire_restore_lock(plan_id)
+            else:
+                path = artifact_paths[artifact_label]
+                original = path.read_bytes()
+                if mutation == "append":
+                    path.write_bytes(original + b"changed-during-readiness")
+                elif mutation == "rewrite":
+                    path.write_bytes(bytes([original[0] ^ 0xFF]) + original[1:])
+                elif mutation == "truncate":
+                    path.write_bytes(original[:-1])
+                elif mutation == "replace":
+                    replacement = path.with_name(path.name + ".replacement")
+                    replacement.write_bytes(original + b"-replacement")
+                    replacement.replace(path)
+            return {"status": "RESTORE_EXECUTION_PREFLIGHT_PASSED"}
+
+        try:
+            with patch(
+                "app.maintenance.verify_restore_execution_readiness",
+                side_effect=readiness,
+            ):
+                if mutation == "activate_lock":
+                    with self.assertRaisesRegex(ValueError, "lock became active"):
+                        verify_approved_restore_plan(
+                            plan, hashes, backup_dir=backup_dir,
+                            live_database_path=database.DB_PATH, now=now,
+                        )
+                else:
+                    with self.assertRaisesRegex(ValueError, "changed during approved restore preflight"):
+                        verify_approved_restore_plan(
+                            plan, hashes, backup_dir=backup_dir,
+                            live_database_path=database.DB_PATH, now=now,
+                        )
+        finally:
+            if acquired["lock"] is not None:
+                release_restore_lock(acquired["lock"]["lock_token"])
+        self.assertFalse(is_restore_lock_active(), scenario)
+    return test
+
+
+_APPROVED_PREFLIGHT_FINAL_FENCE_CASES = [
+    ("test_approved_preflight_source_append_race", "source", "append"),
+    ("test_approved_preflight_source_rewrite_race", "source", "rewrite"),
+    ("test_approved_preflight_source_truncate_race", "source", "truncate"),
+    ("test_approved_preflight_source_replace_race", "source", "replace"),
+    ("test_approved_preflight_staged_append_race", "staged", "append"),
+    ("test_approved_preflight_staged_rewrite_race", "staged", "rewrite"),
+    ("test_approved_preflight_staged_truncate_race", "staged", "truncate"),
+    ("test_approved_preflight_staged_replace_race", "staged", "replace"),
+    ("test_approved_preflight_rollback_append_race", "rollback", "append"),
+    ("test_approved_preflight_rollback_rewrite_race", "rollback", "rewrite"),
+    ("test_approved_preflight_rollback_truncate_race", "rollback", "truncate"),
+    ("test_approved_preflight_rollback_replace_race", "rollback", "replace"),
+    ("test_approved_preflight_lock_appears_race_01", None, "activate_lock"),
+    ("test_approved_preflight_lock_appears_race_02", None, "activate_lock"),
+    ("test_approved_preflight_lock_appears_race_03", None, "activate_lock"),
+    ("test_approved_preflight_lock_appears_race_04", None, "activate_lock"),
+    ("test_approved_preflight_lock_appears_race_05", None, "activate_lock"),
+    ("test_approved_preflight_lock_appears_race_06", None, "activate_lock"),
+    ("test_approved_preflight_lock_appears_race_07", None, "activate_lock"),
+    ("test_approved_preflight_lock_appears_race_08", None, "activate_lock"),
+]
+for _name, _artifact_label, _mutation in _APPROVED_PREFLIGHT_FINAL_FENCE_CASES:
+    setattr(
+        DailyMaintenanceTests,
+        _name,
+        _make_approved_preflight_final_fence_test(
+            _name, _artifact_label, _mutation
+        ),
+    )
