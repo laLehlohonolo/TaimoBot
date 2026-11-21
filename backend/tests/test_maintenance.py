@@ -8720,11 +8720,21 @@ def _make_restore_candidate_source_race_test(scenario):
                 mutate()
             return chunk
 
-        with patch("app.maintenance.os.read", side_effect=read_then_mutate):
-            with self.assertRaises(OSError):
-                verify_restore_candidate(source, staging)
+        real_tempdir = tempfile.TemporaryDirectory
+        snapshot_directories = []
+
+        def tracked_tempdir(*args, **kwargs):
+            temporary = real_tempdir(*args, **kwargs)
+            snapshot_directories.append(Path(temporary.name))
+            return temporary
+
+        with patch("app.maintenance.tempfile.TemporaryDirectory", side_effect=tracked_tempdir):
+            with patch("app.maintenance.os.read", side_effect=read_then_mutate):
+                with self.assertRaises(OSError):
+                    verify_restore_candidate(source, staging)
 
         self.assertTrue(mutated["done"], scenario)
+        self.assertTrue(all(not path.exists() for path in snapshot_directories), scenario)
         self.assertFalse(staging.exists(), scenario)
         self.assertEqual(maintenance_module.sha256_file(database.DB_PATH), live_before)
         self.assertEqual(
@@ -8759,3 +8769,18 @@ _RESTORE_CANDIDATE_SOURCE_RACE_CASES = [
 ]
 for _test_name, _scenario in _RESTORE_CANDIDATE_SOURCE_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_restore_candidate_source_race_test(_scenario))
+
+
+def test_restore_candidate_rejects_identical_source_and_staging_path(self):
+    source = self._make_inventory_backup(
+        Path(self.temp_dir.name) / "same-path", "taimobot-same.sqlite3"
+    )
+    original = source.read_bytes()
+    with self.assertRaisesRegex(ValueError, "paths must be different"):
+        verify_restore_candidate(source, source)
+    self.assertEqual(source.read_bytes(), original)
+
+
+DailyMaintenanceTests.test_restore_candidate_rejects_identical_source_and_staging_path = (
+    test_restore_candidate_rejects_identical_source_and_staging_path
+)
