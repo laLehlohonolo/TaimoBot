@@ -67,10 +67,10 @@ class CopyTradeReplicationTests(unittest.TestCase):
             json={
                 "account_id": "SOURCE",
                 "client_order_id": "API-SOURCE-001",
-                "symbol": "EURUSD",
+                "symbol": "XAUUSD",
                 "side": "BUY",
-                "entry_price": 1.1,
-                "stop_loss": 1.09,
+                "entry_price": 4000,
+                "stop_loss": 3990,
                 "risk_percent": 0.5
             }
         )
@@ -214,7 +214,7 @@ class CopyTradeReplicationTests(unittest.TestCase):
 
     def test_follower_risk_rejection_is_recorded_without_affecting_source(self):
         # Consume the follower's full combined risk budget first.
-        for number, symbol in enumerate(("EURUSD", "GBPUSD"), start=1):
+        for number, symbol in enumerate(("XAUUSD", "XAUUSD"), start=1):
             open_paper_trade(
                 account_id="FOLLOWER",
                 client_order_id=f"FOLLOWER-EXISTING-{number}",
@@ -874,7 +874,7 @@ class CopyTradeReplicationTests(unittest.TestCase):
             entry_price=4000,
             stop_loss=3990,
             risk_percent=0.5,
-            symbol="EURUSD"
+            symbol="XAUUSD"
         )
 
         first_source = self.create_source_trade(

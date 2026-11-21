@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, Field, StrictFloat
+from pydantic import BaseModel, Field, StrictFloat, StrictInt
 
 from .database import init_db, get_connection
 from .maintenance_scheduler import (
@@ -50,6 +50,7 @@ from .history import (
     get_account_history,
     get_trade_history
 )
+from .currency_preference_routes import router as currency_preference_router
 from .auth_routes import (
     router as auth_router,
     current_user,
@@ -66,6 +67,11 @@ from .safety import (
     deactivate_emergency_stop,
     is_emergency_stop_active
 )
+from .instruments import list_instruments, EXECUTION_ENABLED_SYMBOLS
+from .market_observation_store import list_market_observations, inspect_market_observation_quality
+from .deriv_public_client import DerivPublicMarketDataClient
+from .market_observations import SUPPORTED_TIMEFRAMES
+from .instruments import get_instrument
 
 
 @asynccontextmanager
@@ -90,6 +96,7 @@ app = FastAPI(
 )
 
 app.include_router(auth_router)
+app.include_router(currency_preference_router)
 
 # Cross-origin browser access is disabled unless exact trusted origins are configured.
 configure_cors(app, os.getenv("TAIMOBOT_CORS_ORIGINS", ""))
@@ -194,6 +201,37 @@ class StrategyKnowledgeRequest(BaseModel):
     entry_logic: str = Field(min_length=10, max_length=2000)
     exit_logic: str = Field(min_length=10, max_length=2000)
     risk_notes: str = Field(min_length=10, max_length=2000)
+
+
+class DerivMarketSyncRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9._/-]+$")
+    timeframe: str = Field(min_length=2, max_length=3)
+    count: StrictInt = Field(default=100, ge=1, le=100)
+    confirm_collection: bool
+
+
+@app.get("/instruments")
+def instrument_readiness(user=Depends(current_user)):
+    """Read-only catalogue and paper-execution readiness; no market feed is implied."""
+    instruments = []
+    for instrument in list_instruments():
+        symbol = instrument["symbol"]
+        execution_enabled = symbol in EXECUTION_ENABLED_SYMBOLS
+        instruments.append({
+            **instrument,
+            "paper_execution_status": (
+                "PAPER_EXECUTION_ENABLED" if execution_enabled else "OBSERVATION_ONLY"
+            ),
+            "market_data_status": "NOT_CONNECTED",
+            "broker_specifications_status": "NOT_CONFIGURED",
+            "sizing_mode": "ABSTRACT_PAPER_UNITS" if execution_enabled else "DISABLED",
+        })
+    return {
+        "mode": "paper_trading",
+        "read_only": True,
+        "execution_triggered": False,
+        "instruments": instruments,
+    }
 
 
 @app.get("/")
@@ -1106,3 +1144,100 @@ def strategy_details(strategy_id: str, user=Depends(current_user)):
     if strategy is None:
         raise HTTPException(status_code=404, detail="Strategy not found.")
     return strategy
+
+
+@app.post("/market-observations/deriv-sync")
+async def trigger_deriv_market_sync(request: DerivMarketSyncRequest, user=Depends(current_user)):
+    """Admin-triggered, bounded Deriv candle collection; never generates signals or orders."""
+    require_admin(user)
+    if not request.confirm_collection:
+        raise HTTPException(status_code=400, detail="Explicit collection confirmation is required.")
+    try:
+        instrument = get_instrument(request.symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices can be collected.")
+        if request.timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported observation timeframe.")
+        client = DerivPublicMarketDataClient()
+        candles = await client.collect_candles(
+            instrument["symbol"], request.timeframe, count=request.count
+        )
+        # Do not hold a SQLite connection while waiting on the external WebSocket.
+        with get_connection() as connection:
+            observations = client.persist_candles(connection, candles)
+        result = {
+            "provider": "Deriv",
+            "symbol": instrument["symbol"],
+            "timeframe": request.timeframe,
+            "received_count": len(candles),
+            "inserted_count": sum(1 for item in observations if item["inserted"]),
+            "duplicate_count": sum(1 for item in observations if not item["inserted"]),
+            "read_only": True,
+            "execution_triggered": False,
+            "signals_generated": False,
+            "observations": observations,
+        }
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except TimeoutError as error:
+        raise HTTPException(status_code=504, detail="Deriv market-data request timed out.") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail="Deriv market-data provider rejected the request.") from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="Deriv market-data collection failed safely.") from error
+    return {
+        **result,
+        "operator_triggered": True,
+        "read_only": True,
+        "execution_triggered": False,
+        "signals_generated": False,
+    }
+
+
+@app.get("/market-observations")
+def market_observations_route(
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    limit: int = 100,
+    user=Depends(current_user),
+):
+    """List stored, validated market candles without creating signals or orders."""
+    del user  # Authentication is required; observations are currently shared research data.
+    try:
+        with get_connection() as connection:
+            observations = list_market_observations(
+                connection, symbol=symbol, timeframe=timeframe, limit=limit
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        "observations": observations,
+        "count": len(observations),
+        "read_only": True,
+        "execution_triggered": False,
+        "signals_generated": False,
+    }
+
+
+
+@app.get("/market-observations/quality")
+def market_observation_quality_route(
+    symbol: str,
+    timeframe: str,
+    user=Depends(current_user),
+):
+    """Authenticated read-only freshness and continuity diagnostics for Deriv synthetics."""
+    del user
+    try:
+        with get_connection() as connection:
+            quality = inspect_market_observation_quality(
+                connection, symbol=symbol, timeframe=timeframe
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        **quality,
+        "read_only": True,
+        "signals_generated": False,
+        "execution_triggered": False,
+    }

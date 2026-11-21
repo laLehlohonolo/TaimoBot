@@ -265,7 +265,14 @@ class CopyTradeClosingTests(unittest.TestCase):
         # The source balance write happens first. The later follower failure
         # must roll back the source balance and both trade-ledger updates.
         with self.assertRaises(sqlite3.IntegrityError):
-            close_trade_with_copies(source["trade_id"], 4010)
+            close_trade_with_copies(
+                source["trade_id"],
+                4010,
+                spread_cost=0.12,
+                commission_cost=0.23,
+                swap_cost=0.34,
+                other_costs=0.45,
+            )
 
         with database.get_connection() as connection:
             rows = connection.execute(

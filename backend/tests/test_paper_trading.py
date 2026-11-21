@@ -2,7 +2,8 @@
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, Mock, patch
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.execution import (
     create_paper_account,
     open_paper_trade,
     close_paper_trade,
+    close_position_group,
     validate_symbol
 )
 from app.risk import (
@@ -164,6 +166,96 @@ class PaperTradingTests(unittest.TestCase):
             result["projected_total_open_risk"], 100
         )
 
+    def test_valid_position_sizes_respect_risk_and_stop_distance(self):
+        cases = [
+            {
+                "name": "quarter_percent_buy",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.25,
+                "side": "BUY",
+                "current_open_risk": 0,
+                "expected_risk": 25,
+                "expected_size": 2.5,
+                "expected_projected": 25,
+                "expected_remaining": 75,
+            },
+            {
+                "name": "quarter_percent_sell",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 4010,
+                "risk_percent": 0.25,
+                "side": "SELL",
+                "current_open_risk": 0,
+                "expected_risk": 25,
+                "expected_size": 2.5,
+                "expected_projected": 25,
+                "expected_remaining": 75,
+            },
+            {
+                "name": "wider_stop_reduces_quantity",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 3980,
+                "risk_percent": 0.5,
+                "side": "BUY",
+                "current_open_risk": 0,
+                "expected_risk": 50,
+                "expected_size": 2.5,
+                "expected_projected": 50,
+                "expected_remaining": 50,
+            },
+            {
+                "name": "partial_risk_budget",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5,
+                "side": "BUY",
+                "current_open_risk": 40,
+                "expected_risk": 50,
+                "expected_size": 5,
+                "expected_projected": 90,
+                "expected_remaining": 10,
+            },
+            {
+                "name": "exactly_uses_remaining_risk_budget",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5,
+                "side": "BUY",
+                "current_open_risk": 50,
+                "expected_risk": 50,
+                "expected_size": 5,
+                "expected_projected": 100,
+                "expected_remaining": 0,
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                values = {
+                    key: value
+                    for key, value in case.items()
+                    if not key.startswith("expected_") and key != "name"
+                }
+                result = calculate_position_size(**values)
+                self.assertTrue(result["approved"])
+                self.assertEqual(result["mode"], "paper_trading")
+                self.assertAlmostEqual(result["risk_amount"], case["expected_risk"])
+                self.assertAlmostEqual(result["position_size"], case["expected_size"])
+                self.assertAlmostEqual(
+                    result["projected_total_open_risk"],
+                    case["expected_projected"],
+                )
+                self.assertAlmostEqual(
+                    result["remaining_risk_after_trade"],
+                    case["expected_remaining"],
+                )
+
     def test_risk_inputs_reject_booleans_and_overflowing_integers(self):
         invalid_positive_values = (True, 10 ** 10000)
         for field in ("account_balance", "entry_price", "stop_loss", "risk_percent"):
@@ -255,7 +347,7 @@ class PaperTradingTests(unittest.TestCase):
             entry_price=4000,
             stop_loss=3990,
             risk_percent=1.0,
-            symbol="EURUSD"
+            symbol="XAUUSD"
         )
 
         self.assertEqual(result["risk_profile"], "STARTER")
@@ -382,7 +474,7 @@ class PaperTradingTests(unittest.TestCase):
             entry_price=4000,
             stop_loss=3990,
             risk_percent=1.0,
-            symbol="EURUSD"
+            symbol="XAUUSD"
         )
 
         self.assertEqual(
@@ -444,21 +536,15 @@ class PaperTradingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_symbol("A" * 31)
 
-    def test_different_instruments_can_open_separate_positions(self):
-        eur = self.open_trade("ORDER-EUR", 0.5, "EURUSD")
-        gold = self.open_trade("ORDER-GOLD", 0.5, "XAUUSD")
+    def test_observation_candidate_cannot_open_separate_position(self):
+        for symbol in ("EURUSD", "GBPUSD"):
+            with self.subTest(symbol=symbol):
+                with self.assertRaisesRegex(ValueError, "observation-only"):
+                    self.open_trade("ORDER-OBS-" + symbol, 0.5, symbol)
 
-        self.assertEqual(eur["symbol"], "EURUSD")
-        self.assertEqual(gold["symbol"], "XAUUSD")
-        self.assertNotEqual(eur["trade_id"], gold["trade_id"])
-        self.assertEqual(gold["total_open_risk"], 100)
-
-    def test_different_instruments_share_one_risk_limit(self):
-        self.open_trade("ORDER-EUR", 0.5, "EURUSD")
-        self.open_trade("ORDER-GOLD", 0.5, "XAUUSD")
-
-        with self.assertRaises(RiskError):
-            self.open_trade("ORDER-BTC", 0.1, "BTCUSD")
+    def test_unknown_symbol_cannot_open_position(self):
+        with self.assertRaisesRegex(ValueError, "observation-only"):
+            self.open_trade("ORDER-UNKNOWN", 0.5, "BTCUSD")
 
     def test_trade_api_returns_consistent_paper_order_contract(self):
         response = self.client.post(
@@ -558,7 +644,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(resumed.status_code, 200)
         self.assertFalse(self.client.get("/safety/status").json()["emergency_stop"])
 
-    def test_api_accepts_a_valid_instrument_symbol(self):
+    def test_api_rejects_observation_only_instrument(self):
         response = self.client.post(
             "/trades",
             json={
@@ -571,11 +657,8 @@ class PaperTradingTests(unittest.TestCase):
                 "risk_percent": 0.5
             }
         )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["symbol"], "EURUSD")
-        self.assertEqual(response.json()["risk_percent"], 0.5)
-        self.assertEqual(response.json()["risk_amount"], 50)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("observation-only", response.json()["detail"])
 
     def test_api_cannot_override_assigned_risk_profile(self):
         response = self.client.post(
@@ -583,7 +666,7 @@ class PaperTradingTests(unittest.TestCase):
             json={
                 "account_id": "TEST-001",
                 "client_order_id": "API-RISK-OVERRIDE",
-                "symbol": "EURUSD",
+                "symbol": "XAUUSD",
                 "side": "BUY",
                 "entry_price": 4000,
                 "stop_loss": 3990,
@@ -613,7 +696,7 @@ class PaperTradingTests(unittest.TestCase):
 
     def test_closing_trade_returns_its_instrument_symbol(self):
         trade = self.open_trade(
-            "ORDER-CLOSE-SYMBOL", 0.5, "GBPUSD"
+            "ORDER-CLOSE-SYMBOL", 0.5, "XAUUSD"
         )
 
         result = close_paper_trade(
@@ -621,7 +704,7 @@ class PaperTradingTests(unittest.TestCase):
             exit_price=4000
         )
 
-        self.assertEqual(result["symbol"], "GBPUSD")
+        self.assertEqual(result["symbol"], "XAUUSD")
         self.assertEqual(result["status"], "CLOSED")
 
     def test_legacy_database_migration_preserves_existing_trades(self):
@@ -1642,6 +1725,834 @@ class PaperTradingTests(unittest.TestCase):
                 with self.subTest(endpoint=endpoint, field=field):
                     response = self.client.post(endpoint, json=payload)
                     self.assertEqual(response.status_code, 422)
+
+
+    def test_position_size_rejects_malformed_numeric_inputs(self):
+        invalid_values = (None, "", "not-a-number", float("nan"))
+        valid_values = {
+            "account_balance": 10000,
+            "entry_price": 4000,
+            "stop_loss": 3990,
+            "risk_percent": 0.5,
+            "side": "BUY",
+        }
+        for field in ("account_balance", "entry_price", "stop_loss", "risk_percent"):
+            for invalid in invalid_values:
+                values = dict(valid_values)
+                values[field] = invalid
+                with self.subTest(field=field, value=repr(invalid)):
+                    with self.assertRaises(RiskError):
+                        calculate_position_size(**values)
+
+    def test_position_size_rejects_malformed_current_open_risk(self):
+        invalid_values = (None, "", "not-a-number", float("nan"))
+        for invalid in invalid_values:
+            with self.subTest(value=repr(invalid)):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=10000,
+                        entry_price=4000,
+                        stop_loss=3990,
+                        risk_percent=0.5,
+                        side="BUY",
+                        current_open_risk=invalid,
+                    )
+
+
+    # Take-profit validation matrix: invalid targets must never reserve risk
+    # or create paper positions.
+    def open_trade_with_target(self, order_id, side, take_profit):
+        return open_paper_trade(
+            account_id="TEST-001",
+            client_order_id=order_id,
+            side=side,
+            entry_price=4000,
+            stop_loss=3990 if side == "BUY" else 4010,
+            take_profit=take_profit,
+        )
+
+    def test_buy_take_profit_above_entry_is_accepted(self):
+        trade = self.open_trade_with_target("TP-BUY-VALID", "BUY", 4010)
+        self.assertEqual(trade["status"], "OPEN")
+
+    def test_sell_take_profit_below_entry_is_accepted(self):
+        trade = self.open_trade_with_target("TP-SELL-VALID", "SELL", 3990)
+        self.assertEqual(trade["status"], "OPEN")
+
+    def test_buy_take_profit_equal_to_entry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-BUY-EQUAL", "BUY", 4000)
+
+    def test_buy_take_profit_below_entry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-BUY-BELOW", "BUY", 3999.99)
+
+    def test_sell_take_profit_equal_to_entry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-SELL-EQUAL", "SELL", 4000)
+
+    def test_sell_take_profit_above_entry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-SELL-ABOVE", "SELL", 4000.01)
+
+    def test_boolean_true_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-TRUE", "BUY", True)
+
+    def test_boolean_false_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-FALSE", "BUY", False)
+
+    def test_zero_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-ZERO", "BUY", 0)
+
+    def test_negative_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-NEGATIVE", "BUY", -1)
+
+    def test_nan_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-NAN", "BUY", float("nan"))
+
+    def test_positive_infinity_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-POS-INF", "BUY", float("inf"))
+
+    def test_negative_infinity_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-NEG-INF", "BUY", -float("inf"))
+
+    def test_non_numeric_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-TEXT", "BUY", "not-a-price")
+
+    def test_empty_string_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-EMPTY", "BUY", "")
+
+    def test_list_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-LIST", "BUY", [4010])
+
+    def test_dictionary_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-DICT", "BUY", {"price": 4010})
+
+    def test_overflowing_integer_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-OVERFLOW", "BUY", 10 ** 10000)
+
+    def test_missing_take_profit_remains_optional(self):
+        trade = self.open_trade_with_target("TP-OPTIONAL-NONE", "BUY", None)
+        self.assertEqual(trade["status"], "OPEN")
+        self.assertIsNone(trade["take_profit"])
+
+    def test_rejected_take_profit_does_not_create_trade_or_reserve_risk(self):
+        with database.get_connection() as connection:
+            before_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM trades WHERE account_id = 'TEST-001'"
+            ).fetchone()["n"]
+            before_risk = connection.execute(
+                "SELECT COALESCE(SUM(risk_amount), 0) AS n FROM trades "
+                "WHERE account_id = 'TEST-001' AND status = 'OPEN'"
+            ).fetchone()["n"]
+
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-NO-SIDE-EFFECT", "BUY", 3990)
+
+        with database.get_connection() as connection:
+            after_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM trades WHERE account_id = 'TEST-001'"
+            ).fetchone()["n"]
+            after_risk = connection.execute(
+                "SELECT COALESCE(SUM(risk_amount), 0) AS n FROM trades "
+                "WHERE account_id = 'TEST-001' AND status = 'OPEN'"
+            ).fetchone()["n"]
+
+        self.assertEqual(after_count, before_count)
+        self.assertEqual(after_risk, before_risk)
+
+
+
+    def test_single_execution_close_rolls_back_trade_when_balance_write_fails(self):
+        trade = self.open_trade("ROLLBACK-SINGLE-BALANCE")
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER fail_single_close_balance
+                BEFORE UPDATE OF balance ON paper_accounts
+                WHEN OLD.account_id = 'TEST-001'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated balance write failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_paper_trade(trade["trade_id"], 4010)
+
+        with database.get_connection() as connection:
+            ledger = connection.execute(
+                "SELECT status, realized_pnl FROM trades WHERE trade_id = ?",
+                (trade["trade_id"],),
+            ).fetchone()
+            balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()["balance"]
+
+        self.assertEqual(ledger["status"], "OPEN")
+        self.assertEqual(ledger["realized_pnl"], 0)
+        self.assertEqual(balance, 10000)
+
+    def test_execution_group_close_rolls_back_all_positions_when_group_finalization_fails(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        first = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="ROLLBACK-GROUP-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+        second = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="ROLLBACK-GROUP-002",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER fail_group_close_finalization
+                BEFORE UPDATE OF status ON position_groups
+                WHEN OLD.group_id = '""" + group_id + """'
+                 AND NEW.status = 'CLOSED'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated group finalization failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_position_group(group_id, 4010)
+
+        with database.get_connection() as connection:
+            trades = connection.execute(
+                """
+                SELECT status, realized_pnl
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                ORDER BY trade_id
+                """,
+                (first["trade_id"], second["trade_id"]),
+            ).fetchall()
+            group = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+            balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()["balance"]
+
+        self.assertEqual(len(trades), 2)
+        self.assertTrue(all(row["status"] == "OPEN" for row in trades))
+        self.assertTrue(all(row["realized_pnl"] == 0 for row in trades))
+        self.assertEqual(group["status"], "OPEN")
+        self.assertEqual(balance, 10000)
+
+
+    def test_position_size_rejects_overflowing_quantities(self):
+        # Finite inputs can still overflow during division when the stop
+        # distance is extremely small relative to the risk amount.
+        cases = (
+            (1e308, 1e-308, 5e-309, 0.25),
+            (1e308, 1e-308, 1e-309, 0.25),
+            (1e308, 1e-307, 1e-308, 0.50),
+            (1e308, 1e-306, 1e-307, 1.00),
+            (9e307, 1e-308, 5e-309, 0.25),
+            (8e307, 1e-308, 1e-309, 0.25),
+            (7e307, 1e-307, 1e-308, 0.50),
+            (6e307, 1e-306, 1e-307, 1.00),
+            (5e307, 1e-308, 5e-309, 0.25),
+            (4e307, 1e-308, 1e-309, 0.25),
+            (3e307, 1e-307, 1e-308, 0.50),
+            (2e307, 1e-306, 1e-307, 1.00),
+            (1e308, 2e-308, 1e-308, 0.25),
+            (1e308, 2e-308, 2e-309, 0.25),
+            (1e308, 2e-307, 2e-308, 0.50),
+            (1e308, 2e-306, 2e-307, 1.00),
+            (9e307, 3e-308, 1e-308, 0.25),
+            (8e307, 3e-308, 3e-309, 0.25),
+            (7e307, 3e-307, 3e-308, 0.50),
+            (6e307, 3e-306, 3e-307, 1.00),
+        )
+        for balance, entry, stop, risk_percent in cases:
+            with self.subTest(
+                balance=balance, entry=entry, stop=stop,
+                risk_percent=risk_percent
+            ):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=balance,
+                        entry_price=entry,
+                        stop_loss=stop,
+                        risk_percent=risk_percent,
+                        side="BUY",
+                    )
+
+
+    def test_position_size_rejects_quantities_below_supported_precision(self):
+        cases = (
+            (1e-10, 10, 1, 0.25),
+            (2e-10, 20, 2, 0.25),
+            (3e-10, 30, 3, 0.25),
+            (4e-10, 40, 4, 0.25),
+            (5e-10, 50, 5, 0.25),
+            (6e-10, 60, 6, 0.25),
+            (7e-10, 70, 7, 0.25),
+            (8e-10, 80, 8, 0.25),
+            (9e-10, 90, 9, 0.25),
+            (1e-9, 100, 10, 0.25),
+            (2e-10, 10, 1, 0.50),
+            (3e-10, 20, 2, 0.50),
+            (4e-10, 30, 3, 0.50),
+            (5e-10, 40, 4, 0.50),
+            (6e-10, 50, 5, 0.50),
+            (7e-10, 60, 6, 0.50),
+            (8e-10, 70, 7, 0.50),
+            (9e-10, 80, 8, 0.50),
+            (1e-9, 90, 9, 0.50),
+            (2e-9, 100, 10, 0.50),
+        )
+        for balance, entry, stop, risk_percent in cases:
+            with self.subTest(
+                balance=balance, entry=entry, stop=stop,
+                risk_percent=risk_percent
+            ):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=balance,
+                        entry_price=entry,
+                        stop_loss=stop,
+                        risk_percent=risk_percent,
+                        side="BUY",
+                    )
+
+
+    def test_instrument_readiness_endpoint_separates_catalogue_from_execution(self):
+        response = self.client.get("/instruments")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        instruments = {item["symbol"]: item for item in payload["instruments"]}
+        self.assertEqual(
+            instruments["XAUUSD"]["paper_execution_status"],
+            "PAPER_EXECUTION_ENABLED",
+        )
+        for symbol in ("EURUSD", "GBPUSD"):
+            self.assertEqual(
+                instruments[symbol]["paper_execution_status"],
+                "OBSERVATION_ONLY",
+            )
+        for item in instruments.values():
+            self.assertEqual(item["market_data_status"], "NOT_CONNECTED")
+            self.assertEqual(
+                item["broker_specifications_status"], "NOT_CONFIGURED"
+            )
+
+
+    def test_direct_order_rejects_observation_only_symbol_without_reserving_risk(self):
+        with self.assertRaisesRegex(ValueError, "observation-only"):
+            self.open_trade("OBSERVATION-ONLY-EUR", symbol="EURUSD")
+        self.assertEqual(self.client.get("/accounts/TEST-001/risk").json()["open_positions"], 0)
+
+    def test_position_group_rejects_observation_only_symbol(self):
+        response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "GBPUSD", "side": "BUY"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("observation-only", response.json()["detail"])
+
+
+    def test_market_observations_endpoint_is_authenticated_read_only_and_filterable(self):
+        from app.market_observation_store import save_market_observation
+
+        with database.get_connection() as connection:
+            save_market_observation(connection, {
+                "symbol": "1HZ100V",
+                "timeframe": "M1",
+                "timestamp": "2026-11-21T10:15:00+02:00",
+                "open": 1000,
+                "high": 1002,
+                "low": 999,
+                "close": 1001,
+                "volume": 0,
+                "source": "deriv-test",
+            })
+
+        response = self.client.get(
+            "/market-observations",
+            params={"symbol": "1hz100v", "timeframe": "M1", "limit": 10},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 1)
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertEqual(payload["observations"][0]["symbol"], "1HZ100V")
+        self.assertFalse(payload["observations"][0]["execution_eligible"])
+
+    def test_market_observations_endpoint_rejects_invalid_filters(self):
+        for params in (
+            {"symbol": "UNKNOWN"},
+            {"timeframe": "M2"},
+            {"limit": 1001},
+            {"limit": 0},
+        ):
+            with self.subTest(params=params):
+                response = self.client.get("/market-observations", params=params)
+                self.assertEqual(response.status_code, 400)
+
+    def test_market_observations_endpoint_requires_authentication(self):
+        self.client.headers.pop("Authorization", None)
+        response = self.client.get("/market-observations")
+        self.assertEqual(response.status_code, 401)
+
+
+
+    def test_market_observation_quality_endpoint_is_authenticated_read_only(self):
+        from app.market_observation_store import save_market_observation
+
+        with database.get_connection() as connection:
+            save_market_observation(connection, {
+                "symbol": "1HZ100V", "timeframe": "M1",
+                "timestamp": "2026-11-21T10:15:00+02:00",
+                "open": 1000, "high": 1002, "low": 999, "close": 1001,
+                "volume": 0, "source": "deriv",
+            })
+        response = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "STALE")
+        self.assertTrue(payload["stale"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["execution_eligible"])
+
+    def test_market_observation_quality_endpoint_exposes_future_data_warning(self):
+        from app.market_observation_store import save_market_observation
+
+        with database.get_connection() as connection:
+            save_market_observation(connection, {
+                "symbol": "1HZ100V", "timeframe": "M1",
+                "timestamp": "2099-01-01T00:00:00+00:00",
+                "open": 1000, "high": 1002, "low": 999, "close": 1001,
+                "volume": 0, "source": "deriv",
+            })
+        response = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "FUTURE_DATA")
+        self.assertTrue(payload["future_data"])
+        self.assertEqual(payload["future_observation_count"], 1)
+        self.assertTrue(payload["stale"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_eligible"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertFalse(payload["execution_triggered"])
+
+    def test_market_observation_quality_endpoint_rejects_invalid_instruments_and_timeframes(self):
+        for params in (
+            {"symbol": "XAUUSD", "timeframe": "M1"},
+            {"symbol": "1HZ100V", "timeframe": "M2"},
+        ):
+            with self.subTest(params=params):
+                response = self.client.get("/market-observations/quality", params=params)
+                self.assertEqual(response.status_code, 400)
+
+    def test_market_observation_quality_endpoint_requires_authentication(self):
+        self.client.headers.pop("Authorization", None)
+        response = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_deriv_sync_endpoint_is_authenticated_confirmed_bounded_and_read_only(self):
+        candles = [
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:15:00+00:00",
+             "open": 1000, "high": 1002, "low": 999, "close": 1001, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:16:00+00:00",
+             "open": 1001, "high": 1003, "low": 1000, "close": 1002, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+        ]
+        persisted = [
+            {"inserted": True, "symbol": "1HZ100V"},
+            {"inserted": True, "symbol": "1HZ100V"},
+        ]
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(return_value=candles)
+            client_class.return_value.persist_candles = Mock(return_value=persisted)
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["operator_triggered"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertEqual(payload["received_count"], 2)
+        self.assertEqual(payload["inserted_count"], 2)
+        self.assertEqual(payload["duplicate_count"], 0)
+        client_class.return_value.collect_candles.assert_awaited_once_with(
+            "1HZ100V", "M1", count=2
+        )
+        client_class.return_value.persist_candles.assert_called_once()
+
+    def test_deriv_sync_endpoint_requires_explicit_confirmation_and_rejects_non_deriv_symbols(self):
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            unconfirmed = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": False},
+            )
+            unsupported = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "EURUSD", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(unconfirmed.status_code, 400)
+        self.assertEqual(unsupported.status_code, 400)
+        client_class.assert_not_called()
+
+    def test_deriv_sync_endpoint_requires_authentication(self):
+        self.client.headers.pop("Authorization", None)
+        response = self.client.post(
+            "/market-observations/deriv-sync",
+            json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_deriv_sync_endpoint_enforces_admin_authorization(self):
+        from fastapi import HTTPException
+        with patch("app.main.require_admin", side_effect=HTTPException(status_code=403, detail="Admin only")):
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 403)
+
+
+    def test_deriv_sync_reports_inserted_and_duplicate_counts_from_persistence(self):
+        candles = [
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:15:00+00:00",
+             "open": 1000, "high": 1002, "low": 999, "close": 1001, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:16:00+00:00",
+             "open": 1001, "high": 1003, "low": 1000, "close": 1002, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+        ]
+        persisted = [
+            {"inserted": True, "symbol": "1HZ100V"},
+            {"inserted": False, "symbol": "1HZ100V"},
+        ]
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(return_value=candles)
+            client_class.return_value.persist_candles = Mock(return_value=persisted)
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["received_count"], 2)
+        self.assertEqual(payload["inserted_count"], 1)
+        self.assertEqual(payload["duplicate_count"], 1)
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["signals_generated"])
+
+
+    def test_deriv_sync_database_failure_returns_sanitized_error_and_rolls_back_batch(self):
+        candles = [
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:15:00+00:00",
+             "open": 1000, "high": 1002, "low": 999, "close": 1001, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:16:00+00:00",
+             "open": 1001, "high": 1003, "low": 1000, "close": 1002, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+        ]
+        from app.market_observation_store import save_market_observation as save_observation
+
+        save_calls = 0
+
+        def fail_second_insert(connection, candle):
+            nonlocal save_calls
+            save_calls += 1
+            if save_calls == 2:
+                raise sqlite3.OperationalError("internal persistence failure")
+            return save_observation(connection, candle)
+
+        with patch("app.deriv_public_client.save_market_observation", side_effect=fail_second_insert):
+            with patch(
+                "app.main.DerivPublicMarketDataClient.collect_candles",
+                new=AsyncMock(return_value=candles),
+            ):
+                response = self.client.post(
+                    "/market-observations/deriv-sync",
+                    json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+                )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.json()["detail"],
+            "Deriv market-data collection failed safely.",
+        )
+        self.assertNotIn("internal persistence failure", response.text)
+        with database.get_connection() as connection:
+            stored = connection.execute(
+                "SELECT COUNT(*) AS count FROM market_observations WHERE symbol = ? AND timeframe = ?",
+                ("1HZ100V", "M1"),
+            ).fetchone()["count"]
+        self.assertEqual(stored, 0)
+
+
+    def test_deriv_sync_provider_timeout_returns_gateway_timeout_without_persisting(self):
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(
+                side_effect=TimeoutError("provider timeout details")
+            )
+            client_class.return_value.persist_candles = Mock()
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.json()["detail"], "Deriv market-data request timed out.")
+        client_class.return_value.persist_candles.assert_not_called()
+
+    def test_deriv_sync_provider_rejection_returns_sanitized_bad_gateway_without_persisting(self):
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(
+                side_effect=RuntimeError("provider account or internal details")
+            )
+            client_class.return_value.persist_candles = Mock()
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "Deriv market-data provider rejected the request.")
+        self.assertNotIn("provider account", response.text)
+        client_class.return_value.persist_candles.assert_not_called()
+
+    def test_deriv_sync_network_failure_returns_sanitized_bad_gateway_without_persisting(self):
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(
+                side_effect=OSError("socket or network internals")
+            )
+            client_class.return_value.persist_candles = Mock()
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "Deriv market-data collection failed safely.")
+        self.assertNotIn("socket or network", response.text)
+        client_class.return_value.persist_candles.assert_not_called()
+
+
+    def test_deriv_sync_persists_candles_for_authenticated_read_only_retrieval_and_quality(self):
+        from app.market_observation_store import list_market_observations
+
+        latest = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        first = latest - timedelta(minutes=1)
+        candles = [
+            {
+                "symbol": "1HZ100V", "timeframe": "M1", "timestamp": timestamp.isoformat(),
+                "open": 1000 + index, "high": 1002 + index,
+                "low": 999 + index, "close": 1001 + index,
+                "volume": 0, "source": "deriv", "execution_eligible": False,
+            }
+            for index, timestamp in enumerate((first, latest))
+        ]
+
+        with patch(
+            "app.main.DerivPublicMarketDataClient.collect_candles",
+            new=AsyncMock(return_value=candles),
+        ):
+            sync = self.client.post(
+                "/market-observations/deriv-sync",
+                json={
+                    "symbol": "1HZ100V", "timeframe": "M1", "count": 2,
+                    "confirm_collection": True,
+                },
+            )
+
+        self.assertEqual(sync.status_code, 200)
+        self.assertEqual(sync.json()["inserted_count"], 2)
+        self.assertTrue(sync.json()["read_only"])
+        self.assertFalse(sync.json()["execution_triggered"])
+        self.assertFalse(sync.json()["signals_generated"])
+
+        observations = self.client.get(
+            "/market-observations",
+            params={"symbol": "1HZ100V", "timeframe": "M1", "limit": 10},
+        )
+        self.assertEqual(observations.status_code, 200)
+        self.assertEqual(observations.json()["count"], 2)
+        self.assertEqual(
+            [item["timestamp"] for item in observations.json()["observations"]],
+            [latest.isoformat(), first.isoformat()],
+        )
+        self.assertTrue(all(not item["execution_eligible"] for item in observations.json()["observations"]))
+
+        quality = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(quality.status_code, 200)
+        self.assertEqual(quality.json()["status"], "FRESH")
+        self.assertEqual(quality.json()["observation_count"], 2)
+        self.assertEqual(quality.json()["missing_candle_count"], 0)
+        self.assertFalse(quality.json()["execution_eligible"])
+        self.assertFalse(quality.json()["execution_triggered"])
+        self.assertFalse(quality.json()["signals_generated"])
+
+
+    def test_deriv_sync_uses_public_client_normalization_before_database_and_api(self):
+        import json
+
+        class Socket:
+            def __init__(self, response):
+                self.response = response
+                self.sent = []
+
+            async def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            async def recv(self):
+                return json.dumps(self.response)
+
+        class SocketContext:
+            def __init__(self, socket):
+                self.socket = socket
+
+            async def __aenter__(self):
+                return self.socket
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        latest = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        first = latest - timedelta(minutes=1)
+        active_socket = Socket({
+            "msg_type": "active_symbols", "req_id": 1,
+            "active_symbols": [{
+                "underlying_symbol": "1HZ100V",
+                "underlying_symbol_name": "Volatility 100 (1s) Index",
+                "market": "synthetic_index", "subgroup": "synthetics",
+                "submarket": "random_index", "pip_size": 2,
+                "exchange_is_open": 1, "is_trading_suspended": 0,
+                "trade_count": 0, "underlying_symbol_type": "stockindex",
+            }],
+        })
+        history_socket = Socket({
+            "msg_type": "candles", "req_id": 2,
+            "candles": [
+                {"epoch": int(first.timestamp()), "open": 1000, "high": 1002, "low": 999, "close": 1001},
+                {"epoch": int(latest.timestamp()), "open": 1001, "high": 1003, "low": 1000, "close": 1002},
+            ],
+        })
+
+        replay_active_socket = Socket(active_socket.response)
+        replay_history_socket = Socket(history_socket.response)
+        with patch(
+            "app.deriv_public_client.websockets.connect",
+            side_effect=[
+                SocketContext(active_socket), SocketContext(history_socket),
+                SocketContext(replay_active_socket), SocketContext(replay_history_socket),
+            ],
+        ):
+            sync = self.client.post(
+                "/market-observations/deriv-sync",
+                json={
+                    "symbol": "1HZ100V", "timeframe": "M1", "count": 2,
+                    "confirm_collection": True,
+                },
+            )
+            replay_sync = self.client.post(
+                "/market-observations/deriv-sync",
+                json={
+                    "symbol": "1HZ100V", "timeframe": "M1", "count": 2,
+                    "confirm_collection": True,
+                },
+            )
+
+        self.assertEqual(sync.status_code, 200, sync.text)
+        self.assertEqual(replay_sync.status_code, 200, replay_sync.text)
+        replay_payload = replay_sync.json()
+        self.assertEqual(replay_payload["received_count"], 2)
+        self.assertEqual(replay_payload["inserted_count"], 0)
+        self.assertEqual(replay_payload["duplicate_count"], 2)
+        self.assertTrue(replay_payload["read_only"])
+        self.assertFalse(replay_payload["execution_triggered"])
+        self.assertFalse(replay_payload["signals_generated"])
+        payload = sync.json()
+        self.assertEqual(payload["received_count"], 2)
+        self.assertEqual(payload["inserted_count"], 2)
+        self.assertEqual(payload["duplicate_count"], 0)
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_triggered"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertEqual(active_socket.sent, [{"active_symbols": "full", "req_id": 1}])
+        self.assertEqual(history_socket.sent[0]["ticks_history"], "1HZ100V")
+        self.assertEqual(history_socket.sent[0]["style"], "candles")
+
+        observations = self.client.get(
+            "/market-observations",
+            params={"symbol": "1HZ100V", "timeframe": "M1", "limit": 10},
+        )
+        self.assertEqual(observations.status_code, 200)
+        self.assertEqual(observations.json()["count"], 2)
+        self.assertTrue(all(item["source"] == "deriv" for item in observations.json()["observations"]))
+        self.assertTrue(all(not item["execution_eligible"] for item in observations.json()["observations"]))
+
+        quality = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(quality.status_code, 200)
+        self.assertEqual(quality.json()["status"], "FRESH")
+        self.assertEqual(quality.json()["observation_count"], 2)
+        self.assertFalse(quality.json()["execution_eligible"])
+        self.assertFalse(quality.json()["execution_triggered"])
+        self.assertFalse(quality.json()["signals_generated"])
 
 
 if __name__ == "__main__":

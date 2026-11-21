@@ -198,6 +198,79 @@ function WelcomeCelebration({ onClose }) {
   );
 }
 
+function CurrencyPreferencePanel({ token }) {
+  const [preference, setPreference] = useState(null);
+  const [currency, setCurrency] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    apiRequest("/participant/currency-preference", {}, token)
+      .then(result => { if (active) setPreference(result); })
+      .catch(err => { if (active) setError(err instanceof Error ? err.message : "Could not load your currency preference."); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [token]);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!currency || !confirmed || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await apiRequest("/participant/currency-preference", {
+        method: "POST",
+        body: JSON.stringify({ currency, confirmed: true })
+      }, token);
+      setPreference(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Currency preference could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="panel currency-preference-panel">
+      <p className="eyebrow">PARTICIPANT DISPLAY PREFERENCE</p>
+      <h2>Choose your currency once</h2>
+      {loading ? <p className="muted">Checking your saved preference…</p> : preference?.selected ? (
+        <div role="status">
+          <p>Your permanent display preference is <strong>{preference.currency}</strong>.</p>
+          <p className="muted">Selected {new Date(preference.selected_at).toLocaleString("en-ZA")}. This choice is locked and cannot be changed.</p>
+        </div>
+      ) : (
+        <form onSubmit={submit} className="auth-form">
+          <p className="muted">Select one currency: South African Rand, US Dollar, Euro, Pound Sterling or Kuwaiti Dinar.</p>
+          <label>Preferred currency
+            <select required value={currency} onChange={event => setCurrency(event.target.value)}>
+              <option value="">Choose a currency</option>
+              <option value="ZAR">ZAR — South African Rand</option>
+              <option value="USD">USD — US Dollar</option>
+              <option value="EUR">EUR — Euro</option>
+              <option value="GBP">GBP — Pound Sterling</option>
+              <option value="KWD">KWD — Kuwaiti Dinar</option>
+            </select>
+          </label>
+          <label className="currency-confirmation">
+            <input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />
+            I understand this is a once-off choice and cannot be changed later.
+          </label>
+          {error && <div className="notice error" role="alert">{error}</div>}
+          <button className="primary-button" type="submit" disabled={!currency || !confirmed || saving}>
+            {saving ? "Saving preference…" : "Confirm permanent choice"}
+          </button>
+        </form>
+      )}
+      {error && preference?.selected && <div className="notice error" role="alert">{error}</div>}
+      <p className="muted">Currency selection does not move or convert funds. Paper-account balances remain explicitly labelled in ZAR until a reliable exchange-rate source and conversion display are implemented.</p>
+    </section>
+  );
+}
+
 function ParticipantJourney({ timeline }) {
   const formatDate = value => value ? new Date(value.replace(" ", "T") + (value.endsWith("Z") ? "" : "Z")).toLocaleDateString("en-ZA", { day: "numeric", month: "long", year: "numeric" }) : "Not yet recorded";
   return (
@@ -494,6 +567,7 @@ export default function App() {
           </div>
 
           {participantTimeline && <ParticipantJourney timeline={participantTimeline} />}
+          <CurrencyPreferencePanel token={session.access_token} />
           <div className="account-layout">
             <aside className="panel account-sidebar">
               <h3>Your accounts</h3>

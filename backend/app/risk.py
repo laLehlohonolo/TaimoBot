@@ -167,6 +167,17 @@ def calculate_position_size(
 
     quantity = requested_risk_amount / price_distance
 
+    if not math.isfinite(quantity) or quantity <= 0:
+        raise RiskError(
+            "Calculated position size is outside the supported numeric range."
+        )
+
+    rounded_quantity = round(quantity, 8)
+    if rounded_quantity <= 0:
+        raise RiskError(
+            "Calculated position size is below the supported precision."
+        )
+
     return {
         "approved": True,
         "side": side,
