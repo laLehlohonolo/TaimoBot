@@ -465,3 +465,128 @@ class StrategyLabSchemaTests(unittest.TestCase):
                 connection.execute(
                     "DELETE FROM brain_strategy_candidate_decisions WHERE decision_id = 'decision_test'"
                 )
+
+
+    def test_backfill_checkpoint_review_is_admin_only_and_retries_same_cursor_with_audit(self):
+        self.assertEqual(
+            self.participant_client.get("/admin/market-backfills").status_code, 403
+        )
+        self.assertEqual(
+            self.participant_client.post(
+                "/admin/market-backfills/1HZ100V/M1/review",
+                json={
+                    "decision": "RETRY_SAME_RANGE",
+                    "confirm_retry": True,
+                    "rationale": "Provider endpoint recovered; retry the exact held interval.",
+                },
+            ).status_code,
+            403,
+        )
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO market_backfill_checkpoints (
+                    symbol, timeframe, next_end_epoch, status, batches_completed,
+                    last_error
+                ) VALUES ('1HZ100V', 'M1', 3600, 'GAP_REVIEW', 2, 'One candle missing.')
+                """
+            )
+
+        listed = self.admin_client.get("/admin/market-backfills")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["checkpoints"][0]["status"], "GAP_REVIEW")
+        self.assertFalse(listed.json()["backtest_eligible"])
+        self.assertFalse(listed.json()["execution_triggered"])
+
+        response = self.admin_client.post(
+            "/admin/market-backfills/1HZ100V/M1/review",
+            json={
+                "decision": "RETRY_SAME_RANGE",
+                "confirm_retry": True,
+                "rationale": "Provider endpoint recovered; retry the exact held interval.",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "RUNNING")
+        self.assertEqual(body["next_end_epoch"], 3600)
+        self.assertFalse(body["cursor_advanced"])
+        self.assertFalse(body["backtest_eligible"])
+        self.assertFalse(body["execution_triggered"])
+        self.assertFalse(body["signals_generated"])
+
+        with database.get_connection() as connection:
+            checkpoint = connection.execute(
+                """
+                SELECT next_end_epoch, status, batches_completed
+                FROM market_backfill_checkpoints
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()
+            audit = connection.execute(
+                """
+                SELECT decision, rationale, decided_by
+                FROM market_backfill_review_audit
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchall()
+        self.assertEqual(checkpoint["next_end_epoch"], 3600)
+        self.assertEqual(checkpoint["status"], "RUNNING")
+        self.assertEqual(checkpoint["batches_completed"], 2)
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["decision"], "RETRY_SAME_RANGE")
+        self.assertTrue(audit[0]["decided_by"])
+
+    def test_backfill_review_requires_strict_confirmation_and_gap_state(self):
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO market_backfill_checkpoints (
+                    symbol, timeframe, next_end_epoch, status
+                ) VALUES ('1HZ100V', 'M5', 3600, 'RUNNING')
+                """
+            )
+        base = {
+            "decision": "RETRY_SAME_RANGE",
+            "rationale": "Provider endpoint recovered; retry the exact held interval.",
+        }
+        for invalid in ("true", 1, None):
+            response = self.admin_client.post(
+                "/admin/market-backfills/1HZ100V/M5/review",
+                json={**base, "confirm_retry": invalid},
+            )
+            self.assertEqual(response.status_code, 422)
+        response = self.admin_client.post(
+            "/admin/market-backfills/1HZ100V/M5/review",
+            json={**base, "confirm_retry": True},
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_backfill_review_audit_is_append_only(self):
+        import sqlite3
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO users (user_id, email, password_hash)
+                VALUES ('backfill-audit-admin', 'backfill-audit-admin@taimobot.local', 'test-hash')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO market_backfill_review_audit (
+                    review_id, symbol, timeframe, decision, rationale, decided_by
+                ) VALUES (
+                    'review_test', '1HZ100V', 'M1', 'RETRY_SAME_RANGE',
+                    'An auditable test review rationale.', 'backfill-audit-admin'
+                )
+                """
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE market_backfill_review_audit SET rationale = 'changed' WHERE review_id = 'review_test'"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "DELETE FROM market_backfill_review_audit WHERE review_id = 'review_test'"
+                )
