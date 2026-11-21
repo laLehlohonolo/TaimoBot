@@ -124,12 +124,14 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
     stale_after_seconds = granularity_seconds * 2
     stale = age_seconds > stale_after_seconds
     missing_intervals = []
+    missing_interval_count = 0
     missing_candle_count = 0
     for previous, current in zip(timestamps, timestamps[1:]):
         elapsed = (current - previous).total_seconds()
         if elapsed > granularity_seconds:
             missing = max(0, round(elapsed / granularity_seconds) - 1)
             if missing:
+                missing_interval_count += 1
                 missing_candle_count += missing
                 if len(missing_intervals) < 50:
                     missing_intervals.append({
@@ -144,7 +146,7 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
         "status": status, "observation_count": len(timestamps),
         "latest_timestamp": latest.isoformat(), "age_seconds": age_seconds,
         "stale_after_seconds": stale_after_seconds, "stale": stale,
-        "missing_interval_count": sum(1 for item in missing_intervals),
+        "missing_interval_count": missing_interval_count,
         "missing_candle_count": missing_candle_count,
         "missing_intervals": missing_intervals,
         "checked_at": checked_at.isoformat(),
