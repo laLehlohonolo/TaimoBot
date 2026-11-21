@@ -535,21 +535,15 @@ class PaperTradingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_symbol("A" * 31)
 
-    def test_different_instruments_can_open_separate_positions(self):
-        eur = self.open_trade("ORDER-EUR", 0.5, "EURUSD")
-        gold = self.open_trade("ORDER-GOLD", 0.5, "XAUUSD")
+    def test_observation_candidate_cannot_open_separate_position(self):
+        for symbol in ("EURUSD", "GBPUSD"):
+            with self.subTest(symbol=symbol):
+                with self.assertRaisesRegex(ValueError, "observation-only"):
+                    self.open_trade("ORDER-OBS-" + symbol, 0.5, symbol)
 
-        self.assertEqual(eur["symbol"], "EURUSD")
-        self.assertEqual(gold["symbol"], "XAUUSD")
-        self.assertNotEqual(eur["trade_id"], gold["trade_id"])
-        self.assertEqual(gold["total_open_risk"], 100)
-
-    def test_different_instruments_share_one_risk_limit(self):
-        self.open_trade("ORDER-EUR", 0.5, "EURUSD")
-        self.open_trade("ORDER-GOLD", 0.5, "XAUUSD")
-
-        with self.assertRaises(RiskError):
-            self.open_trade("ORDER-BTC", 0.1, "BTCUSD")
+    def test_unknown_symbol_cannot_open_position(self):
+        with self.assertRaisesRegex(ValueError, "observation-only"):
+            self.open_trade("ORDER-UNKNOWN", 0.5, "BTCUSD")
 
     def test_trade_api_returns_consistent_paper_order_contract(self):
         response = self.client.post(
@@ -701,7 +695,7 @@ class PaperTradingTests(unittest.TestCase):
 
     def test_closing_trade_returns_its_instrument_symbol(self):
         trade = self.open_trade(
-            "ORDER-CLOSE-SYMBOL", 0.5, "GBPUSD"
+            "ORDER-CLOSE-SYMBOL", 0.5, "XAUUSD"
         )
 
         result = close_paper_trade(
@@ -709,7 +703,7 @@ class PaperTradingTests(unittest.TestCase):
             exit_price=4000
         )
 
-        self.assertEqual(result["symbol"], "GBPUSD")
+        self.assertEqual(result["symbol"], "XAUUSD")
         self.assertEqual(result["status"], "CLOSED")
 
     def test_legacy_database_migration_preserves_existing_trades(self):
