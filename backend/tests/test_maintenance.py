@@ -9024,7 +9024,7 @@ _LOCKED_PREFLIGHT_FINAL_LOCK_RACE_CASES = [
     ("test_locked_preflight_final_lock_wrong_token", {"lock_token": "c" * 32}),
     ("test_locked_preflight_final_lock_empty_plan", {"plan_id": None}),
     ("test_locked_preflight_final_lock_empty_token", {"lock_token": None}),
-    ("test_locked_preflight_final_lock_marker_absent", {"marker_present": False}),
+    ("test_locked_preflight_final_lock_marker_absent", {"status": "NO_RESTORE_LOCK", "marker_present": False}),
     ("test_locked_preflight_final_lock_stale_process", {"status": "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW", "process_id": 999999999}),
     ("test_locked_preflight_final_lock_unknown_status", {"status": "RESTORE_LOCK_STATE_UNKNOWN"}),
     ("test_locked_preflight_final_lock_wrong_plan_and_token", {"plan_id": "d" * 32, "lock_token": "e" * 32}),
