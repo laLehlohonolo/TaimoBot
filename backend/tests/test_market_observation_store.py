@@ -141,6 +141,25 @@ class MarketObservationStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Deriv synthetic"):
             inspect_market_observation_quality(self.connection, "XAUUSD", "M1", now=now)
 
+    def test_quality_diagnostics_reject_future_dated_observations_as_fresh(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import inspect_market_observation_quality
+
+        record = self.valid_record()
+        record["source"] = "deriv"
+        record["timestamp"] = "2026-11-21T12:15:00+00:00"
+        save_market_observation(self.connection, record)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1",
+            now=datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["status"], "FUTURE_DATA")
+        self.assertTrue(result["stale"])
+        self.assertTrue(result["future_data"])
+        self.assertEqual(result["future_observation_count"], 1)
+        self.assertEqual(result["future_by_seconds"], 900)
+        self.assertFalse(result["execution_eligible"])
+
     def test_quality_diagnostics_require_timezone_aware_reference_time(self):
         from datetime import datetime
         from app.market_observation_store import inspect_market_observation_quality
