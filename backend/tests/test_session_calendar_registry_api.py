@@ -146,6 +146,22 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
                     (body["calendar_id"],),
                 )
 
+    def test_source_verification_rejects_malformed_or_non_https_evidence_urls(self):
+        path = "/admin/brain/session-calendars"
+        body = self.admin.post(path, json=self.payload()).json()
+        decision_path = f"{path}/{body['calendar_id']}/decisions"
+        for evidence_url in ("http://broker.example.test/source", "https://", "https:///missing-host"):
+            response = self.admin.post(decision_path, json={
+                "decision": "VERIFY_SOURCE",
+                "rationale": "The evidence URL must be a valid HTTPS location.",
+                "evidence_url": evidence_url,
+            })
+            self.assertEqual(response.status_code, 400)
+        detail = self.admin.get(f"{path}/{body['calendar_id']}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["status"], "PENDING_SOURCE_VERIFICATION")
+        self.assertEqual(detail.json()["decisions"], [])
+
     def test_change_request_requires_source_verified_state_and_restarts_review(self):
         path = "/admin/brain/session-calendars"
         body = self.admin.post(path, json=self.payload()).json()
