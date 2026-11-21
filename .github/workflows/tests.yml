@@ -124,6 +124,8 @@ jobs:
         run: python scripts/run_restore_lock_marker_metadata_races.py
       - name: Run twenty restore guard descriptor race checks sequentially
         run: python scripts/run_restore_guard_descriptor_races.py
+      - name: Run twenty invalid restore-lock timestamp checks sequentially
+        run: python scripts/run_restore_lock_timestamp_validation.py
       - name: Run twenty approved restore preflight final-fence checks sequentially
         run: python scripts/run_approved_preflight_final_fence.py
       - name: Run twenty restore approval transaction race checks sequentially
