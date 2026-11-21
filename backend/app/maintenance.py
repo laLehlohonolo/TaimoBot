@@ -3239,6 +3239,17 @@ def verify_approved_restore_plan(
     )
     if readiness.get("status") != "RESTORE_EXECUTION_PREFLIGHT_PASSED":
         raise ValueError("Restore execution readiness checks did not pass.")
+
+    final_hashes = (
+        sha256_file(selected_backup),
+        sha256_file(staged_candidate),
+        sha256_file(rollback_backup),
+    )
+    if final_hashes != expected_hashes:
+        raise ValueError("A recovery artifact changed during approved restore preflight.")
+    if is_restore_lock_active():
+        raise ValueError("A restore lock became active during approved restore preflight.")
+
     return {
         "status": "APPROVED_RESTORE_PREFLIGHT_PASSED",
         "plan_id": plan["plan_id"],
