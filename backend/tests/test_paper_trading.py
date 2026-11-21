@@ -2231,6 +2231,45 @@ class PaperTradingTests(unittest.TestCase):
         self.assertFalse(payload["signals_generated"])
 
 
+    def test_deriv_sync_database_failure_returns_sanitized_error_and_rolls_back_batch(self):
+        candles = [
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:15:00+00:00",
+             "open": 1000, "high": 1002, "low": 999, "close": 1001, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+            {"symbol": "1HZ100V", "timeframe": "M1", "timestamp": "2026-11-21T10:16:00+00:00",
+             "open": 1001, "high": 1003, "low": 1000, "close": 1002, "volume": 0,
+             "source": "deriv", "execution_eligible": False},
+        ]
+        with database.get_connection() as connection:
+            connection.execute("""
+                CREATE TRIGGER reject_second_deriv_api_candle
+                BEFORE INSERT ON market_observations
+                WHEN NEW.observed_at = '2026-11-21T10:16:00+00:00'
+                BEGIN SELECT RAISE(ABORT, 'internal persistence failure'); END;
+            """)
+
+        with patch("app.main.DerivPublicMarketDataClient") as client_class:
+            client_class.return_value.collect_candles = AsyncMock(return_value=candles)
+            response = self.client.post(
+                "/market-observations/deriv-sync",
+                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.json()["detail"],
+            "Deriv market-data collection failed safely.",
+        )
+        self.assertNotIn("internal persistence failure", response.text)
+        with database.get_connection() as connection:
+            stored = connection.execute(
+                "SELECT COUNT(*) AS count FROM market_observations WHERE symbol = ? AND timeframe = ?",
+                ("1HZ100V", "M1"),
+            ).fetchone()["count"]
+            connection.execute("DROP TRIGGER reject_second_deriv_api_candle")
+        self.assertEqual(stored, 0)
+
+
     def test_deriv_sync_provider_timeout_returns_gateway_timeout_without_persisting(self):
         with patch("app.main.DerivPublicMarketDataClient") as client_class:
             client_class.return_value.collect_candles = AsyncMock(
