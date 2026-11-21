@@ -2315,8 +2315,13 @@ def inspect_restore_lock() -> dict:
             or not isinstance(created_at, str)
         ):
             raise ValueError("invalid restore marker metadata")
+        if re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?)",
+            created_at,
+        ) is None:
+            raise ValueError("restore lock timestamp is not in the supported ISO format")
         offset_match = re.search(
-            r"([+-])(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$",
+            r"([+-])([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]{1,6}))?)?$",
             created_at,
         )
         if created_at.endswith("Z"):
