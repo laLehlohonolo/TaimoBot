@@ -2,6 +2,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock, patch
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -2384,6 +2385,64 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "Deriv market-data collection failed safely.")
         self.assertNotIn("socket or network", response.text)
         client_class.return_value.persist_candles.assert_not_called()
+
+
+    def test_deriv_sync_persists_candles_for_authenticated_read_only_retrieval_and_quality(self):
+        from app.market_observation_store import list_market_observations
+
+        latest = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        first = latest - timedelta(minutes=1)
+        candles = [
+            {
+                "symbol": "1HZ100V", "timeframe": "M1", "timestamp": timestamp.isoformat(),
+                "open": 1000 + index, "high": 1002 + index,
+                "low": 999 + index, "close": 1001 + index,
+                "volume": 0, "source": "deriv", "execution_eligible": False,
+            }
+            for index, timestamp in enumerate((first, latest))
+        ]
+
+        with patch(
+            "app.main.DerivPublicMarketDataClient.collect_candles",
+            new=AsyncMock(return_value=candles),
+        ):
+            sync = self.client.post(
+                "/market-observations/deriv-sync",
+                json={
+                    "symbol": "1HZ100V", "timeframe": "M1", "count": 2,
+                    "confirm_collection": True,
+                },
+            )
+
+        self.assertEqual(sync.status_code, 200)
+        self.assertEqual(sync.json()["inserted_count"], 2)
+        self.assertTrue(sync.json()["read_only"])
+        self.assertFalse(sync.json()["execution_triggered"])
+        self.assertFalse(sync.json()["signals_generated"])
+
+        observations = self.client.get(
+            "/market-observations",
+            params={"symbol": "1HZ100V", "timeframe": "M1", "limit": 10},
+        )
+        self.assertEqual(observations.status_code, 200)
+        self.assertEqual(observations.json()["count"], 2)
+        self.assertEqual(
+            [item["timestamp"] for item in observations.json()["observations"]],
+            [latest.isoformat(), first.isoformat()],
+        )
+        self.assertTrue(all(not item["execution_eligible"] for item in observations.json()["observations"]))
+
+        quality = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(quality.status_code, 200)
+        self.assertEqual(quality.json()["status"], "FRESH")
+        self.assertEqual(quality.json()["observation_count"], 2)
+        self.assertEqual(quality.json()["missing_candle_count"], 0)
+        self.assertFalse(quality.json()["execution_eligible"])
+        self.assertFalse(quality.json()["execution_triggered"])
+        self.assertFalse(quality.json()["signals_generated"])
 
 
 if __name__ == "__main__":
