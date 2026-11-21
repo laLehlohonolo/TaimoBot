@@ -9278,3 +9278,125 @@ for _name, _scenario in _RESTORE_APPROVAL_TRANSACTION_RACE_CASES:
         _name,
         _make_restore_approval_transaction_race_test(_scenario),
     )
+
+
+def _make_restore_lock_marker_metadata_race_test(scenario):
+    def test(self):
+        import fcntl as system_fcntl
+        lock_path = maintenance_module.restore_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "plan_id": "a" * 32,
+            "pid": os.getpid(),
+            "created_at": "2026-11-21T10:00:00+02:00",
+            "lock_token": "b" * 32,
+        }
+        original_bytes = json.dumps(marker, sort_keys=True).encode("utf-8")
+        lock_path.write_bytes(original_bytes)
+        original_mode = lock_path.stat().st_mode
+        alias = lock_path.with_name(lock_path.name + ".metadata-race-link")
+        moved = lock_path.with_name(lock_path.name + ".metadata-race-moved")
+        real_flock = system_fcntl.flock
+
+        def mutate():
+            if scenario == "chmod_roundtrip":
+                lock_path.chmod(0o400)
+                lock_path.chmod(original_mode & 0o777)
+            elif scenario == "chmod_change":
+                lock_path.chmod(0o400)
+            elif scenario == "hardlink_roundtrip":
+                os.link(lock_path, alias)
+                alias.unlink()
+            elif scenario == "hardlink_present":
+                os.link(lock_path, alias)
+            elif scenario == "touch_restore_mtime":
+                old = lock_path.stat()
+                os.utime(lock_path, ns=(old.st_atime_ns, old.st_mtime_ns + 1000000))
+                os.utime(lock_path, ns=(old.st_atime_ns, old.st_mtime_ns))
+            elif scenario == "touch_mtime":
+                old = lock_path.stat()
+                os.utime(lock_path, ns=(old.st_atime_ns, old.st_mtime_ns + 1000000))
+            elif scenario == "rewrite_same_bytes":
+                lock_path.write_bytes(original_bytes)
+            elif scenario == "append_truncate":
+                with lock_path.open("ab") as stream:
+                    stream.write(b"x")
+                lock_path.write_bytes(original_bytes)
+            elif scenario == "truncate_restore":
+                lock_path.write_bytes(b"")
+                lock_path.write_bytes(original_bytes)
+            elif scenario == "rename_roundtrip":
+                lock_path.rename(moved)
+                moved.rename(lock_path)
+            elif scenario == "replace_same_bytes":
+                replacement = lock_path.with_name(lock_path.name + ".replacement")
+                replacement.write_bytes(original_bytes)
+                os.replace(replacement, lock_path)
+            elif scenario == "unlink_recreate":
+                lock_path.unlink()
+                lock_path.write_bytes(original_bytes)
+            elif scenario == "symlink_swap":
+                target = lock_path.with_name(lock_path.name + ".target")
+                target.write_bytes(original_bytes)
+                lock_path.unlink()
+                lock_path.symlink_to(target)
+            elif scenario == "directory_swap":
+                lock_path.unlink()
+                lock_path.mkdir()
+            elif scenario == "append_only":
+                with lock_path.open("ab") as stream:
+                    stream.write(b" ")
+            elif scenario == "truncate_only":
+                lock_path.write_bytes(original_bytes[:-1])
+            elif scenario == "chmod_executable_roundtrip":
+                lock_path.chmod(0o700)
+                lock_path.chmod(original_mode & 0o777)
+            elif scenario == "hardlink_replace":
+                os.link(lock_path, alias)
+                os.replace(alias, lock_path)
+            elif scenario == "double_replacement":
+                for suffix in (".one", ".two"):
+                    replacement = lock_path.with_name(lock_path.name + suffix)
+                    replacement.write_bytes(original_bytes)
+                    os.replace(replacement, lock_path)
+            elif scenario == "metadata_then_content_restore":
+                lock_path.chmod(0o400)
+                lock_path.write_bytes(original_bytes)
+                lock_path.chmod(original_mode & 0o777)
+            elif scenario == "link_then_rename":
+                os.link(lock_path, alias)
+                lock_path.rename(moved)
+                moved.rename(lock_path)
+                alias.unlink()
+
+        def mutate_then_probe(fd, operation):
+            mutate()
+            return real_flock(fd, operation)
+
+        try:
+            with patch("app.maintenance.fcntl.flock", side_effect=mutate_then_probe):
+                result = inspect_restore_lock()
+            self.assertEqual(result["status"], "RESTORE_LOCK_CHANGED_DURING_INSPECTION", scenario)
+        finally:
+            for path in (lock_path, alias, moved):
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+    return test
+
+
+_RESTORE_LOCK_MARKER_METADATA_RACE_CASES = [
+    "chmod_roundtrip", "chmod_change", "hardlink_roundtrip", "hardlink_present",
+    "touch_restore_mtime", "touch_mtime", "rewrite_same_bytes", "append_truncate",
+    "truncate_restore", "rename_roundtrip", "replace_same_bytes", "unlink_recreate",
+    "symlink_swap", "directory_swap", "append_only", "truncate_only",
+    "chmod_executable_roundtrip", "hardlink_replace", "double_replacement",
+    "metadata_then_content_restore",
+]
+for _scenario in _RESTORE_LOCK_MARKER_METADATA_RACE_CASES:
+    setattr(
+        DailyMaintenanceTests,
+        "test_restore_lock_marker_metadata_race_" + _scenario,
+        _make_restore_lock_marker_metadata_race_test(_scenario),
+    )
