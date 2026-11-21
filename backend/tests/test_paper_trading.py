@@ -2159,6 +2159,31 @@ class PaperTradingTests(unittest.TestCase):
         self.assertFalse(payload["execution_triggered"])
         self.assertFalse(payload["execution_eligible"])
 
+    def test_market_observation_quality_endpoint_exposes_future_data_warning(self):
+        from app.market_observation_store import save_market_observation
+
+        with database.get_connection() as connection:
+            save_market_observation(connection, {
+                "symbol": "1HZ100V", "timeframe": "M1",
+                "timestamp": "2099-01-01T00:00:00+00:00",
+                "open": 1000, "high": 1002, "low": 999, "close": 1001,
+                "volume": 0, "source": "deriv",
+            })
+        response = self.client.get(
+            "/market-observations/quality",
+            params={"symbol": "1HZ100V", "timeframe": "M1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "FUTURE_DATA")
+        self.assertTrue(payload["future_data"])
+        self.assertEqual(payload["future_observation_count"], 1)
+        self.assertTrue(payload["stale"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["execution_eligible"])
+        self.assertFalse(payload["signals_generated"])
+        self.assertFalse(payload["execution_triggered"])
+
     def test_market_observation_quality_endpoint_rejects_invalid_instruments_and_timeframes(self):
         for params in (
             {"symbol": "XAUUSD", "timeframe": "M1"},
