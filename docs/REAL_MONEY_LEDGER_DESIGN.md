@@ -86,7 +86,7 @@ Append-only operator and system audit events with actor, action, target, reason,
 
 ### Participant currency preference
 
-A future `participant_currency_preferences` record stores `owner_user_id`, `display_currency` (ZAR, USD, EUR, GBP or KWD) and `updated_at`. This preference affects presentation only. It does not create a wallet, convert funds, or change the currency of any posted transaction.
+A future `participant_currency_preferences` record stores `owner_user_id`, `display_currency` (ZAR, USD, EUR, GBP or KWD), `selected_at` and a confirmation/audit reference. A participant may create this preference exactly once. Enforce immutability in the database/service layer (unique participant selection and no update/delete route); the UI must warn that the choice is permanent and require explicit confirmation. Do not silently assign a default. This preference affects presentation only. It does not create a wallet, convert funds, or change the currency of any posted transaction. It remains distinct from separately held currency wallet balances.
 
 ### FX quote and conversion records (only when real FX is explicitly enabled)
 
