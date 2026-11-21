@@ -3165,6 +3165,8 @@ def verify_restore_execution_readiness_under_lock(
         or final_lock_state.get("process_id", 0) <= 0
         or not isinstance(final_lock_state.get("created_at"), str)
         or not final_lock_state.get("created_at")
+        or final_lock_state.get("process_id") != lock_state.get("process_id")
+        or final_lock_state.get("created_at") != lock_state.get("created_at")
     ):
         raise RuntimeError("The matching restore lock did not remain active through locked preflight.")
 
