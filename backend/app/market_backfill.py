@@ -102,9 +102,14 @@ def persist_backfill_batch(connection, request, candles):
         or request["end_epoch"] < request["start_epoch"]
         or request["start_epoch"] % granularity
         or request["end_epoch"] % granularity
-        or request["end_epoch"] - request["start_epoch"] > granularity * (request["batch_size"] - 1)
+        or request["end_epoch"] != request["expected_next_end_epoch"]
+        or request["start_epoch"] != max(
+            0,
+            request["expected_next_end_epoch"]
+            - granularity * (request["batch_size"] - 1),
+        )
     ):
-        raise ValueError("Prepared backfill request is invalid.")
+        raise ValueError("Prepared backfill request is invalid or its range was altered.")
     if len(candles) > request["batch_size"]:
         raise ValueError("Provider returned more candles than the prepared batch permits.")
 
