@@ -8619,3 +8619,143 @@ _POST_DIGEST_RETURN_RACE_CASES = [
 ]
 for _test_name, _scenario in _POST_DIGEST_RETURN_RACE_CASES:
     setattr(DailyMaintenanceTests, _test_name, _make_post_digest_return_race_test(_scenario))
+
+
+def _make_restore_candidate_source_race_test(scenario):
+    def test(self):
+        root = Path(self.temp_dir.name) / "restore-source-races"
+        root.mkdir()
+        source = self._make_inventory_backup(root, "taimobot-source.sqlite3")
+        staging = root / "recovery-staging" / "candidate.sqlite3"
+        live_before = maintenance_module.sha256_file(database.DB_PATH)
+        real_read = os.read
+        mutated = {"done": False}
+
+        def mutate():
+            alternate_dir = Path(self.temp_dir.name) / "restore-source-alternates"
+            alternate = self._make_inventory_backup(
+                alternate_dir, "taimobot-alternate.sqlite3"
+            )
+            preserved = root / "preserved-source.sqlite3"
+            if scenario == "append":
+                with source.open("ab") as handle:
+                    handle.write(b"late-append")
+            elif scenario == "rewrite":
+                with source.open("r+b") as handle:
+                    handle.seek(0)
+                    handle.write(b"X" * 32)
+                    handle.flush()
+            elif scenario == "touch":
+                os.utime(source, None)
+            elif scenario == "chmod":
+                source.chmod(0o400)
+            elif scenario == "replace":
+                alternate.replace(source)
+            elif scenario == "delete":
+                source.unlink()
+            elif scenario == "symlink":
+                source.rename(preserved)
+                source.symlink_to(preserved)
+            elif scenario == "hardlink":
+                source.rename(preserved)
+                os.link(preserved, source)
+            elif scenario == "rename":
+                source.rename(preserved)
+            elif scenario == "directory":
+                source.rename(preserved)
+                source.mkdir()
+            elif scenario == "external_symlink":
+                source.unlink()
+                source.symlink_to(alternate)
+            elif scenario == "truncate_restore":
+                original = source.read_bytes()
+                with source.open("r+b") as handle:
+                    handle.truncate(1)
+                source.write_bytes(original)
+            elif scenario == "same_bytes_replace":
+                replacement = root / "same-bytes.sqlite3"
+                replacement.write_bytes(source.read_bytes())
+                replacement.replace(source)
+            elif scenario == "replace_twice":
+                source.rename(preserved)
+                alternate.replace(source)
+            elif scenario == "append_truncate_restore":
+                original = source.read_bytes()
+                with source.open("ab") as handle:
+                    handle.write(b"temporary")
+                with source.open("r+b") as handle:
+                    handle.truncate(len(original))
+            elif scenario == "rename_roundtrip":
+                source.rename(preserved)
+                preserved.rename(source)
+            elif scenario == "hardlink_roundtrip":
+                os.link(source, preserved)
+                source.unlink()
+                preserved.rename(source)
+            elif scenario == "chmod_roundtrip":
+                original_mode = source.stat().st_mode & 0o777
+                source.chmod(0o400 if original_mode != 0o400 else 0o600)
+                source.chmod(original_mode)
+            elif scenario == "rewrite_restore":
+                original = source.read_bytes()
+                with source.open("r+b") as handle:
+                    handle.write(b"Z" * min(64, len(original)))
+                    handle.flush()
+                    handle.seek(0)
+                    handle.write(original[:min(64, len(original))])
+            elif scenario == "directory_swap":
+                moved_root = root.with_name("restore-source-races-moved")
+                root.rename(moved_root)
+                root.mkdir()
+                alternate.replace(root / source.name)
+            elif scenario == "utime_restore":
+                original = source.stat()
+                os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns + 1000000))
+                os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+            mutated["done"] = True
+
+        def read_then_mutate(fd, size):
+            chunk = real_read(fd, size)
+            if chunk and not mutated["done"]:
+                mutate()
+            return chunk
+
+        with patch("app.maintenance.os.read", side_effect=read_then_mutate):
+            with self.assertRaises(OSError):
+                verify_restore_candidate(source, staging)
+
+        self.assertTrue(mutated["done"], scenario)
+        self.assertFalse(staging.exists(), scenario)
+        self.assertEqual(maintenance_module.sha256_file(database.DB_PATH), live_before)
+        self.assertEqual(
+            list(staging.parent.glob("*.source.tmp")) if staging.parent.exists() else [],
+            [],
+        )
+
+    return test
+
+
+_RESTORE_CANDIDATE_SOURCE_RACE_CASES = [
+    ("test_restore_source_append_race", "append"),
+    ("test_restore_source_rewrite_race", "rewrite"),
+    ("test_restore_source_touch_race", "touch"),
+    ("test_restore_source_chmod_race", "chmod"),
+    ("test_restore_source_replace_race", "replace"),
+    ("test_restore_source_delete_race", "delete"),
+    ("test_restore_source_symlink_race", "symlink"),
+    ("test_restore_source_hardlink_race", "hardlink"),
+    ("test_restore_source_rename_race", "rename"),
+    ("test_restore_source_directory_race", "directory"),
+    ("test_restore_source_external_symlink_race", "external_symlink"),
+    ("test_restore_source_truncate_restore_race", "truncate_restore"),
+    ("test_restore_source_same_bytes_replace_race", "same_bytes_replace"),
+    ("test_restore_source_replace_twice_race", "replace_twice"),
+    ("test_restore_source_append_truncate_restore_race", "append_truncate_restore"),
+    ("test_restore_source_rename_roundtrip_race", "rename_roundtrip"),
+    ("test_restore_source_hardlink_roundtrip_race", "hardlink_roundtrip"),
+    ("test_restore_source_chmod_roundtrip_race", "chmod_roundtrip"),
+    ("test_restore_source_rewrite_restore_race", "rewrite_restore"),
+    ("test_restore_source_directory_swap_race", "directory_swap"),
+]
+for _test_name, _scenario in _RESTORE_CANDIDATE_SOURCE_RACE_CASES:
+    setattr(DailyMaintenanceTests, _test_name, _make_restore_candidate_source_race_test(_scenario))
