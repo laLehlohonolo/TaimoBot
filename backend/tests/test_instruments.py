@@ -21,7 +21,18 @@ class InstrumentRegistryTests(unittest.TestCase):
         )
 
     def test_catalogue_is_limited_to_deliberately_reviewed_symbols(self):
-        self.assertEqual(set(INSTRUMENTS), {"XAUUSD", "EURUSD", "GBPUSD"})
+        self.assertEqual(set(INSTRUMENTS), {"XAUUSD", "EURUSD", "GBPUSD", "R_10", "R_25", "R_50", "R_75", "R_100", "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"})
+
+    def test_deriv_volatility_indices_are_separate_observation_only_assets(self):
+        symbols = ("R_10", "R_25", "R_50", "R_75", "R_100", "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V")
+        for symbol in symbols:
+            with self.subTest(symbol=symbol):
+                instrument = get_instrument(symbol)
+                self.assertEqual(instrument["asset_class"], "synthetic_index")
+                self.assertEqual(instrument["provider"], "Deriv")
+                self.assertEqual(instrument["market_group"], "volatility_indices")
+                self.assertEqual(instrument["execution_model"], "NOT_CONFIGURED")
+                self.assertEqual(instrument["role"], "initial_observation_candidate")
 
     def test_unknown_instrument_is_rejected(self):
         with self.assertRaises(ValueError):
