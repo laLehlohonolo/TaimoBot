@@ -165,6 +165,48 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         self.assertFalse(body["signals_generated"])
         self.assertFalse(body["execution_triggered"])
 
+    def test_quality_diagnostics_flag_unaligned_and_future_candles(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import (
+            inspect_market_observation_quality,
+            save_market_observation,
+        )
+
+        checked_at = datetime(2026, 11, 21, 20, 5, tzinfo=timezone.utc)
+        records = [
+            ("R_10", "2026-11-21T20:00:30+00:00"),
+            ("R_10", "2026-11-21T20:01:30+00:00"),
+            ("R_25", "2026-11-21T20:06:00+00:00"),
+        ]
+        with database.get_connection() as connection:
+            for index, (symbol, timestamp) in enumerate(records):
+                save_market_observation(connection, {
+                    "symbol": symbol,
+                    "timeframe": "M1",
+                    "timestamp": timestamp,
+                    "source": "deriv",
+                    "open": 200.0 + index,
+                    "high": 202.0 + index,
+                    "low": 199.0 + index,
+                    "close": 201.0 + index,
+                    "volume": 0,
+                })
+
+            unaligned = inspect_market_observation_quality(
+                connection, "R_10", "M1", now=checked_at
+            )
+            future = inspect_market_observation_quality(
+                connection, "R_25", "M1", now=checked_at
+            )
+
+        self.assertEqual(unaligned["status"], "INVALID_CADENCE")
+        self.assertEqual(unaligned["unaligned_observation_count"], 2)
+        self.assertFalse(unaligned["execution_eligible"])
+        self.assertEqual(future["status"], "FUTURE_DATA")
+        self.assertTrue(future["future_data"])
+        self.assertEqual(future["future_observation_count"], 1)
+        self.assertFalse(future["execution_eligible"])
+
     def test_admin_can_create_review_and_reject_candidate(self):
         created = self.admin_client.post(
             "/admin/brain/strategy-candidates", json=self.candidate_payload()
