@@ -392,6 +392,85 @@ def ensure_market_observation_schema(connection):
         """
     )
 
+
+def ensure_strategy_lab_schema(connection):
+    """Create private, administrator-governed strategy research records."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS brain_strategy_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            instruments_json TEXT NOT NULL,
+            timeframes_json TEXT NOT NULL,
+            market_conditions TEXT NOT NULL,
+            entry_logic TEXT NOT NULL,
+            exit_logic TEXT NOT NULL,
+            invalidation_logic TEXT NOT NULL,
+            risk_notes TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'RESEARCH', 'REJECTED', 'APPROVED_FOR_STAGING'
+            )),
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (created_by) REFERENCES users(user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_brain_strategy_candidates_status
+            ON brain_strategy_candidates(status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS brain_strategy_candidate_decisions (
+            decision_id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN (
+                'REQUEST_MORE_RESEARCH', 'REJECT', 'APPROVE_FOR_STAGING'
+            )),
+            rationale TEXT NOT NULL,
+            decided_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (candidate_id) REFERENCES brain_strategy_candidates(candidate_id),
+            FOREIGN KEY (decided_by) REFERENCES users(user_id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_strategy_decision_update
+        BEFORE UPDATE ON brain_strategy_candidate_decisions
+        BEGIN
+            SELECT RAISE(ABORT, 'Strategy decision history is append-only.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_strategy_decision_delete
+        BEFORE DELETE ON brain_strategy_candidate_decisions
+        BEGIN
+            SELECT RAISE(ABORT, 'Strategy decision history is append-only.');
+        END;
+
+        CREATE TABLE IF NOT EXISTS brain_strategy_lab_audit (
+            event_id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            actor_user_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (candidate_id) REFERENCES brain_strategy_candidates(candidate_id),
+            FOREIGN KEY (actor_user_id) REFERENCES users(user_id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_strategy_lab_audit_update
+        BEFORE UPDATE ON brain_strategy_lab_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Strategy lab audit history is append-only.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_strategy_lab_audit_delete
+        BEFORE DELETE ON brain_strategy_lab_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Strategy lab audit history is append-only.');
+        END;
+        """
+    )
+
+
 def init_db():
     """Create tables and safely migrate existing paper-trading data."""
 
@@ -612,6 +691,7 @@ def init_db():
 
         seed_strategy_knowledge(connection)
         ensure_market_observation_schema(connection)
+        ensure_strategy_lab_schema(connection)
 
         migrate_trade_columns(connection)
         migrate_trade_cost_ledger(connection)
