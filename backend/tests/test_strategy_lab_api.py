@@ -147,13 +147,6 @@ class StrategyLabAdminApiTests(unittest.TestCase):
     def test_historical_data_coverage_is_admin_only_and_keeps_sources_separate(self):
         from app.market_observation_store import save_market_observation
 
-        for source, timestamp in (
-            ("deriv", "2026-11-21T12:00:00Z"),
-            ("deriv", "2026-11-21T12:01:00Z"),
-            ("deriv", "2026-11-21T12:03:00Z"),
-            ("replay", "2026-11-21T12:00:30Z"),
-        ):
-            save_market_observation(database.get_connection().__enter__(), {}) if False else None
         with database.get_connection() as connection:
             for source, timestamp in (
                 ("deriv", "2026-11-21T12:00:00Z"),
