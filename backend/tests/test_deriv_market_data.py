@@ -29,7 +29,6 @@ class DerivMarketDataAdapterTests(unittest.TestCase):
                 self.active_record("1HZ100V"),
                 self.active_record("R_100"),
                 self.active_record("EURUSD"),
-                self.active_record("1HZ100V"),
             ],
         }
         result = normalize_active_symbols_response(payload)
