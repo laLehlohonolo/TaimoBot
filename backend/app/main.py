@@ -1194,6 +1194,13 @@ async def run_admin_market_backfill(
         raise HTTPException(status_code=502, detail="Backfill batch failed safely; inspect checkpoint before retrying.") from error
     except sqlite3.OperationalError as error:
         raise HTTPException(status_code=503, detail="Market database is temporarily unavailable.") from error
+    except Exception as error:
+        # Provider socket failures must not leave an invisible HTTP 500; the
+        # worker has already held the unchanged checkpoint for operator review.
+        raise HTTPException(
+            status_code=502,
+            detail="Historical provider request failed safely; inspect the backfill checkpoint.",
+        ) from error
     return {
         **result,
         "provider": "Deriv",
@@ -1274,6 +1281,8 @@ def review_market_backfill(
     require_admin(user)
     if request.confirm_retry is not True:
         raise HTTPException(status_code=400, detail="Explicit retry confirmation is required.")
+    if len(request.rationale.strip()) < 10:
+        raise HTTPException(status_code=422, detail="Rationale must contain at least 10 non-whitespace characters.")
     try:
         instrument = get_instrument(symbol)
         if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
