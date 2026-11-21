@@ -120,6 +120,11 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "not aligned to its timeframe"):
                 await DerivPublicMarketDataClient().fetch_candles("1HZ100V", "M1", count=2)
 
+    async def test_deriv_candle_normalizer_rejects_epoch_outside_datetime_range(self):
+        candle = {"epoch": 1e300, "open": 1000, "high": 1002, "low": 999, "close": 1001}
+        with self.assertRaisesRegex(ValueError, "outside the supported timestamp range"):
+            normalize_deriv_candle("1HZ100V", candle, "M1")
+
     async def test_deriv_candle_normalizer_rejects_non_deriv_instruments(self):
         candle = {"epoch": 1795256100, "open": 1000, "high": 1002, "low": 999, "close": 1001}
         with self.assertRaisesRegex(ValueError, "Deriv synthetic"):
