@@ -110,6 +110,7 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
             "stale_after_seconds": granularity_seconds * 2,
             "stale": True, "future_data": False,
             "future_observation_count": 0, "future_by_seconds": None,
+            "unaligned_observation_count": 0, "unaligned_timestamps": [],
             "missing_interval_count": 0,
             "missing_candle_count": 0, "missing_intervals": [],
             "checked_at": checked_at.isoformat(),
@@ -122,6 +123,11 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
         for row in rows
     ]
     latest = timestamps[-1]
+    unaligned_timestamps = [
+        timestamp for timestamp in timestamps
+        if not abs(timestamp.timestamp() % granularity_seconds) < 1e-6
+        and not abs(timestamp.timestamp() % granularity_seconds - granularity_seconds) < 1e-6
+    ]
     future_timestamps = [timestamp for timestamp in timestamps if timestamp > checked_at]
     future_data = bool(future_timestamps)
     future_by_seconds = (
@@ -130,7 +136,8 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
     )
     age_seconds = max(0.0, (checked_at - latest).total_seconds())
     stale_after_seconds = granularity_seconds * 2
-    stale = future_data or age_seconds > stale_after_seconds
+    invalid_cadence = bool(unaligned_timestamps)
+    stale = future_data or invalid_cadence or age_seconds > stale_after_seconds
     missing_intervals = []
     missing_interval_count = 0
     missing_candle_count = 0
@@ -149,8 +156,9 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
                     })
 
     status = (
-        "FUTURE_DATA" if future_data
-        else ("STALE" if stale else ("GAPS_DETECTED" if missing_candle_count else "FRESH"))
+        "INVALID_CADENCE" if invalid_cadence
+        else ("FUTURE_DATA" if future_data
+        else ("STALE" if stale else ("GAPS_DETECTED" if missing_candle_count else "FRESH")))
     )
     return {
         "symbol": instrument["symbol"], "timeframe": timeframe,
@@ -160,6 +168,8 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
         "future_data": future_data,
         "future_observation_count": len(future_timestamps),
         "future_by_seconds": future_by_seconds,
+        "unaligned_observation_count": len(unaligned_timestamps),
+        "unaligned_timestamps": [timestamp.isoformat() for timestamp in unaligned_timestamps[:50]],
         "missing_interval_count": missing_interval_count,
         "missing_candle_count": missing_candle_count,
         "missing_intervals": missing_intervals,
