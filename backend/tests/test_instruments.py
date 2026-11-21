@@ -82,5 +82,28 @@ class InstrumentRegistryTests(unittest.TestCase):
                     validate_broker_specifications(value)
 
 
+
+class InstrumentExecutionApprovalTests(unittest.TestCase):
+    def test_only_xauusd_is_execution_approved(self):
+        from app.instruments import EXECUTION_ENABLED_SYMBOLS
+        self.assertEqual(EXECUTION_ENABLED_SYMBOLS, frozenset({"XAUUSD"}))
+
+    def test_observation_candidates_are_not_execution_approved(self):
+        from app.instruments import require_execution_approval
+        for symbol in ("EURUSD", "GBPUSD"):
+            with self.subTest(symbol=symbol):
+                with self.assertRaisesRegex(ValueError, "observation-only"):
+                    require_execution_approval(symbol)
+
+    def test_unknown_instrument_is_not_execution_approved(self):
+        from app.instruments import require_execution_approval
+        with self.assertRaisesRegex(ValueError, "observation-only"):
+            require_execution_approval("USDJPY")
+
+    def test_xauusd_remains_execution_approved(self):
+        from app.instruments import require_execution_approval
+        self.assertEqual(require_execution_approval("xauusd"), "XAUUSD")
+
+
 if __name__ == "__main__":
     unittest.main()
