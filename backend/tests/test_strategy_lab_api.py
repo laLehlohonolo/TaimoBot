@@ -78,6 +78,26 @@ class StrategyLabAdminApiTests(unittest.TestCase):
             403,
         )
 
+    def test_research_data_readiness_is_admin_only_and_never_enables_backtesting(self):
+        self.assertEqual(
+            self.participant_client.get(
+                "/admin/brain/strategy-candidates/data-readiness",
+                params={"symbol": "XAUUSD", "timeframe": "M5"},
+            ).status_code,
+            403,
+        )
+        response = self.admin_client.get(
+            "/admin/brain/strategy-candidates/data-readiness",
+            params={"symbol": "XAUUSD", "timeframe": "M5"},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["data_available"])
+        self.assertFalse(body["provenance_verified"])
+        self.assertFalse(body["eligible_for_backtest"])
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["execution_triggered"])
+
     def test_admin_can_create_review_and_reject_candidate(self):
         created = self.admin_client.post(
             "/admin/brain/strategy-candidates", json=self.candidate_payload()
