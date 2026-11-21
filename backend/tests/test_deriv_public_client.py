@@ -84,6 +84,14 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
             "style": "candles", "granularity": 60, "req_id": 2,
         }])
 
+    async def test_rejects_provider_candle_batch_larger_than_requested(self):
+        response = self.history_response()
+        response["candles"] = response["candles"] * 2
+        socket = FakeSocket(response)
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            with self.assertRaisesRegex(ValueError, "more candles than requested"):
+                await DerivPublicMarketDataClient().fetch_candles("1HZ100V", "M1", count=2)
+
     async def test_rejects_non_deriv_symbols_invalid_timeframes_and_counts_before_network(self):
         client = DerivPublicMarketDataClient()
         for args in (("EURUSD", "M1", 10), ("1HZ100V", "M2", 10),
