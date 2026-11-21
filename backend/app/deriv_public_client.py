@@ -98,6 +98,8 @@ class DerivPublicMarketDataClient:
         candles = response.get("candles")
         if not isinstance(candles, list):
             raise ValueError("Deriv history response must contain a candle list.")
+        if len(candles) > count:
+            raise ValueError("Deriv returned more candles than requested.")
         return [
             normalize_deriv_candle(instrument["symbol"], candle, timeframe, source="deriv")
             for candle in candles
