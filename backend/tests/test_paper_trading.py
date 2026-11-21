@@ -165,6 +165,96 @@ class PaperTradingTests(unittest.TestCase):
             result["projected_total_open_risk"], 100
         )
 
+    def test_valid_position_sizes_respect_risk_and_stop_distance(self):
+        cases = [
+            {
+                "name": "quarter_percent_buy",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.25,
+                "side": "BUY",
+                "current_open_risk": 0,
+                "expected_risk": 25,
+                "expected_size": 2.5,
+                "expected_projected": 25,
+                "expected_remaining": 75,
+            },
+            {
+                "name": "quarter_percent_sell",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 4010,
+                "risk_percent": 0.25,
+                "side": "SELL",
+                "current_open_risk": 0,
+                "expected_risk": 25,
+                "expected_size": 2.5,
+                "expected_projected": 25,
+                "expected_remaining": 75,
+            },
+            {
+                "name": "wider_stop_reduces_quantity",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 3980,
+                "risk_percent": 0.5,
+                "side": "BUY",
+                "current_open_risk": 0,
+                "expected_risk": 50,
+                "expected_size": 2.5,
+                "expected_projected": 50,
+                "expected_remaining": 50,
+            },
+            {
+                "name": "partial_risk_budget",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5,
+                "side": "BUY",
+                "current_open_risk": 40,
+                "expected_risk": 50,
+                "expected_size": 5,
+                "expected_projected": 90,
+                "expected_remaining": 10,
+            },
+            {
+                "name": "exactly_uses_remaining_risk_budget",
+                "account_balance": 10000,
+                "entry_price": 4000,
+                "stop_loss": 3990,
+                "risk_percent": 0.5,
+                "side": "BUY",
+                "current_open_risk": 50,
+                "expected_risk": 50,
+                "expected_size": 5,
+                "expected_projected": 100,
+                "expected_remaining": 0,
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                values = {
+                    key: value
+                    for key, value in case.items()
+                    if not key.startswith("expected_") and key != "name"
+                }
+                result = calculate_position_size(**values)
+                self.assertTrue(result["approved"])
+                self.assertEqual(result["mode"], "paper_trading")
+                self.assertAlmostEqual(result["risk_amount"], case["expected_risk"])
+                self.assertAlmostEqual(result["position_size"], case["expected_size"])
+                self.assertAlmostEqual(
+                    result["projected_total_open_risk"],
+                    case["expected_projected"],
+                )
+                self.assertAlmostEqual(
+                    result["remaining_risk_after_trade"],
+                    case["expected_remaining"],
+                )
+
     def test_risk_inputs_reject_booleans_and_overflowing_integers(self):
         invalid_positive_values = (True, 10 ** 10000)
         for field in ("account_balance", "entry_price", "stop_loss", "risk_percent"):
