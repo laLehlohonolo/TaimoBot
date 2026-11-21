@@ -520,5 +520,54 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["batches_completed"], 1)
             self.assertEqual(result["next_end_epoch"], 3420)
 
+    async def test_committed_batch_progress_survives_restart_without_replay(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            def factory():
+                connection = sqlite3.connect(database_file.name, timeout=10)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                return connection
+
+            first_client = FakeRangeClient(
+                [candle(3480), candle(3540), candle(3600)]
+            )
+            first = await run_backfill_batch_with_connection_factory(
+                factory, first_client, "1HZ100V", "M1",
+                batch_size=3, now_epoch=3600,
+            )
+            self.assertEqual(first["next_end_epoch"], 3420)
+            self.assertEqual(first["batches_completed"], 1)
+
+            # A new worker process resumes from the committed cursor, not the
+            # previous range, and appends only the next older candle interval.
+            second_client = FakeRangeClient(
+                [candle(3300), candle(3360), candle(3420)]
+            )
+            second = await run_backfill_batch_with_connection_factory(
+                factory, second_client, "1HZ100V", "M1",
+                batch_size=3, now_epoch=3600,
+            )
+            self.assertEqual(
+                second_client.calls,
+                [("1HZ100V", "M1", 3300, 3420, 3)],
+            )
+            self.assertEqual(second["next_end_epoch"], 3240)
+            self.assertEqual(second["batches_completed"], 2)
+            self.assertEqual(second["inserted_count"], 3)
+
+            connection = factory()
+            try:
+                count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM market_observations"
+                ).fetchone()["count"]
+                checkpoint = get_backfill_checkpoint(
+                    connection, "1HZ100V", "M1"
+                )
+            finally:
+                connection.close()
+            self.assertEqual(count, 6)
+            self.assertEqual(checkpoint["batches_completed"], 2)
+            self.assertEqual(checkpoint["next_end_epoch"], 3240)
+
 if __name__ == "__main__":
     unittest.main()
