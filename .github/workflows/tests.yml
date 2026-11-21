@@ -107,6 +107,9 @@ jobs:
         run: python scripts/run_recovery_artifact_streaming_hash_races.py
       - name: Run twenty transiently restored artifact mutation race checks sequentially
         run: python scripts/run_recovery_artifact_restored_mutation_races.py
+      - name: Run twenty managed-directory metadata race checks sequentially
+        working-directory: backend
+        run: python scripts/run_recovery_inventory_directory_metadata_races.py
       - name: Run twenty post-terminal metadata filesystem race checks sequentially
         run: python scripts/run_recovery_inventory_post_terminal_metadata_fs_races.py
       - name: Run twenty post-digest-return recovery inventory race checks sequentially
