@@ -173,6 +173,24 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone()["count"]
         self.assertEqual(stored, 2)
 
+    async def test_incomplete_batch_requires_operator_review_before_any_retry(self):
+        client = FakeRangeClient([candle(3480), candle(3600)])
+        first = await run_backfill_batch(
+            self.connection, client, "1HZ100V", "M1",
+            batch_size=3, now_epoch=3600,
+        )
+        self.assertEqual(first["status"], "GAP_REVIEW")
+        with self.assertRaisesRegex(ValueError, "operator review"):
+            await run_backfill_batch(
+                self.connection, client, "1HZ100V", "M1",
+                batch_size=3, now_epoch=3600,
+            )
+        checkpoint = get_backfill_checkpoint(self.connection, "1HZ100V", "M1")
+        self.assertEqual(checkpoint["status"], "GAP_REVIEW")
+        self.assertEqual(checkpoint["next_end_epoch"], 3600)
+        self.assertEqual(checkpoint["batches_completed"], 1)
+        self.assertEqual(len(client.calls), 1)
+
     async def test_backfill_persists_candles_and_moves_durable_cursor_backwards(self):
         client = FakeRangeClient([candle(3480), candle(3540), candle(3600)])
         result = await run_backfill_batch(
