@@ -1122,7 +1122,11 @@ def inspect_recovery_artifact_inventory(
         metadata = path.stat(follow_symlinks=False)
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise OSError("managed recovery directory was replaced or is unsafe")
-        return (metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns)
+        return (
+            metadata.st_dev, metadata.st_ino, metadata.st_mode,
+            metadata.st_uid, metadata.st_gid, metadata.st_nlink,
+            metadata.st_mtime_ns, metadata.st_ctime_ns,
+        )
 
     try:
         root_identity = directory_identity(root)
