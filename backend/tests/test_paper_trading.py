@@ -2240,20 +2240,24 @@ class PaperTradingTests(unittest.TestCase):
              "open": 1001, "high": 1003, "low": 1000, "close": 1002, "volume": 0,
              "source": "deriv", "execution_eligible": False},
         ]
-        with database.get_connection() as connection:
-            connection.execute("""
-                CREATE TRIGGER reject_second_deriv_api_candle
-                BEFORE INSERT ON market_observations
-                WHEN NEW.observed_at = '2026-11-21T10:16:00+00:00'
-                BEGIN SELECT RAISE(ABORT, 'internal persistence failure'); END;
-            """)
+        from app.market_observation_store import save_market_observation as save_observation
 
-        with patch("app.main.DerivPublicMarketDataClient") as client_class:
-            client_class.return_value.collect_candles = AsyncMock(return_value=candles)
-            response = self.client.post(
-                "/market-observations/deriv-sync",
-                json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
-            )
+        save_calls = 0
+
+        def fail_second_insert(connection, candle):
+            nonlocal save_calls
+            save_calls += 1
+            if save_calls == 2:
+                raise RuntimeError("internal persistence failure")
+            return save_observation(connection, candle)
+
+        with patch("app.deriv_public_client.save_market_observation", side_effect=fail_second_insert):
+            with patch("app.main.DerivPublicMarketDataClient") as client_class:
+                client_class.return_value.collect_candles = AsyncMock(return_value=candles)
+                response = self.client.post(
+                    "/market-observations/deriv-sync",
+                    json={"symbol": "1HZ100V", "timeframe": "M1", "count": 2, "confirm_collection": True},
+                )
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(
@@ -2266,7 +2270,6 @@ class PaperTradingTests(unittest.TestCase):
                 "SELECT COUNT(*) AS count FROM market_observations WHERE symbol = ? AND timeframe = ?",
                 ("1HZ100V", "M1"),
             ).fetchone()["count"]
-            connection.execute("DROP TRIGGER reject_second_deriv_api_candle")
         self.assertEqual(stored, 0)
 
 
