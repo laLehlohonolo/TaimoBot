@@ -159,5 +159,40 @@ class AdaptiveProfitTakingTests(unittest.TestCase):
         self.assertAlmostEqual(result["net_pnl"], 1e-8)
 
 
+
+def _make_invalid_profit_input_test(field, value):
+    def test(self):
+        position = {"side": "BUY", "entry_price": 100, "quantity": 1}
+        kwargs = {
+            "spread_cost": 0,
+            "commission_cost": 0,
+            "swap_cost": 0,
+            "other_costs": 0,
+            "minimum_net_profit": 0,
+        }
+        if field == "current_price":
+            current_price = value
+        else:
+            current_price = 101
+            kwargs[field] = value
+
+        with self.assertRaises(ValueError):
+            evaluate_position_profit(position, current_price, **kwargs)
+    return test
+
+
+_INVALID_PROFIT_INPUT_CASES = [["spread_cost_boolean","spread_cost",true],["spread_cost_none","spread_cost",null],["spread_cost_nan","spread_cost","nan"],["spread_cost_negative","spread_cost",-0.1],["commission_cost_boolean","commission_cost",true],["commission_cost_none","commission_cost",null],["commission_cost_infinite","commission_cost","inf"],["commission_cost_negative","commission_cost",-0.1],["swap_cost_boolean","swap_cost",false],["swap_cost_none","swap_cost",null],["swap_cost_nan","swap_cost","nan"],["swap_cost_negative","swap_cost",-0.1],["other_costs_boolean","other_costs",true],["other_costs_none","other_costs",null],["other_costs_infinite","other_costs","inf"],["other_costs_negative","other_costs",-0.1],["minimum_floor_boolean","minimum_net_profit",true],["minimum_floor_none","minimum_net_profit",null],["minimum_floor_nan","minimum_net_profit","nan"],["minimum_floor_negative","minimum_net_profit",-0.1]]
+for _scenario, _field, _value in _INVALID_PROFIT_INPUT_CASES:
+    if _value == "nan":
+        _value = float("nan")
+    elif _value == "inf":
+        _value = float("inf")
+    setattr(
+        AdaptiveProfitTakingTests,
+        "test_invalid_profit_input_" + _scenario,
+        _make_invalid_profit_input_test(_field, _value),
+    )
+
+
 if __name__ == "__main__":
     unittest.main()
