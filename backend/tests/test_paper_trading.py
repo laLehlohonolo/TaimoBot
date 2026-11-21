@@ -2248,7 +2248,7 @@ class PaperTradingTests(unittest.TestCase):
             nonlocal save_calls
             save_calls += 1
             if save_calls == 2:
-                raise RuntimeError("internal persistence failure")
+                raise sqlite3.OperationalError("internal persistence failure")
             return save_observation(connection, candle)
 
         with patch("app.deriv_public_client.save_market_observation", side_effect=fail_second_insert):
