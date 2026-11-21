@@ -387,6 +387,26 @@ def init_db():
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS participant_display_currency_preferences (
+                user_id TEXT PRIMARY KEY,
+                currency TEXT NOT NULL CHECK (currency IN ('ZAR', 'USD', 'EUR', 'GBP', 'KWD')),
+                selected_at TEXT NOT NULL,
+                confirmed INTEGER NOT NULL CHECK (confirmed = 1),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+            );
+
+            CREATE TRIGGER IF NOT EXISTS prevent_display_currency_preference_update
+            BEFORE UPDATE ON participant_display_currency_preferences
+            BEGIN
+                SELECT RAISE(ABORT, 'Display currency preference is immutable.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS prevent_display_currency_preference_delete
+            BEFORE DELETE ON participant_display_currency_preferences
+            BEGIN
+                SELECT RAISE(ABORT, 'Display currency preference cannot be deleted.');
+            END;
+
             CREATE TABLE IF NOT EXISTS participant_milestones (
                 user_id TEXT PRIMARY KEY,
                 joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
