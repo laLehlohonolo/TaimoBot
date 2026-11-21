@@ -90,6 +90,45 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(client.calls), 1)
 
+    async def test_batch_rolls_back_all_candles_when_one_observation_is_invalid(self):
+        invalid = candle(3540)
+        invalid["high"] = 1
+        invalid["low"] = 2
+        client = FakeRangeClient([candle(3480), invalid])
+        with self.assertRaises(ValueError):
+            await run_backfill_batch(
+                self.connection, client, "1HZ100V", "M1",
+                batch_size=3, now_epoch=3600,
+            )
+        stored = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM market_observations"
+        ).fetchone()["count"]
+        self.assertEqual(stored, 0)
+        checkpoint = get_backfill_checkpoint(self.connection, "1HZ100V", "M1")
+        self.assertEqual(checkpoint["status"], "RUNNING")
+        self.assertEqual(checkpoint["next_end_epoch"], 3600)
+        self.assertEqual(checkpoint["batches_completed"], 0)
+
+    async def test_repeated_candle_batch_is_idempotent(self):
+        candles = [candle(3480), candle(3540), candle(3600)]
+        client = FakeRangeClient(candles)
+        first = await run_backfill_batch(
+            self.connection, client, "1HZ100V", "M1",
+            batch_size=3, now_epoch=3600,
+        )
+        # A fresh checkpoint on a separate database connection is not needed
+        # here: directly replay the same observation set to validate uniqueness.
+        from app.market_observation_store import save_market_observation
+        duplicates = [
+            save_market_observation(self.connection, item) for item in candles
+        ]
+        self.assertEqual(first["inserted_count"], 3)
+        self.assertTrue(all(not item["inserted"] for item in duplicates))
+        stored = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM market_observations"
+        ).fetchone()["count"]
+        self.assertEqual(stored, 3)
+
     async def test_rejects_boolean_and_non_integer_now_epoch(self):
         for invalid in (True, 120.5, "120", -1):
             with self.subTest(now_epoch=invalid):
