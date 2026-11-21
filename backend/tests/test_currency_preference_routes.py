@@ -103,6 +103,32 @@ class ParticipantDisplayCurrencyApiTests(unittest.TestCase):
         self.assertEqual(second.status_code, 409)
         self.assertEqual(current.json()["currency"], "EUR")
 
+    def test_concurrent_first_selections_allow_exactly_one_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def submit(currency):
+            with TestClient(app) as client:
+                return client.post(
+                    "/participant/currency-preference",
+                    json={"currency": currency, "confirmed": True},
+                    headers=self.headers,
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(submit, ("USD", "EUR")))
+
+        self.assertEqual(sorted(response.status_code for response in responses), [201, 409])
+        current = self.client.get("/participant/currency-preference", headers=self.headers)
+        self.assertIn(current.json()["currency"], ("USD", "EUR"))
+
+    def test_unsupported_currency_is_rejected(self):
+        response = self.client.post(
+            "/participant/currency-preference",
+            json={"currency": "JPY", "confirmed": True},
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_database_prevents_update_and_delete(self):
         self.client.post(
             "/participant/currency-preference",
