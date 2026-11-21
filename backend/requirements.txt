@@ -3,3 +3,4 @@ fastapi
 uvicorn[standard]
 pydantic
 httpx
+websockets>=12,<16
