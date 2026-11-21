@@ -341,6 +341,39 @@ def seed_strategy_knowledge(connection):
         )
 
 
+
+
+def ensure_market_observation_schema(connection):
+    """Create the append-only, deduplicated market candle store."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_observations (
+            observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            open REAL NOT NULL CHECK (open > 0),
+            high REAL NOT NULL CHECK (high > 0),
+            low REAL NOT NULL CHECK (low > 0),
+            close REAL NOT NULL CHECK (close > 0),
+            volume REAL NOT NULL CHECK (volume >= 0),
+            provenance_status TEXT NOT NULL DEFAULT 'UNVERIFIED_EXTERNAL_INPUT',
+            received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (symbol, timeframe, observed_at, source),
+            CHECK (low <= open AND low <= close),
+            CHECK (high >= open AND high >= close),
+            CHECK (low <= high)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_observations_lookup
+        ON market_observations(symbol, timeframe, observed_at DESC)
+        """
+    )
+
 def init_db():
     """Create tables and safely migrate existing paper-trading data."""
 
@@ -540,6 +573,7 @@ def init_db():
 
 
         seed_strategy_knowledge(connection)
+        ensure_market_observation_schema(connection)
 
         migrate_trade_columns(connection)
         migrate_trade_cost_ledger(connection)
