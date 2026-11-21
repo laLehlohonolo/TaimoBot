@@ -141,7 +141,12 @@ def inspect_market_observation_quality(connection, symbol, timeframe, now=None):
     missing_intervals = []
     missing_interval_count = 0
     missing_candle_count = 0
+    unaligned_set = set(unaligned_timestamps)
     for previous, current in zip(timestamps, timestamps[1:]):
+        # Do not infer missing candle counts from an interval whose boundary
+        # timestamps are themselves invalid for the requested timeframe.
+        if previous in unaligned_set or current in unaligned_set:
+            continue
         elapsed = (current - previous).total_seconds()
         if elapsed > granularity_seconds:
             missing = max(0, round(elapsed / granularity_seconds) - 1)
