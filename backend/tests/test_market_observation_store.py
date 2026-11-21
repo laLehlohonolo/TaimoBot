@@ -306,5 +306,54 @@ class MarketObservationStoreTests(unittest.TestCase):
         self.assertFalse(result["execution_eligible"])
 
 
+    def test_source_coverage_reports_missing_candles_and_never_verifies_provenance(self):
+        from app.market_observation_store import inspect_market_observation_coverage
+
+        for timestamp in (
+            "2026-11-21T12:00:00Z",
+            "2026-11-21T12:01:00Z",
+            "2026-11-21T12:03:00Z",
+        ):
+            record = self.valid_record()
+            record["source"] = "deriv"
+            record["timestamp"] = timestamp
+            save_market_observation(self.connection, record)
+        result = inspect_market_observation_coverage(
+            self.connection, "1HZ100V", "M1"
+        )
+        self.assertEqual(result["source_count"], 1)
+        report = result["sources"][0]
+        self.assertEqual(report["observation_count"], 3)
+        self.assertEqual(report["expected_candle_count"], 4)
+        self.assertEqual(report["missing_candle_count"], 1)
+        self.assertEqual(report["coverage_percent"], 75.0)
+        self.assertFalse(report["provenance_verified"])
+        self.assertFalse(report["eligible_for_backtest"])
+        self.assertFalse(result["execution_triggered"])
+
+    def test_source_coverage_keeps_feeds_separate_and_flags_unaligned_data(self):
+        from app.market_observation_store import inspect_market_observation_coverage
+
+        for source, timestamp in (
+            ("deriv", "2026-11-21T12:00:00Z"),
+            ("deriv", "2026-11-21T12:02:00Z"),
+            ("replay", "2026-11-21T12:00:30Z"),
+        ):
+            record = self.valid_record()
+            record["source"] = source
+            record["timestamp"] = timestamp
+            save_market_observation(self.connection, record)
+        result = inspect_market_observation_coverage(
+            self.connection, "1HZ100V", "M1"
+        )
+        reports = {item["source"]: item for item in result["sources"]}
+        self.assertEqual(set(reports), {"deriv", "replay"})
+        self.assertEqual(reports["deriv"]["missing_candle_count"], 1)
+        self.assertFalse(reports["replay"]["cadence_valid"])
+        self.assertIsNone(reports["replay"]["coverage_percent"])
+        self.assertFalse(result["provenance_verified"])
+        self.assertFalse(result["eligible_for_backtest"])
+
+
 if __name__ == "__main__":
     unittest.main()
