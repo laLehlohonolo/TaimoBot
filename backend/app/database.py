@@ -392,6 +392,36 @@ def ensure_market_observation_schema(connection):
         """
     )
 
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS market_backfill_review_audit (
+            review_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN ('RETRY_SAME_RANGE')),
+            rationale TEXT NOT NULL,
+            decided_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (decided_by) REFERENCES users(user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_market_backfill_review_history
+            ON market_backfill_review_audit(symbol, timeframe, created_at DESC);
+
+        CREATE TRIGGER IF NOT EXISTS prevent_market_backfill_review_update
+        BEFORE UPDATE ON market_backfill_review_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Backfill review history is append-only.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_market_backfill_review_delete
+        BEFORE DELETE ON market_backfill_review_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Backfill review history is append-only.');
+        END;
+        """
+    )
+
 
 def ensure_strategy_lab_schema(connection):
     """Create private, administrator-governed strategy research records."""
