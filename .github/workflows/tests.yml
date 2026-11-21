@@ -109,6 +109,8 @@ jobs:
         run: python scripts/run_recovery_artifact_restored_mutation_races.py
       - name: Run twenty post-terminal metadata filesystem race checks sequentially
         run: python scripts/run_recovery_inventory_post_terminal_metadata_fs_races.py
+      - name: Run twenty post-digest-return recovery inventory race checks sequentially
+        run: python scripts/run_recovery_inventory_post_digest_return_races.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application
