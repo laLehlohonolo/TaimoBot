@@ -261,5 +261,14 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
         connection.close()
 
 
+    async def test_unmatched_request_ids_do_not_extend_request_deadline(self):
+        socket = FakeSocket({"msg_type": "candles", "req_id": 999, "candles": []})
+        with patch("app.deriv_public_client.websockets.connect", return_value=FakeSocketContext(socket)):
+            with self.assertRaises(TimeoutError):
+                await DerivPublicMarketDataClient(timeout=0.01).fetch_candles(
+                    "1HZ100V", "M1", count=1
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
