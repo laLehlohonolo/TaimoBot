@@ -62,6 +62,7 @@ from .auth_routes import (
 )
 from .strategy_knowledge import list_strategies, create_strategy, get_strategy
 from .strategy_lab_routes import router as strategy_lab_router
+from .session_calendar_routes import router as session_calendar_router
 from .profit_taking import evaluate_position_profit, evaluate_group_profit
 from .safety import (
     activate_emergency_stop,
@@ -99,6 +100,7 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(currency_preference_router)
 app.include_router(strategy_lab_router)
+app.include_router(session_calendar_router)
 
 # Cross-origin browser access is disabled unless exact trusted origins are configured.
 configure_cors(app, os.getenv("TAIMOBOT_CORS_ORIGINS", ""))
