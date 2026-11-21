@@ -17,6 +17,7 @@ from app.execution import (
     create_paper_account,
     open_paper_trade,
     close_paper_trade,
+    close_position_group,
     validate_symbol
 )
 from app.risk import (
@@ -1789,6 +1790,107 @@ class PaperTradingTests(unittest.TestCase):
 
         self.assertEqual(after_count, before_count)
         self.assertEqual(after_risk, before_risk)
+
+
+
+    def test_single_execution_close_rolls_back_trade_when_balance_write_fails(self):
+        trade = self.open_trade("ROLLBACK-SINGLE-BALANCE")
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER fail_single_close_balance
+                BEFORE UPDATE OF balance ON paper_accounts
+                WHEN OLD.account_id = 'TEST-001'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated balance write failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_paper_trade(trade["trade_id"], 4010)
+
+        with database.get_connection() as connection:
+            ledger = connection.execute(
+                "SELECT status, realized_pnl FROM trades WHERE trade_id = ?",
+                (trade["trade_id"],),
+            ).fetchone()
+            balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()["balance"]
+
+        self.assertEqual(ledger["status"], "OPEN")
+        self.assertEqual(ledger["realized_pnl"], 0)
+        self.assertEqual(balance, 10000)
+
+    def test_execution_group_close_rolls_back_all_positions_when_group_finalization_fails(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        first = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="ROLLBACK-GROUP-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+        second = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="ROLLBACK-GROUP-002",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER fail_group_close_finalization
+                BEFORE UPDATE OF status ON position_groups
+                WHEN OLD.group_id = '""" + group_id + """'
+                 AND NEW.status = 'CLOSED'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated group finalization failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_position_group(group_id, 4010)
+
+        with database.get_connection() as connection:
+            trades = connection.execute(
+                """
+                SELECT status, realized_pnl
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                ORDER BY trade_id
+                """,
+                (first["trade_id"], second["trade_id"]),
+            ).fetchall()
+            group = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+            balance = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()["balance"]
+
+        self.assertEqual(len(trades), 2)
+        self.assertTrue(all(row["status"] == "OPEN" for row in trades))
+        self.assertTrue(all(row["realized_pnl"] == 0 for row in trades))
+        self.assertEqual(group["status"], "OPEN")
+        self.assertEqual(balance, 10000)
 
 
 if __name__ == "__main__":
