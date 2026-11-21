@@ -357,3 +357,71 @@ class MarketObservationStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_coverage_reports_single_candle_as_one_hundred_percent_for_that_observed_span(self):
+        from app.market_observation_store import inspect_market_observation_coverage
+
+        record = self.valid_record()
+        record["source"] = "deriv"
+        save_market_observation(self.connection, record)
+        report = inspect_market_observation_coverage(
+            self.connection, "1HZ100V", "M1"
+        )
+
+        self.assertEqual(report["source_count"], 1)
+        self.assertEqual(report["sources"][0]["expected_candle_count"], 1)
+        self.assertEqual(report["sources"][0]["unique_timestamp_count"], 1)
+        self.assertEqual(report["sources"][0]["missing_candle_count"], 0)
+        self.assertEqual(report["sources"][0]["coverage_percent"], 100.0)
+        self.assertFalse(report["sources"][0]["provenance_verified"])
+        self.assertFalse(report["sources"][0]["eligible_for_backtest"])
+        self.assertFalse(report["execution_triggered"])
+
+    def test_coverage_source_filter_does_not_mix_other_feeds(self):
+        from app.market_observation_store import inspect_market_observation_coverage
+
+        deriv = self.valid_record()
+        deriv["source"] = "deriv"
+        replay = self.valid_record()
+        replay["source"] = "replay"
+        replay["timestamp"] = "2026-11-21T10:16:00+02:00"
+        save_market_observation(self.connection, deriv)
+        save_market_observation(self.connection, replay)
+
+        report = inspect_market_observation_coverage(
+            self.connection, "1HZ100V", "M1", source=" replay "
+        )
+
+        self.assertEqual(report["source_filter"], "replay")
+        self.assertEqual(report["source_count"], 1)
+        self.assertEqual(report["sources"][0]["source"], "replay")
+        self.assertEqual(report["sources"][0]["observation_count"], 1)
+
+    def test_coverage_empty_inventory_and_invalid_filters_are_explicit(self):
+        from app.market_observation_store import inspect_market_observation_coverage
+
+        empty = inspect_market_observation_coverage(
+            self.connection, "1HZ100V", "M1"
+        )
+        self.assertEqual(empty["source_count"], 0)
+        self.assertEqual(empty["sources"], [])
+        self.assertFalse(empty["provenance_verified"])
+        self.assertFalse(empty["eligible_for_backtest"])
+        self.assertFalse(empty["signals_generated"])
+        self.assertFalse(empty["execution_triggered"])
+
+        for source in ("", "   ", "x" * 121):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(ValueError, "source"):
+                    inspect_market_observation_coverage(
+                        self.connection, "1HZ100V", "M1", source=source
+                    )
+        with self.assertRaisesRegex(ValueError, "catalogue"):
+            inspect_market_observation_coverage(
+                self.connection, "UNKNOWN", "M1"
+            )
+        with self.assertRaisesRegex(ValueError, "timeframe"):
+            inspect_market_observation_coverage(
+                self.connection, "1HZ100V", "M2"
+            )
+
