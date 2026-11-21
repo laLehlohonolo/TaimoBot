@@ -106,6 +106,16 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_candle_range_rejects_oversized_and_unaligned_windows(self):
         client = DerivPublicMarketDataClient()
+        # 500 inclusive candle timestamps span 499 intervals; 500 intervals
+        # could return 501 candles and must be rejected before network access.
+        with self.assertRaisesRegex(ValueError, "exceeds the bounded"):
+            await client.fetch_candle_range(
+                "1HZ100V", "M1", 0, 60 * 500, max_candles=500
+            )
+        with self.assertRaisesRegex(ValueError, "between 2 and 500"):
+            await client.fetch_candle_range(
+                "1HZ100V", "M1", 0, 60, max_candles=1
+            )
         with self.assertRaisesRegex(ValueError, "exceeds the bounded"):
             await client.fetch_candle_range(
                 "1HZ100V", "M1", 0, 60 * 501, max_candles=500
