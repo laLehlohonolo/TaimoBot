@@ -144,6 +144,60 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         self.assertFalse(body["signals_generated"])
         self.assertFalse(body["execution_triggered"])
 
+    def test_historical_data_coverage_is_admin_only_and_keeps_sources_separate(self):
+        from app.market_observation_store import save_market_observation
+
+        for source, timestamp in (
+            ("deriv", "2026-11-21T12:00:00Z"),
+            ("deriv", "2026-11-21T12:01:00Z"),
+            ("deriv", "2026-11-21T12:03:00Z"),
+            ("replay", "2026-11-21T12:00:30Z"),
+        ):
+            save_market_observation(database.get_connection().__enter__(), {}) if False else None
+        with database.get_connection() as connection:
+            for source, timestamp in (
+                ("deriv", "2026-11-21T12:00:00Z"),
+                ("deriv", "2026-11-21T12:01:00Z"),
+                ("deriv", "2026-11-21T12:03:00Z"),
+                ("replay", "2026-11-21T12:00:30Z"),
+            ):
+                save_market_observation(connection, {
+                    "symbol": "1HZ100V",
+                    "timeframe": "M1",
+                    "timestamp": timestamp,
+                    "source": source,
+                    "open": 1000.0,
+                    "high": 1002.0,
+                    "low": 999.0,
+                    "close": 1001.0,
+                    "volume": 0,
+                })
+
+        params = {"symbol": "1HZ100V", "timeframe": "M1"}
+        self.assertEqual(
+            self.participant_client.get(
+                "/admin/brain/strategy-candidates/data-coverage", params=params
+            ).status_code,
+            403,
+        )
+        response = self.admin_client.get(
+            "/admin/brain/strategy-candidates/data-coverage", params=params
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        reports = {item["source"]: item for item in body["sources"]}
+        self.assertEqual(body["source_count"], 2)
+        self.assertEqual(reports["deriv"]["expected_candle_count"], 4)
+        self.assertEqual(reports["deriv"]["missing_candle_count"], 1)
+        self.assertEqual(reports["deriv"]["coverage_percent"], 75.0)
+        self.assertFalse(reports["replay"]["cadence_valid"])
+        self.assertIsNone(reports["replay"]["coverage_percent"])
+        self.assertFalse(body["provenance_verified"])
+        self.assertFalse(body["eligible_for_backtest"])
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["signals_generated"])
+        self.assertFalse(body["execution_triggered"])
+
     def test_market_data_quality_is_admin_only_and_never_enables_research_or_execution(self):
         params = {"symbol": "R_10", "timeframe": "M1"}
         self.assertEqual(
