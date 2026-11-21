@@ -45,7 +45,6 @@ The product must support two distinct capabilities in stages:
 - If a balance is shown in another currency, label it as an indicative converted value and show the exchange-rate source and timestamp.
 - A display preference must never create a new currency balance, execute an FX conversion, change a transaction's original currency, or move/deduct funds.
 - The one-time display-currency choice remains separate from any later multi-currency wallet balances; it does not prevent the participant from viewing individually held balances in their actual currencies.
-- The one-time display-currency choice remains separate from any later multi-currency wallet balances; it does not prevent the participant from viewing individually held balances in their actual currencies.
 - If a reliable rate is unavailable or stale, show the original balance and explain that conversion is temporarily unavailable; do not invent or silently reuse a rate.
 
 **Stage B — separate multi-currency wallets**
