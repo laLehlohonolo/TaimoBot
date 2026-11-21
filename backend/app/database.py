@@ -373,6 +373,24 @@ def ensure_market_observation_schema(connection):
         ON market_observations(symbol, timeframe, observed_at DESC)
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_backfill_checkpoints (
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            next_end_epoch INTEGER,
+            status TEXT NOT NULL CHECK (status IN (
+                'NOT_STARTED', 'RUNNING', 'COMPLETE', 'GAP_REVIEW', 'FAILED'
+            )),
+            earliest_observed_at TEXT,
+            latest_observed_at TEXT,
+            batches_completed INTEGER NOT NULL DEFAULT 0 CHECK (batches_completed >= 0),
+            last_error TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, timeframe)
+        )
+        """
+    )
 
 def init_db():
     """Create tables and safely migrate existing paper-trading data."""
