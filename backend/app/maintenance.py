@@ -2315,6 +2315,21 @@ def inspect_restore_lock() -> dict:
             or not isinstance(created_at, str)
         ):
             raise ValueError("invalid restore marker metadata")
+        offset_match = re.search(
+            r"([+-])(\\d{2}):(\\d{2})(?::(\\d{2})(?:\\.(\\d{1,6}))?)?$",
+            created_at,
+        )
+        if created_at.endswith("Z"):
+            pass
+        elif offset_match is None or (
+            int(offset_match.group(2)) > 23
+            or int(offset_match.group(3)) > 59
+            or (
+                offset_match.group(4) is not None
+                and int(offset_match.group(4)) > 59
+            )
+        ):
+            raise ValueError("restore lock timestamp has an invalid timezone offset")
         parsed_created_at = datetime.fromisoformat(created_at)
         if parsed_created_at.tzinfo is None or parsed_created_at.utcoffset() is None:
             raise ValueError("restore lock timestamp must include a timezone offset")
