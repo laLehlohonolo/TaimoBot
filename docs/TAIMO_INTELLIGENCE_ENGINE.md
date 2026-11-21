@@ -81,3 +81,63 @@ The daily cycle runs in the IANA timezone `Africa/Johannesburg`, with a single d
 The repository currently has validated market-observation normalization/storage, quality diagnostics, a public read-only Deriv symbol discovery/candle client, and a SAST 23:00–00:00 maintenance-window predicate. The Deriv client currently requests up to 500 latest candles per request; it does not yet implement earliest-available historical backfill, a durable per-instrument backfill cursor, or a complete scheduled intelligence/research/learning cycle.
 
 This document records the required target behaviour. It does not claim that the full engine or scheduler is already implemented, nor that historical data has been downloaded. Implementation must be delivered in tested, incremental changes with the safety boundaries above preserved.
+
+## Administrator-only intelligence office and controlled improvements
+
+Taimo Intelligence must have two deliberately separate information surfaces.
+
+### Private administrator intelligence office
+
+Only explicitly provisioned administrator roles with MFA and server-side authorization may access the full intelligence and engineering record. This is an internal command centre, not a participant dashboard. It must include:
+
+- A unified feed of market research, source updates, historical-data coverage, data-quality warnings, model observations, strategy evaluations, rejected hypotheses, and daily-cycle completion.
+- A layer-by-layer health view for Market, Analysis, Strategy, Execution, Risk, Learning, and Legacy, including service status, version, dependencies, freshness, error rates, and recent changes.
+- Security and operational alerts: suspicious access, authorization failures, unusual API activity, dependency vulnerabilities, malware/antivirus detections where supported by actual security tooling, integrity failures, attempted policy bypasses, scheduler failures, and resource/availability incidents. Do not claim antivirus or threat detection exists unless a scanner/monitor is integrated and reporting verified results.
+- Strategy and model comparison: approved baseline versus candidate, test window, sample size, market regimes, net-of-cost results, drawdown, risk-adjusted measures, rejection reasons, uncertainty, and rollback target.
+- Participant-level and aggregate operational analytics, with privacy-scoped access and a complete audit trail for cross-participant inspection.
+- Time filters for daily, weekly, monthly, yearly and custom periods; segmentation by individual participant, Standard/Premium tier, instrument, strategy version, and cohort where sample size/privacy permits.
+- Distinct ledgers and clearly labelled units: paper-trading balances/P&L, realised paper profit-taking, unrealised paper P&L, fees/cost assumptions, and—only if legally launched—real-money deposits, withdrawals, fees and settled balances. Never add virtual paper amounts to real money or combine currencies without a disclosed, timestamped conversion method.
+- Historical charts and downloadable reports with source, scope, timezone, currency, calculation definition and generated-at timestamp.
+
+The AI may explain findings and propose changes, but it must not grant itself administrator privileges, hide adverse results, rewrite audit history, approve its own proposals, deploy code, change execution permissions, or move funds.
+
+### Participant-facing information boundary
+
+Participants receive only information needed to understand and safely use their own account:
+
+- Their own account status, permitted features, paper-trading balance and trade history.
+- A concise, factual explanation of why a trade was entered or rejected, without exposing private strategy parameters, source code, other participants' records, internal model reasoning, or exploitable security details.
+- Their own realised/unrealised paper results, with explicit virtual/non-withdrawable labels and clear cost assumptions.
+- Relevant market-calendar notices and risk warnings, such as an upcoming CPI release, with event time in the participant's selected/local display timezone and a source timestamp. Avoid implying that an event guarantees a price move.
+- Platform maintenance, service status, and approved participant announcements.
+- General financial-literacy material that is educational, non-personalised where appropriate, and never promises returns or directs a participant to risk money they cannot afford to lose.
+
+A participant notification feed must be account-scoped. It must never expose internal intelligence reports, model upgrades, experimental strategies, security investigations, administrator notes, other users' data, or product keys.
+
+### Admin-controlled "Approve and Update" release workflow
+
+The administrator must have a review queue for intelligence-generated improvement proposals. Each proposal includes its problem statement, evidence/source links, affected layers and files, expected benefit, risk assessment, test results, sample size, limitations, compatibility impact, migration/rollback plan, and proposed version.
+
+The workflow is:
+
+1. Intelligence creates a versioned proposal; it cannot change production code or approved model settings.
+2. Automated checks run in an isolated environment: unit/integration/security tests, reproducible historical walk-forward evaluation, leakage checks, paper/shadow comparison, and regression checks against the current approved baseline.
+3. The administrator reviews the evidence and chooses APPROVE FOR STAGING, REJECT, or REQUEST REVISION. Approval requires MFA/step-up confirmation and a recorded reason.
+4. Approval authorises a controlled staging/release candidate, not an unconditional production deployment. CI, security checks, migration checks, readiness checks and paper/shadow gates must still pass.
+5. A separate explicit production-release confirmation is required after staging evidence is available. High-impact changes (Risk, Execution, authentication, money/ledger, permissions, or security controls) require enhanced review and must never be self-approved by the proposing AI.
+6. Release is versioned, observable, reversible and canary/gradual where feasible. Automatic rollback triggers must be defined for failed health checks, degraded paper performance, data integrity issues or safety regressions.
+7. Record proposer, approver, code/model/data versions, test evidence, release actor, timestamps, affected components, outcome and rollback reference in an append-only audit record.
+
+The button label may read "Approve and Update", but its confirmation screen must state exactly what will change and whether the action is staging approval or production release. It must never mean "skip tests and immediately rewrite live code." The AI must not edit its own release controls or the 1% risk ceiling.
+
+### Daily reporting and operational definitions
+
+The daily intelligence report must separate:
+- New information collected and its verified source/freshness.
+- Trades taken, trades rejected, and the counterfactual evaluation of rejected opportunities where reliable data exists.
+- Profits taken and exits, measured net of costs where available.
+- Losses, drawdown, and preventability analysis without implying all losses can be eliminated.
+- Strategy/model candidates accepted, rejected, inconclusive or awaiting approval.
+- Data gaps, outages, security alerts, unresolved risks and work deferred to the next cycle.
+
+Every metric must define its population, time basis, currency, realised/unrealised status, and whether it is demo/paper or real money. Do not present win rate alone as proof of profitability. No AI message may promise that participants will make money or that losses will never occur.
