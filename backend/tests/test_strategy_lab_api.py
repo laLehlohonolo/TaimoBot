@@ -187,6 +187,14 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         self.assertIsNone(reports["replay"]["coverage_percent"])
         self.assertFalse(body["provenance_verified"])
         self.assertFalse(body["eligible_for_backtest"])
+        self.assertEqual(body["session_calendar_status"], "NOT_CONFIGURED")
+        self.assertIsNone(body["session_calendar_id"])
+        self.assertFalse(body["session_adjusted_coverage_available"])
+        self.assertEqual(
+            body["session_calendar_policy"],
+            "INSTRUMENT_SPECIFIC_CALENDAR_REQUIRED",
+        )
+        self.assertFalse(body["session_calendar_applied"])
         self.assertTrue(body["read_only"])
         self.assertFalse(body["signals_generated"])
         self.assertFalse(body["execution_triggered"])
