@@ -107,6 +107,37 @@ class DerivPublicClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "unexpected response"):
                 await client.fetch_candles("1HZ100V", "M1", 1)
 
+    async def test_collect_candles_finishes_without_database_connection(self):
+        contexts = [
+            FakeSocketContext(FakeSocket({
+                "msg_type": "active_symbols", "req_id": 1,
+                "active_symbols": [self.active_record()],
+            })),
+            FakeSocketContext(FakeSocket(self.history_response())),
+        ]
+        with patch("app.deriv_public_client.websockets.connect", side_effect=contexts):
+            candles = await DerivPublicMarketDataClient().collect_candles("1HZ100V", "M1", 2)
+        self.assertEqual(len(candles), 2)
+        self.assertTrue(all(candle["execution_eligible"] is False for candle in candles))
+
+    async def test_persist_candles_is_separate_and_atomic(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        ensure_market_observation_schema(connection)
+        contexts = [
+            FakeSocketContext(FakeSocket({
+                "msg_type": "active_symbols", "req_id": 1,
+                "active_symbols": [self.active_record()],
+            })),
+            FakeSocketContext(FakeSocket(self.history_response())),
+        ]
+        with patch("app.deriv_public_client.websockets.connect", side_effect=contexts):
+            candles = await DerivPublicMarketDataClient().collect_candles("1HZ100V", "M1", 2)
+        results = DerivPublicMarketDataClient().persist_candles(connection, candles)
+        self.assertEqual(sum(1 for item in results if item["inserted"]), 2)
+        self.assertEqual(len(list_market_observations(connection, symbol="1HZ100V", timeframe="M1")), 2)
+        connection.close()
+
     async def test_discover_and_store_is_idempotent_and_never_execution_eligible(self):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
