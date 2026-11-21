@@ -2315,6 +2315,9 @@ def inspect_restore_lock() -> dict:
             or not isinstance(created_at, str)
         ):
             raise ValueError("invalid restore marker metadata")
+        parsed_created_at = datetime.fromisoformat(created_at)
+        if parsed_created_at.tzinfo is None or parsed_created_at.utcoffset() is None:
+            raise ValueError("restore lock timestamp must include a timezone offset")
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
         os.close(marker_fd)
         return {"status": "RESTORE_LOCK_METADATA_UNREADABLE", "marker_present": True}
