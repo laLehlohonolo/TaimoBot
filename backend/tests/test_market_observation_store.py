@@ -160,6 +160,24 @@ class MarketObservationStoreTests(unittest.TestCase):
         self.assertEqual(result["future_by_seconds"], 900)
         self.assertFalse(result["execution_eligible"])
 
+    def test_quality_diagnostics_flag_candles_off_timeframe_boundary(self):
+        from datetime import datetime, timezone
+        from app.market_observation_store import inspect_market_observation_quality
+
+        record = self.valid_record()
+        record["source"] = "deriv"
+        record["timestamp"] = "2026-11-21T12:00:30+00:00"
+        save_market_observation(self.connection, record)
+        result = inspect_market_observation_quality(
+            self.connection, "1HZ100V", "M1",
+            now=datetime(2026, 11, 21, 12, 0, 40, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["status"], "INVALID_CADENCE")
+        self.assertTrue(result["stale"])
+        self.assertEqual(result["unaligned_observation_count"], 1)
+        self.assertEqual(result["unaligned_timestamps"], ["2026-11-21T12:00:30+00:00"])
+        self.assertFalse(result["execution_eligible"])
+
     def test_quality_diagnostics_require_timezone_aware_reference_time(self):
         from datetime import datetime
         from app.market_observation_store import inspect_market_observation_quality
