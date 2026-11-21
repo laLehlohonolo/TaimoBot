@@ -1646,3 +1646,118 @@ class PaperTradingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    # Take-profit validation matrix: invalid targets must never reserve risk
+    # or create paper positions.
+    def open_trade_with_target(self, order_id, side, take_profit):
+        return open_paper_trade(
+            account_id="TEST-001",
+            client_order_id=order_id,
+            side=side,
+            entry_price=4000,
+            stop_loss=3990 if side == "BUY" else 4010,
+            take_profit=take_profit,
+        )
+
+    def test_buy_take_profit_above_entry_is_accepted(self):
+        trade = self.open_trade_with_target("TP-BUY-VALID", "BUY", 4010)
+        self.assertEqual(trade["status"], "OPEN")
+
+    def test_sell_take_profit_below_entry_is_accepted(self):
+        trade = self.open_trade_with_target("TP-SELL-VALID", "SELL", 3990)
+        self.assertEqual(trade["status"], "OPEN")
+
+    def test_buy_take_profit_equal_to_entry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-BUY-EQUAL", "BUY", 4000)
+
+    def test_buy_take_profit_below_entry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-BUY-BELOW", "BUY", 3999.99)
+
+    def test_sell_take_profit_equal_to_entry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-SELL-EQUAL", "SELL", 4000)
+
+    def test_sell_take_profit_above_entry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-SELL-ABOVE", "SELL", 4000.01)
+
+    def test_boolean_true_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-TRUE", "BUY", True)
+
+    def test_boolean_false_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-FALSE", "BUY", False)
+
+    def test_zero_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-ZERO", "BUY", 0)
+
+    def test_negative_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-NEGATIVE", "BUY", -1)
+
+    def test_nan_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-NAN", "BUY", float("nan"))
+
+    def test_positive_infinity_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-POS-INF", "BUY", float("inf"))
+
+    def test_negative_infinity_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-NEG-INF", "BUY", -float("inf"))
+
+    def test_non_numeric_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-TEXT", "BUY", "not-a-price")
+
+    def test_empty_string_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-EMPTY", "BUY", "")
+
+    def test_list_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-LIST", "BUY", [4010])
+
+    def test_dictionary_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-DICT", "BUY", {"price": 4010})
+
+    def test_overflowing_integer_take_profit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-OVERFLOW", "BUY", 10 ** 10000)
+
+    def test_missing_take_profit_remains_optional(self):
+        trade = self.open_trade_with_target("TP-OPTIONAL-NONE", "BUY", None)
+        self.assertEqual(trade["status"], "OPEN")
+        self.assertIsNone(trade["take_profit"])
+
+    def test_rejected_take_profit_does_not_create_trade_or_reserve_risk(self):
+        with database.get_connection() as connection:
+            before_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM trades WHERE account_id = 'TEST-001'"
+            ).fetchone()["n"]
+            before_risk = connection.execute(
+                "SELECT COALESCE(SUM(risk_amount), 0) AS n FROM trades "
+                "WHERE account_id = 'TEST-001' AND status = 'OPEN'"
+            ).fetchone()["n"]
+
+        with self.assertRaises(ValueError):
+            self.open_trade_with_target("TP-NO-SIDE-EFFECT", "BUY", 3990)
+
+        with database.get_connection() as connection:
+            after_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM trades WHERE account_id = 'TEST-001'"
+            ).fetchone()["n"]
+            after_risk = connection.execute(
+                "SELECT COALESCE(SUM(risk_amount), 0) AS n FROM trades "
+                "WHERE account_id = 'TEST-001' AND status = 'OPEN'"
+            ).fetchone()["n"]
+
+        self.assertEqual(after_count, before_count)
+        self.assertEqual(after_risk, before_risk)
