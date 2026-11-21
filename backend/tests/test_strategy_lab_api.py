@@ -150,6 +150,14 @@ class StrategyLabSchemaTests(unittest.TestCase):
         import uuid
         with database.get_connection() as connection:
             candidate_id = "candidate_" + uuid.uuid4().hex
+            # Use a valid actor row so these failures prove the immutability triggers,
+            # rather than a foreign-key constraint.
+            connection.execute(
+                """
+                INSERT INTO users (user_id, email, password_hash)
+                VALUES ('system-test-admin', 'system-test-admin@taimobot.local', 'test-hash')
+                """
+            )
             connection.execute(
                 """
                 INSERT INTO brain_strategy_candidates (
@@ -164,14 +172,6 @@ class StrategyLabSchemaTests(unittest.TestCase):
                     'Risk notes preserve all existing hard limits.', 'RESEARCH', ?)
                 """,
                 (candidate_id, "system-test-admin"),
-            )
-            # Use a valid actor row so these failures prove the immutability triggers,
-            # rather than a foreign-key constraint.
-            connection.execute(
-                """
-                INSERT INTO users (user_id, email, password_hash)
-                VALUES ('system-test-admin', 'system-test-admin@taimobot.local', 'test-hash')
-                """
             )
             connection.execute(
                 """
