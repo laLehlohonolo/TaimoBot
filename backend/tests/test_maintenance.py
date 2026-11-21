@@ -9546,3 +9546,39 @@ for _scenario in _RESTORE_GUARD_DESCRIPTOR_RACE_CASES:
         "test_restore_guard_descriptor_race_" + _scenario,
         _make_restore_guard_descriptor_race_test(_scenario),
     )
+
+
+
+def _make_restore_lock_valid_timestamp_test(value):
+    def test(self):
+        lock_path = maintenance_module.restore_lock_path()
+        marker = {
+            "plan_id": "a" * 32,
+            "pid": os.getpid(),
+            "created_at": value,
+            "lock_token": "b" * 32,
+        }
+        expected_bytes = json.dumps(marker, sort_keys=True).encode("utf-8")
+        lock_path.write_bytes(expected_bytes)
+
+        result = inspect_restore_lock()
+
+        self.assertEqual(
+            result["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW"
+        )
+        self.assertTrue(result["marker_present"])
+        self.assertEqual(result["created_at"], value)
+        self.assertFalse(result["automatic_recovery_performed"])
+        self.assertFalse(result["marker_removed"])
+        self.assertTrue(lock_path.exists())
+        self.assertEqual(lock_path.read_bytes(), expected_bytes)
+    return test
+
+
+_RESTORE_LOCK_VALID_TIMESTAMP_CASES = [["utc_z","2026-11-21T10:00:00Z"],["utc_positive_zero","2026-11-21T10:00:00+00:00"],["utc_negative_zero","2026-11-21T10:00:00-00:00"],["positive_two_hours","2026-11-21T10:00:00+02:00"],["negative_five_hours","2026-11-21T10:00:00-05:00"],["positive_fourteen_hours","2026-11-21T10:00:00+14:00"],["negative_fourteen_hours","2026-11-21T10:00:00-14:00"],["positive_max_minute_offset","2026-11-21T10:00:00+23:59"],["negative_max_minute_offset","2026-11-21T10:00:00-23:59"],["positive_offset_seconds","2026-11-21T10:00:00+23:59:59"],["negative_offset_seconds","2026-11-21T10:00:00-23:59:59"],["fraction_one_digit","2026-11-21T10:00:00.1+02:00"],["fraction_three_digits","2026-11-21T10:00:00.123+02:00"],["fraction_six_digits","2026-11-21T10:00:00.123456+02:00"],["leap_day_valid","2024-02-29T10:00:00+02:00"],["leap_day_utc","2024-02-29T23:59:59Z"],["month_end","2026-04-30T23:59:59.999999-03:30"],["minimum_year","0001-01-01T00:00:00Z"],["maximum_year","9999-12-31T23:59:59Z"],["fractional_offset_seconds","2026-11-21T10:00:00.123456+05:30:15.5"]]
+for _scenario, _value in _RESTORE_LOCK_VALID_TIMESTAMP_CASES:
+    setattr(
+        DailyMaintenanceTests,
+        "test_restore_lock_valid_timestamp_" + _scenario,
+        _make_restore_lock_valid_timestamp_test(_value),
+    )
