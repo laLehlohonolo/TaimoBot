@@ -626,6 +626,104 @@ class StrategyLabSchemaTests(unittest.TestCase):
                 )
 
 
+    def test_backfill_review_retry_run_and_persistence_complete_as_one_admin_workflow(self):
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO market_backfill_checkpoints (
+                    symbol, timeframe, next_end_epoch, status,
+                    batches_completed, last_error
+                ) VALUES ('1HZ100V', 'M1', 3600, 'GAP_REVIEW', 2, 'Previous gap reviewed.')
+                """
+            )
+
+        review = self.admin_client.post(
+            "/admin/market-backfills/1HZ100V/M1/review",
+            json={
+                "decision": "RETRY_SAME_RANGE",
+                "confirm_retry": True,
+                "rationale": "Reviewed source gap; retry this exact historical range.",
+            },
+        )
+        self.assertEqual(review.status_code, 200)
+        self.assertEqual(review.json()["next_end_epoch"], 3600)
+        self.assertFalse(review.json()["cursor_advanced"])
+
+        class DeterministicDerivClient:
+            async def collect_candle_range(
+                self, symbol, timeframe, start_epoch, end_epoch, max_candles
+            ):
+                self.assertions = (symbol, timeframe, start_epoch, end_epoch, max_candles)
+                return [
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": datetime.fromtimestamp(
+                            epoch, timezone.utc
+                        ).isoformat(),
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.0,
+                        "close": 100.5,
+                        "volume": 0,
+                        "source": "deriv",
+                    }
+                    for epoch in (3480, 3540, 3600)
+                ]
+
+        deterministic_client = DeterministicDerivClient()
+        with patch(
+            "app.main.DerivPublicMarketDataClient",
+            return_value=deterministic_client,
+        ):
+            run = self.admin_client.post(
+                "/admin/market-backfills/1HZ100V/M1/run",
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+
+        self.assertEqual(run.status_code, 200, run.text)
+        body = run.json()
+        self.assertEqual(body["inserted_count"], 3)
+        self.assertEqual(body["batches_completed"], 3)
+        self.assertEqual(body["next_end_epoch"], 3420)
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["backtest_eligible"])
+        self.assertFalse(body["signals_generated"])
+        self.assertFalse(body["execution_triggered"])
+        self.assertEqual(
+            deterministic_client.assertions,
+            ("1HZ100V", "M1", 3480, 3600, 3),
+        )
+
+        with database.get_connection() as connection:
+            checkpoint = connection.execute(
+                """
+                SELECT next_end_epoch, status, batches_completed
+                FROM market_backfill_checkpoints
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()
+            observations = connection.execute(
+                """
+                SELECT COUNT(*) AS count FROM market_observations
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()["count"]
+            reviews = connection.execute(
+                """
+                SELECT COUNT(*) AS count FROM market_backfill_review_audit
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()["count"]
+        self.assertEqual(checkpoint["status"], "RUNNING")
+        self.assertEqual(checkpoint["next_end_epoch"], 3420)
+        self.assertEqual(checkpoint["batches_completed"], 3)
+        self.assertEqual(observations, 3)
+        self.assertEqual(reviews, 1)
+
     def test_admin_backfill_run_is_confirmed_bounded_and_read_only(self):
         from unittest.mock import AsyncMock, patch
 
