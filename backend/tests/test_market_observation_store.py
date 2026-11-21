@@ -423,5 +423,25 @@ class MarketObservationStoreTests(unittest.TestCase):
                 self.connection, "1HZ100V", "M2"
             )
 
+    def test_coverage_explicitly_reports_unconfigured_instrument_calendar(self):
+        from app.market_observation_store import inspect_market_observation_coverage
+
+        for symbol in ("1HZ100V", "XAUUSD"):
+            with self.subTest(symbol=symbol):
+                report = inspect_market_observation_coverage(
+                    self.connection, symbol, "M1"
+                )
+                self.assertEqual(report["session_calendar_status"], "NOT_CONFIGURED")
+                self.assertIsNone(report["session_calendar_id"])
+                self.assertFalse(report["session_adjusted_coverage_available"])
+                self.assertEqual(
+                    report["session_calendar_policy"],
+                    "INSTRUMENT_SPECIFIC_CALENDAR_REQUIRED",
+                )
+                self.assertFalse(report["session_calendar_applied"])
+                self.assertFalse(report["eligible_for_backtest"])
+                self.assertFalse(report["execution_triggered"])
+
+
 if __name__ == "__main__":
     unittest.main()
