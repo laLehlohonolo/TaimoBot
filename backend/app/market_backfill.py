@@ -189,6 +189,7 @@ async def run_backfill_batch_with_connection_factory(
             connection, symbol, timeframe,
             batch_size=batch_size, now_epoch=now_epoch,
         )
+        connection.commit()
     finally:
         connection.close()
 
@@ -212,7 +213,9 @@ async def run_backfill_batch_with_connection_factory(
     )
     connection = connection_factory()
     try:
-        return persist_backfill_batch(connection, request, candles)
+        result = persist_backfill_batch(connection, request, candles)
+        connection.commit()
+        return result
     finally:
         connection.close()
 
