@@ -26,6 +26,7 @@ from .maintenance import (
 from .cors import configure_cors
 from .risk import (
     calculate_position_size,
+    get_risk_profile,
     RiskError,
     MAX_RISK_PERCENT
 )
