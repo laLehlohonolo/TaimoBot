@@ -214,6 +214,8 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
         self.assertAlmostEqual(result["monetary_risk"], 5.55)
         self.assertEqual(result["account_currency"], "ZAR")
         self.assertEqual(result["mode"], "calculation_only")
+        self.assertTrue(result["calculated"])
+        self.assertNotIn("approved", result)
 
     def test_monetary_risk_rejects_missing_tick_value_basis(self):
         from app.instruments import calculate_monetary_stop_risk
