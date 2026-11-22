@@ -246,7 +246,7 @@ const sequentialCopyChecks = [
     const createdFollower = await request("/accounts", {
       method: "POST",
       token,
-      body: { account_id: followerAccountId, starting_balance: 5000 }
+      body: { account_id: followerAccountId, starting_balance: 5000, settlement_currency: "ZAR" }
     });
     assert(createdFollower.response.status === 200, "Follower paper account creation failed: " + JSON.stringify(createdFollower.payload));
   }],
