@@ -36,6 +36,12 @@ Close and preview API fields default to zero for backward compatibility. There i
 
 The paper engine's XAUUSD quantity remains abstract paper units, not broker lots. No verified broker contract sizing, tick-value conversion, account-currency conversion, spread, commission, swap, or slippage model is enabled.
 
+### 6. Risk-profile thresholds are duplicated in the frontend preview
+
+The backend assigns the authoritative risk profile from original account funding in `backend/app/risk.py`, and `open_paper_trade` deliberately ignores the participant-supplied `risk_percent` before recalculating the assigned allowance inside the transaction. The React preview independently repeats the current funding thresholds (below 5,000; below 25,000; otherwise PREMIUM) to choose a preview percentage before calling `/risk/preview`. Those values currently match the backend, but the duplication can drift and produce a preview that differs from the order the backend will accept.
+
+Keep the backend as the sole authority. Prefer returning the assigned profile/preview allowance from an authenticated account-scoped endpoint, or otherwise expose a single backend-owned contract consumed by the frontend. Add contract tests at the threshold boundaries (4,999.99/5,000 and 24,999.99/25,000) and a frontend/API integration test proving preview and accepted-order risk agree. The existing order transaction and combined 1% backend limit remain mandatory regardless of preview output.
+
 ### 5. Frontend currency labels are not backed by account currency data
 
 The current React workspace renders account balances, open-risk amounts, realized P&L, trade risk, and the new-account starting-balance field with an `R`/ZAR label. However, the account creation request sends only `account_id` and a numeric `starting_balance`; the backend `AccountRequest`, `create_paper_account`, `paper_accounts` schema, account list response, account detail response, and risk response do not carry an account currency. The frontend's participant currency preference is a separate, permanent display preference and does not establish the ledger denomination.
