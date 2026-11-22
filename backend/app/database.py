@@ -271,6 +271,19 @@ def migrate_account_settlement_currency(connection):
             "ALTER TABLE paper_accounts ADD COLUMN settlement_currency TEXT"
         )
 
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_paper_account_settlement_currency_immutable
+        BEFORE UPDATE OF settlement_currency ON paper_accounts
+        FOR EACH ROW
+        WHEN OLD.settlement_currency IS NOT NULL
+         AND NEW.settlement_currency IS NOT OLD.settlement_currency
+        BEGIN
+            SELECT RAISE(ABORT, 'Account settlement currency is immutable.');
+        END
+        """
+    )
+
 
 def migrate_account_risk_profiles(connection):
     """Add and assign persistent risk profiles to existing accounts."""
