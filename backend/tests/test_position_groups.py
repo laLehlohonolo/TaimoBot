@@ -36,9 +36,12 @@ class PositionGroupTests(unittest.TestCase):
         deactivate_emergency_stop()
         user = register_user("position-groups-tests@taimobot.local", "TestPassphrase-2026-Secure!")
         self.user_id = user["user_id"]
-        # This test class includes a cross-account group-isolation test and
-        # copy-trading cases, so its isolated participant needs two-account
-        # entitlement. Production account limits remain enforced unchanged.
+        session = create_session(self.user_id)
+        create_paper_account("GROUP-001", 10000, owner_user_id=self.user_id)
+
+        # Account creation initializes a new participant's entitlement row
+        # as STANDARD. Promote this isolated test fixture afterwards because
+        # this class deliberately exercises multiple owned accounts.
         with database.get_connection() as connection:
             connection.execute(
                 """
@@ -48,8 +51,6 @@ class PositionGroupTests(unittest.TestCase):
                 """,
                 (self.user_id,),
             )
-        session = create_session(self.user_id)
-        create_paper_account("GROUP-001", 10000, owner_user_id=self.user_id)
 
         self.client = TestClient(app)
         self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
