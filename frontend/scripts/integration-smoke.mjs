@@ -65,7 +65,7 @@ assert(anonymous.response.status === 401, "Private account list was not protecte
 console.log("PASS: Anonymous account access is rejected.");
 
 const unique = Date.now().toString(36);
-const email = "integration-" + unique + "@taimobot.test";
+const email = "integration@taimobot.test";
 const password = "TaimoBot-Integration-2026";
 
 const registration = await request("/auth/register", {
@@ -86,6 +86,23 @@ console.log("PASS: Login returns a bearer session.");
 const me = await request("/auth/me", { token });
 assert(me.response.status === 200 && me.payload.email === email, "Authenticated identity check failed.");
 console.log("PASS: Bearer token authenticates the current user.");
+
+const testEntitlement = await request(
+  "/auth/admin/participants/" + encodeURIComponent(me.payload.user_id) + "/subscription",
+  {
+    method: "PUT",
+    token,
+    body: {
+      tier: "ADVANCED",
+      reason: "Isolated CI integration fixture for source and follower paper accounts"
+    }
+  }
+);
+assert(
+  testEntitlement.response.status === 200 && testEntitlement.payload.new_tier === "ADVANCED",
+  "CI admin could not assign the Advanced test entitlement: " + JSON.stringify(testEntitlement.payload)
+);
+console.log("PASS: Isolated CI identity receives the explicitly authorised Advanced test entitlement.");
 
 const strategyLibrary = await request("/strategies", { token });
 assert(strategyLibrary.response.status === 200, "Strategy knowledge library could not be loaded.");
