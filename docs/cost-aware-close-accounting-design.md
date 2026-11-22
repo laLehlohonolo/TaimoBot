@@ -36,9 +36,9 @@ Close and preview API fields default to zero for backward compatibility. There i
 
 The paper engine's XAUUSD quantity remains abstract paper units, not broker lots. No verified broker contract sizing, tick-value conversion, account-currency conversion, spread, commission, swap, or slippage model is enabled.
 
-### 6. Risk-profile thresholds are duplicated in the frontend preview
+### 4. Risk-profile thresholds are duplicated in the frontend preview
 
-The backend assigns the authoritative risk profile from original account funding in `backend/app/risk.py`, and `open_paper_trade` deliberately ignores the participant-supplied `risk_percent` before recalculating the assigned allowance inside the transaction. The React preview independently repeats the current funding thresholds (below 5,000; below 25,000; otherwise PREMIUM) to choose a preview percentage before calling `/risk/preview`. Those values currently match the backend, but the duplication can drift and produce a preview that differs from the order the backend will accept.
+The backend assigns the authoritative risk profile from original account funding in `backend/app/risk.py`, and `open_paper_trade` deliberately ignores the participant-supplied `risk_percent` before recalculating the assigned allowance inside the transaction. The React preview independently repeats the current funding thresholds (below 5,000; below 25,000; otherwise PREMIUM) to choose a preview percentage before calling `/risk/preview`. Those values currently match the backend, but the duplication can drift and produce a preview that differs from the order the backend will accept. The current `/risk/preview` route is also unauthenticated and accepts caller-supplied balance and risk percentage; treat it only as a generic calculator, not an account-authoritative allowance or trusted account disclosure.
 
 Keep the backend as the sole authority. Prefer returning the assigned profile/preview allowance from an authenticated account-scoped endpoint, or otherwise expose a single backend-owned contract consumed by the frontend. Add contract tests at the threshold boundaries (4,999.99/5,000 and 24,999.99/25,000) and a frontend/API integration test proving preview and accepted-order risk agree. The existing order transaction and combined 1% backend limit remain mandatory regardless of preview output.
 
@@ -48,7 +48,7 @@ The current React workspace renders account balances, open-risk amounts, realize
 
 This creates a contract mismatch: the UI presents amounts as ZAR while the persisted account record cannot prove that denomination. Do not solve this by silently treating the display preference as settlement currency or by adding an unreviewed conversion. Before multi-currency preferences can affect account displays, persist an immutable settlement currency at account creation, expose it consistently in account/detail/risk APIs, and define a reviewed backfill policy for existing accounts. Until then, currency labels must not imply a backend-verified denomination. Add frontend/API contract tests proving the displayed denomination matches the account's persisted settlement currency.
 
-### 4. Paper accounts do not have an explicit settlement currency
+### 6. Paper accounts do not have an explicit settlement currency
 
 The `paper_accounts` schema stores starting balance and current balance but no account-currency field. `create_paper_account` accepts a numeric starting balance without a currency and close paths add realized P&L directly to that balance. The `/accounts` API also returns balances without a currency denomination. The `/participant/currency-preference` API is explicitly a write-once display preference backed by `participant_display_currency_preferences`; it is not an account settlement-currency ledger and must not be used to infer or convert account balances.
 
