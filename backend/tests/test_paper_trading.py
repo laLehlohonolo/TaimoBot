@@ -524,6 +524,24 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(result["position_size"], 5)
         self.assertEqual(result["projected_total_open_risk"], 50)
 
+    def test_position_size_rounding_never_exceeds_reserved_risk(self):
+        result = calculate_position_size(
+            account_balance=10000,
+            entry_price=4000,
+            stop_loss=4873.2406057255337,
+            risk_percent=0.5,
+            side="BUY",
+        )
+
+        actual_price_distance_risk = (
+            result["position_size"] * result["price_distance"]
+        )
+        self.assertLessEqual(
+            actual_price_distance_risk,
+            result["risk_amount"],
+        )
+        self.assertGreater(result["position_size"], 0)
+
     def test_closing_trade_releases_risk_budget(self):
         first = self.open_trade("ORDER-001")
         self.open_trade("ORDER-002")
