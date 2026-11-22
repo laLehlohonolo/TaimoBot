@@ -397,6 +397,40 @@ class PaperTradingTests(unittest.TestCase):
         with self.assertRaises(RiskError):
             self.open_trade("ORDER-003", 0.1)
 
+    def test_concurrent_orders_cannot_exceed_combined_one_percent_risk(self):
+        barrier = Barrier(2)
+
+        def submit(order_id):
+            barrier.wait(timeout=10)
+            try:
+                trade = self.open_trade(order_id, 0.5)
+                return ("accepted", trade["risk_amount"])
+            except RiskError:
+                return ("rejected", 0)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(
+                submit,
+                ("ORDER-CONCURRENT-RISK-A", "ORDER-CONCURRENT-RISK-B"),
+            ))
+
+        self.assertEqual(
+            sorted(status for status, _ in outcomes),
+            ["accepted", "rejected"],
+        )
+        with database.get_connection() as connection:
+            ledger = connection.execute(
+                """
+                SELECT COUNT(*) AS open_count,
+                       COALESCE(SUM(risk_amount), 0) AS open_risk
+                FROM trades
+                WHERE account_id = 'TEST-001' AND status = 'OPEN'
+                """
+            ).fetchone()
+
+        self.assertEqual(ledger["open_count"], 1)
+        self.assertLessEqual(ledger["open_risk"], 100)
+
     def test_starter_can_open_four_positions_within_limit(self):
         create_paper_account("STARTER-002", 4000)
 
