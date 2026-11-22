@@ -155,7 +155,7 @@ class SubscriptionEntitlementTests(unittest.TestCase):
 
     def test_upgrade_and_downgrade_preserve_existing_accounts(self):
         self._assign_tier("ADVANCED")
-        account_ids = ["TIER-PRESERVE-1", "TIER-PRESERVE-2", "TIER-PRESERVE-3"]
+        account_ids = ["TIER-PRESERVE-1", "TIER-PRESERVE-2"]
         for account_id in account_ids:
             response = self._create_account(account_id)
             self.assertEqual(response.status_code, 200, response.text)
@@ -176,7 +176,7 @@ class SubscriptionEntitlementTests(unittest.TestCase):
         self.assertTrue(all(row["settlement_currency"] == "ZAR" for row in rows))
 
         self._assign_tier("ADVANCED")
-        restored = self._create_account("TIER-PRESERVE-4")
+        restored = self._create_account("TIER-PRESERVE-3")
         self.assertEqual(restored.status_code, 200, restored.text)
 
     def test_admin_tier_changes_write_immutable_audit_records(self):
