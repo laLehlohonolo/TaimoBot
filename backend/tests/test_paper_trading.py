@@ -504,6 +504,20 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(history.status_code, 200)
         self.assertEqual(history.json()["settlement_currency"], "USD")
 
+        with self.assertRaises(sqlite3.IntegrityError):
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE paper_accounts SET settlement_currency = 'EUR' WHERE account_id = ?",
+                    ("CURRENCY-USD-001",),
+                )
+
+    def test_new_account_requires_explicit_settlement_currency(self):
+        response = self.client.post(
+            "/accounts",
+            json={"account_id": "CURRENCY-MISSING-001", "starting_balance": 2500},
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_new_account_rejects_unsupported_settlement_currency(self):
         response = self.client.post(
             "/accounts",
@@ -524,6 +538,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         result = response.json()
         self.assertEqual(result["risk_profile"], "STANDARD")
+        self.assertEqual(result["settlement_currency"], "ZAR")
         self.assertEqual(result["assigned_risk_percent"], 0.5)
         self.assertEqual(result["risk_amount"], 50)
         self.assertEqual(result["current_open_risk"], 50)
@@ -592,6 +607,7 @@ class PaperTradingTests(unittest.TestCase):
 
         self.assertEqual(result["account_id"], "TEST-001")
         self.assertEqual(result["account_balance"], 10000)
+        self.assertEqual(result["settlement_currency"], "ZAR")
         self.assertEqual(result["open_positions"], 2)
         self.assertEqual(result["current_open_risk"], 100)
         self.assertEqual(result["maximum_risk_percent"], 1.0)
