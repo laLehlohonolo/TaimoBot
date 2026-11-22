@@ -6737,8 +6737,13 @@ class DailyMaintenanceTests(unittest.TestCase):
 
     def _call_real_inventory_api(self, root, user=None):
         from fastapi.testclient import TestClient
-        from app.main import app
+        from app import main as main_module
         from app.auth_routes import current_user
+        app = main_module.app
+
+        async def no_maintenance_scheduler():
+            return None
+
         previous = dict(app.dependency_overrides)
         app.dependency_overrides[current_user] = lambda: user or {
             "user_id": "inventory-admin", "email": "ops@example.com"
@@ -6746,8 +6751,9 @@ class DailyMaintenanceTests(unittest.TestCase):
         try:
             with patch.dict(os.environ, {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
                 with patch.object(maintenance_module, "BACKUP_DIR", Path(root)):
-                    with TestClient(app) as client:
-                        return client.get("/maintenance/recovery-artifact-inventory")
+                    with patch.object(main_module, "maintenance_scheduler", new=no_maintenance_scheduler):
+                        with TestClient(app) as client:
+                            return client.get("/maintenance/recovery-artifact-inventory")
         finally:
             app.dependency_overrides.clear()
             app.dependency_overrides.update(previous)
