@@ -481,6 +481,68 @@ class PaperTradingTests(unittest.TestCase):
             second_account_trade["total_open_risk"], 50
         )
 
+    def test_account_risk_preview_uses_persisted_profile_and_open_risk(self):
+        self.open_trade("ORDER-PREVIEW-001")
+        response = self.client.post(
+            "/accounts/TEST-001/risk/preview",
+            json={"entry_price": 4000, "stop_loss": 3990, "side": "BUY"},
+        )
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["risk_profile"], "STANDARD")
+        self.assertEqual(result["assigned_risk_percent"], 0.5)
+        self.assertEqual(result["risk_amount"], 50)
+        self.assertEqual(result["current_open_risk"], 50)
+        self.assertEqual(result["projected_total_open_risk"], 100)
+        self.assertEqual(result["preview_authority"], "PERSISTED_ACCOUNT_STATE")
+
+    def test_account_risk_preview_uses_all_funding_threshold_boundaries(self):
+        cases = [
+            (4999.99, "STARTER", 0.25),
+            (5000, "STANDARD", 0.50),
+            (24999.99, "STANDARD", 0.50),
+            (25000, "PREMIUM", 1.00),
+        ]
+        for index, (funding, profile, risk_percent) in enumerate(cases):
+            account_id = f"PREVIEW-BOUNDARY-{index}"
+            create_paper_account(account_id, funding, owner_user_id=self.user_id)
+            response = self.client.post(
+                f"/accounts/{account_id}/risk/preview",
+                json={"entry_price": 4000, "stop_loss": 3990, "side": "BUY"},
+            )
+            with self.subTest(funding=funding):
+                self.assertEqual(response.status_code, 200)
+                result = response.json()
+                self.assertEqual(result["risk_profile"], profile)
+                self.assertEqual(result["assigned_risk_percent"], risk_percent)
+                self.assertAlmostEqual(result["risk_amount"], funding * risk_percent / 100)
+
+    def test_account_risk_preview_rejects_another_users_account(self):
+        other = register_user("other-risk-preview@taimobot.local", "OtherPassphrase-2026-Secure!")
+        create_paper_account("PRIVATE-PREVIEW", 10000, owner_user_id=other["user_id"])
+        response = self.client.post(
+            "/accounts/PRIVATE-PREVIEW/risk/preview",
+            json={"entry_price": 4000, "stop_loss": 3990, "side": "BUY"},
+        )
+        self.assertIn(response.status_code, (403, 404))
+
+    def test_account_risk_preview_rejects_invalid_stop_direction(self):
+        response = self.client.post(
+            "/accounts/TEST-001/risk/preview",
+            json={"entry_price": 4000, "stop_loss": 4010, "side": "BUY"},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_account_risk_preview_blocks_when_combined_risk_is_full(self):
+        self.open_trade("ORDER-PREVIEW-FULL-1")
+        self.open_trade("ORDER-PREVIEW-FULL-2")
+        response = self.client.post(
+            "/accounts/TEST-001/risk/preview",
+            json={"entry_price": 4000, "stop_loss": 3990, "side": "BUY"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("combined open account risk", response.json()["detail"])
+
     def test_account_risk_endpoint_reports_open_risk(self):
         self.open_trade("ORDER-API-001")
         self.open_trade("ORDER-API-002")
