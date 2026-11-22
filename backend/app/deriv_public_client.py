@@ -41,7 +41,16 @@ class DerivPublicMarketDataClient:
         loop = asyncio.get_running_loop()
         max_attempts = 3
         backoffs = (0.25, 0.5)
-        total_deadline = loop.time() + (self.timeout * max_attempts) + sum(backoffs)
+        # Bound WebSocket close-handshake cleanup after a cancelled attempt.
+        # asyncio.wait_for waits for cancellation cleanup, so this allowance
+        # must be included in the overall retry budget.
+        close_timeout = min(1.0, self.timeout)
+        total_deadline = (
+            loop.time()
+            + (self.timeout * max_attempts)
+            + (close_timeout * max_attempts)
+            + sum(backoffs)
+        )
         transient_errors = (
             TimeoutError,
             OSError,
@@ -73,7 +82,7 @@ class DerivPublicMarketDataClient:
         async with websockets.connect(
             DERIV_PUBLIC_WS_URL,
             open_timeout=self.timeout,
-            close_timeout=5,
+            close_timeout=min(1.0, self.timeout),
             ping_interval=20,
         ) as socket:
             await socket.send(json.dumps({**payload, "req_id": request_id}))
