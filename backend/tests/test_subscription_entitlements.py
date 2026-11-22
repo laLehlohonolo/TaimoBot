@@ -198,6 +198,22 @@ class SubscriptionEntitlementTests(unittest.TestCase):
         )
         self.assertEqual(group.status_code, 200, group.text)
         group_id = group.json()["group_id"]
+        trade = self.client.post(
+            "/trades",
+            headers=self.participant_headers,
+            json={
+                "account_id": "PRIVATE-ACCOUNT",
+                "client_order_id": "PRIVATE-OWNER-ORDER",
+                "symbol": "XAUUSD",
+                "side": "BUY",
+                "entry_price": 2000,
+                "stop_loss": 1990,
+                "risk_percent": 1.0,
+                "position_group_id": group_id,
+            },
+        )
+        self.assertEqual(trade.status_code, 200, trade.text)
+        trade_id = trade.json()["trade_id"]
 
         other_headers = self._register_and_login(
             "outsider@taimobot.local", "ParticipantPassphrase-2026!"
@@ -233,6 +249,16 @@ class SubscriptionEntitlementTests(unittest.TestCase):
                 "post",
                 f"/groups/{group_id}/profit-preview",
                 {"current_price": 2010.0},
+            ),
+            (
+                "post",
+                f"/trades/{trade_id}/profit-preview",
+                {"current_price": 2010.0},
+            ),
+            (
+                "post",
+                f"/trades/{trade_id}/close",
+                {"exit_price": 2010.0},
             ),
             (
                 "post",
