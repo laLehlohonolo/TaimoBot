@@ -18,6 +18,10 @@ class SubscriptionEntitlementTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "subscription-test.db"
+        self.maintenance_window_patch = patch(
+            "app.safety.is_maintenance_window", return_value=False
+        )
+        self.maintenance_window_patch.start()
         init_db()
         self.client = TestClient(app)
         self.admin_env = patch.dict(
@@ -35,6 +39,7 @@ class SubscriptionEntitlementTests(unittest.TestCase):
     def tearDown(self):
         self.client.close()
         self.admin_env.stop()
+        self.maintenance_window_patch.stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
