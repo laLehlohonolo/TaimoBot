@@ -145,6 +145,11 @@ def persist_backfill_batch(connection, request, candles):
     ):
         raise RuntimeError("Backfill checkpoint changed during collection; discard this stale batch.")
 
+    # A top-level SAVEPOINT is committed by RELEASE. Start an explicit
+    # transaction when the caller has not already opened one so a connection
+    # close before commit correctly rolls back both observations and cursor.
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
     connection.execute("SAVEPOINT market_backfill_batch")
     try:
         results = [save_market_observation(connection, item) for item in normalized_candles]
@@ -166,11 +171,18 @@ def persist_backfill_batch(connection, request, candles):
         elif missing_epochs:
             status = "GAP_REVIEW"
             next_end = request["end_epoch"]
-            error = (
-                "Provider batch is incomplete; "
-                + str(len(missing_epochs))
-                + " expected candle(s) are missing. Operator review is required."
-            )
+            if not normalized_candles:
+                error = (
+                    "Provider returned no candles; "
+                    + str(len(missing_epochs))
+                    + " expected candle(s) are missing. Operator review is required."
+                )
+            else:
+                error = (
+                    "Provider batch is incomplete; "
+                    + str(len(missing_epochs))
+                    + " expected candle(s) are missing. Operator review is required."
+                )
         else:
             status = "RUNNING"
             next_end = request["start_epoch"] - granularity
