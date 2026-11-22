@@ -739,6 +739,141 @@ class StrategyLabSchemaTests(unittest.TestCase):
         self.assertEqual(observations, 3)
         self.assertEqual(reviews, 1)
 
+    def test_exhausted_deriv_retries_recover_through_audited_same_range_admin_flow(self):
+        from datetime import datetime, timezone
+        from unittest.mock import AsyncMock, patch
+        from app.deriv_public_client import DerivPublicMarketDataClient
+
+        class FailingSocketContext:
+            async def __aenter__(self):
+                raise OSError("temporary Deriv connection failure")
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class CompleteRangeClient:
+            def __init__(self):
+                self.request = None
+
+            async def collect_candle_range(
+                self, symbol, timeframe, start_epoch, end_epoch, max_candles
+            ):
+                self.request = (symbol, timeframe, start_epoch, end_epoch, max_candles)
+                return [
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": datetime.fromtimestamp(
+                            epoch, timezone.utc
+                        ).isoformat(),
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.0,
+                        "close": 100.5,
+                        "volume": 0,
+                        "source": "deriv",
+                    }
+                    for epoch in (3480, 3540, 3600)
+                ]
+
+        real_client = DerivPublicMarketDataClient(timeout=1)
+        recovered_client = CompleteRangeClient()
+        run_path = "/admin/market-backfills/1HZ100V/M1/run"
+        review_path = "/admin/market-backfills/1HZ100V/M1/review"
+
+        with patch(
+            "app.main.DerivPublicMarketDataClient",
+            side_effect=[real_client, recovered_client],
+        ), patch(
+            "app.deriv_public_client.websockets.connect",
+            side_effect=[
+                FailingSocketContext(),
+                FailingSocketContext(),
+                FailingSocketContext(),
+            ],
+        ) as connect, patch(
+            "app.deriv_public_client.asyncio.sleep", new_callable=AsyncMock
+        ):
+            failed = self.admin_client.post(
+                run_path,
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+
+            self.assertEqual(failed.status_code, 502, failed.text)
+            self.assertEqual(connect.call_count, 3)
+            with database.get_connection() as connection:
+                held = connection.execute(
+                    """
+                    SELECT next_end_epoch, status, batches_completed
+                    FROM market_backfill_checkpoints
+                    WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                    """
+                ).fetchone()
+                held_observations = connection.execute(
+                    "SELECT COUNT(*) AS count FROM market_observations"
+                ).fetchone()["count"]
+            self.assertEqual(held["status"], "GAP_REVIEW")
+            self.assertEqual(held["next_end_epoch"], 3600)
+            self.assertEqual(held["batches_completed"], 0)
+            self.assertEqual(held_observations, 0)
+
+            review = self.admin_client.post(
+                review_path,
+                json={
+                    "decision": "RETRY_SAME_RANGE",
+                    "confirm_retry": True,
+                    "rationale": "Transient provider outage reviewed; retry exact held range.",
+                },
+            )
+            self.assertEqual(review.status_code, 200, review.text)
+            self.assertEqual(review.json()["next_end_epoch"], 3600)
+            self.assertFalse(review.json()["cursor_advanced"])
+
+            recovered = self.admin_client.post(
+                run_path,
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        body = recovered.json()
+        self.assertEqual(
+            recovered_client.request, ("1HZ100V", "M1", 3480, 3600, 3)
+        )
+        self.assertEqual(body["inserted_count"], 3)
+        self.assertEqual(body["duplicate_count"], 0)
+        self.assertEqual(body["batches_completed"], 1)
+        self.assertEqual(body["next_end_epoch"], 3420)
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["backtest_eligible"])
+        self.assertFalse(body["signals_generated"])
+        self.assertFalse(body["execution_triggered"])
+
+        with database.get_connection() as connection:
+            checkpoint = connection.execute(
+                """
+                SELECT next_end_epoch, status, batches_completed
+                FROM market_backfill_checkpoints
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()
+            observation_count = connection.execute(
+                """
+                SELECT COUNT(*) AS count FROM market_observations
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()["count"]
+            review_count = connection.execute(
+                """
+                SELECT COUNT(*) AS count FROM market_backfill_review_audit
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()["count"]
+        self.assertEqual(checkpoint["status"], "RUNNING")
+        self.assertEqual(checkpoint["next_end_epoch"], 3420)
+        self.assertEqual(checkpoint["batches_completed"], 1)
+        self.assertEqual(observation_count, 3)
+        self.assertEqual(review_count, 1)
+
     def test_admin_backfill_run_is_confirmed_bounded_and_read_only(self):
         from unittest.mock import AsyncMock, patch
 
