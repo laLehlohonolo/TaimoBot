@@ -272,5 +272,23 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
             )
 
 
+    def test_monetary_risk_is_side_symmetric_and_scales_with_conversion_rate(self):
+        from app.instruments import calculate_monetary_stop_risk
+
+        specs = self.monetary_specifications()
+        buy = calculate_monetary_stop_risk(1.10000, 1.09990, 0.03, specs)
+        sell = calculate_monetary_stop_risk(1.09990, 1.10000, 0.03, specs)
+
+        doubled_conversion = dict(specs)
+        doubled_conversion["quote_to_account_rate"] = 37.0
+        converted = calculate_monetary_stop_risk(
+            1.10000, 1.09990, 0.03, doubled_conversion
+        )
+
+        self.assertAlmostEqual(buy["monetary_risk"], 5.55)
+        self.assertAlmostEqual(sell["monetary_risk"], 5.55)
+        self.assertAlmostEqual(converted["monetary_risk"], 11.10)
+
+
 if __name__ == "__main__":
     unittest.main()
