@@ -1,5 +1,7 @@
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -795,6 +797,67 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.assertEqual(group_trade_state["realized_pnl"], 0)
         self.assertEqual(group_state, "OPEN")
         self.assertEqual(balance, 10000)
+
+
+    def test_concurrent_source_and_follower_close_reconcile_once(self):
+        self.create_relationship("REL-CONCURRENT-CLOSE")
+        source = self.open_trade("SOURCE-001", "SOURCE-CONCURRENT-CLOSE")
+        copied = replicate_open_trade(source["trade_id"])
+        self.assertEqual(copied["successful_copies"], 1)
+        copied_trade_id = copied["copies"][0]["copied_trade_id"]
+        barrier = threading.Barrier(2)
+
+        def close_source():
+            barrier.wait()
+            return close_trade_with_copies(source["trade_id"], 4010)
+
+        def close_follower():
+            barrier.wait()
+            return close_trade_with_copies(copied_trade_id, 4010)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            source_future = executor.submit(close_source)
+            follower_future = executor.submit(close_follower)
+            outcomes = [
+                source_future.result(),
+                follower_future.result(),
+            ]
+
+        self.assertTrue(all(item["status"] == "CLOSED" for item in outcomes))
+
+        with database.get_connection() as connection:
+            trades = connection.execute(
+                """
+                SELECT trade_id, account_id, status, realized_pnl
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                """,
+                (source["trade_id"], copied_trade_id)
+            ).fetchall()
+            balances = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    "SELECT account_id, balance FROM paper_accounts"
+                ).fetchall()
+            }
+            execution = connection.execute(
+                """
+                SELECT status, copied_trade_id
+                FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()
+
+        self.assertEqual(len(trades), 2)
+        self.assertTrue(all(row["status"] == "CLOSED" for row in trades))
+        realized = {row["account_id"]: row["realized_pnl"] for row in trades}
+        self.assertAlmostEqual(realized["SOURCE-001"], 50)
+        self.assertAlmostEqual(realized["FOLLOWER-001"], 50)
+        self.assertAlmostEqual(balances["SOURCE-001"], 10050)
+        self.assertAlmostEqual(balances["FOLLOWER-001"], 5050)
+        self.assertEqual(execution["status"], "CLOSED")
+        self.assertEqual(execution["copied_trade_id"], copied_trade_id)
 
 
 if __name__ == "__main__":
