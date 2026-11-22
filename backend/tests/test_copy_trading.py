@@ -1030,11 +1030,23 @@ class CopyTradingDatabaseTests(unittest.TestCase):
             ]
 
         self.assertEqual(final_trades[source["trade_id"]], ("CLOSED", 50))
+        follower_pnl_by_account = {
+            "FOLLOWER-001": 25,
+            "FOLLOWER-002": 40,
+        }
         for copied_id in copied_ids:
-            self.assertEqual(final_trades[copied_id], ("CLOSED", 25))
+            account_id = next(
+                item["follower_account_id"]
+                for item in copy_result["copies"]
+                if item["copied_trade_id"] == copied_id
+            )
+            self.assertEqual(
+                final_trades[copied_id],
+                ("CLOSED", follower_pnl_by_account[account_id])
+            )
         self.assertAlmostEqual(final_balances["SOURCE-001"], 10050)
         self.assertAlmostEqual(final_balances["FOLLOWER-001"], 5025)
-        self.assertAlmostEqual(final_balances["FOLLOWER-002"], 8025)
+        self.assertAlmostEqual(final_balances["FOLLOWER-002"], 8040)
         self.assertEqual(len(final_executions), 2)
         self.assertTrue(all(row[0] == "CLOSED" for row in final_executions))
         self.assertTrue(all(row[2] is None and row[3] is None for row in final_executions))
