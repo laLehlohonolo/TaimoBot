@@ -57,9 +57,9 @@ class PaperTradingTests(unittest.TestCase):
         with database.get_connection() as connection:
             connection.execute(
                 """
-                UPDATE participant_subscription_entitlements
-                SET tier = 'EXCLUSIVE'
-                WHERE user_id = ?
+                INSERT INTO participant_subscription_entitlements (user_id, tier)
+                VALUES (?, 'EXCLUSIVE')
+                ON CONFLICT(user_id) DO UPDATE SET tier = 'EXCLUSIVE'
                 """,
                 (self.user_id,),
             )
