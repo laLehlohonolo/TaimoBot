@@ -744,7 +744,7 @@ def account_risk_status(account_id: str, user=Depends(current_user)):
     try:
         account = connection.execute(
             """
-            SELECT balance
+            SELECT balance, settlement_currency
             FROM paper_accounts
             WHERE account_id = ?
             """,
