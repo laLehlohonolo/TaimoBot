@@ -580,9 +580,6 @@ def ensure_session_calendar_schema(connection):
                             SELECT 1 FROM brain_session_calendar_decisions
                             WHERE calendar_id = NEW.calendar_id AND decision = 'VERIFY_SOURCE'
                         )
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
                     ) OR (
                         OLD.status = 'PENDING_SOURCE_VERIFICATION'
                         AND NEW.status = 'REJECTED'
@@ -673,6 +670,9 @@ def ensure_session_calendar_schema(connection):
                 END;
                 """
             )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 def migrate_subscription_entitlements(connection):
