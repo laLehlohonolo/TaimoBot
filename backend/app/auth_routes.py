@@ -210,6 +210,8 @@ def admin_update_subscription(
     from .database import get_connection
 
     require_admin(admin)
+    if not request.reason.strip():
+        raise HTTPException(status_code=422, detail="A non-empty audit reason is required.")
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         participant = connection.execute(
