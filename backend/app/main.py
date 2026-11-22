@@ -857,6 +857,19 @@ def group_profit_preview(
             """,
             (group_id,)
         ).fetchall()
+        source_trade_ids = [trade["trade_id"] for trade in trades]
+        copy_count = 0
+        if source_trade_ids:
+            placeholders = ",".join("?" for _ in source_trade_ids)
+            copy_count = connection.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE copied_from_trade_id IN ({placeholders})
+                  AND status = 'OPEN'
+                """,
+                source_trade_ids,
+            ).fetchone()["total"]
 
     if group is None:
         raise HTTPException(status_code=404, detail="Position group not found.")
@@ -920,6 +933,8 @@ def group_profit_preview(
         "read_only": True,
         "execution_triggered": False,
         "cost_allocation": "proportional_to_position_quantity",
+        "preview_scope": "SOURCE_GROUP_POSITIONS_ONLY",
+        "copy_positions_excluded": copy_count,
     }
 
 
