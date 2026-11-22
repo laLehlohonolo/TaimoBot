@@ -664,6 +664,61 @@ def ensure_session_calendar_schema(connection):
     )
 
 
+def migrate_subscription_entitlements(connection):
+    """Create participant subscription entitlements and append-only admin audit."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS participant_subscription_entitlements (
+            user_id TEXT PRIMARY KEY,
+            tier TEXT NOT NULL DEFAULT 'STANDARD'
+                CHECK (tier IN ('STANDARD', 'ADVANCED', 'PREMIUM', 'EXCLUSIVE')),
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO participant_subscription_entitlements (user_id, tier)
+        SELECT user_id, 'STANDARD' FROM users
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscription_entitlement_audit (
+            audit_id TEXT PRIMARY KEY,
+            actor_user_id TEXT NOT NULL,
+            participant_user_id TEXT NOT NULL,
+            previous_tier TEXT NOT NULL,
+            new_tier TEXT NOT NULL
+                CHECK (new_tier IN ('STANDARD', 'ADVANCED', 'PREMIUM', 'EXCLUSIVE')),
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (actor_user_id) REFERENCES users(user_id) ON DELETE RESTRICT,
+            FOREIGN KEY (participant_user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS subscription_entitlement_audit_no_update
+        BEFORE UPDATE ON subscription_entitlement_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Subscription entitlement audit is append-only.');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS subscription_entitlement_audit_no_delete
+        BEFORE DELETE ON subscription_entitlement_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Subscription entitlement audit is append-only.');
+        END
+        """
+    )
+
+
 def init_db():
     """Create tables and safely migrate existing paper-trading data."""
 
@@ -894,6 +949,7 @@ def init_db():
         migrate_participant_milestones(connection)
         migrate_account_risk_profiles(connection)
         migrate_account_settlement_currency(connection)
+        migrate_subscription_entitlements(connection)
         migrate_copy_execution_leases(connection)
 
         connection.execute(
