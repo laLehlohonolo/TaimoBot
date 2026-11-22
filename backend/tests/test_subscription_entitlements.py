@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import tempfile
 import unittest
@@ -151,6 +152,41 @@ class SubscriptionEntitlementTests(unittest.TestCase):
         )
         self.assertEqual(first_blocked.status_code, 400)
         self.assertEqual(second_blocked.status_code, 400)
+
+    def test_concurrent_account_creation_cannot_exceed_standard_limit(self):
+        # Both requests race for the final Standard-tier slot. BEGIN IMMEDIATE
+        # must serialize the entitlement count and account insert as one unit.
+        from threading import Barrier
+
+        barrier = Barrier(2)
+
+        def create_at_same_time(account_id):
+            barrier.wait(timeout=5)
+            return self.client.post(
+                "/accounts",
+                headers=self.participant_headers,
+                json={
+                    "account_id": account_id,
+                    "starting_balance": 1000,
+                    "settlement_currency": "ZAR",
+                },
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(create_at_same_time, "RACE-STANDARD-1"),
+                executor.submit(create_at_same_time, "RACE-STANDARD-2"),
+            ]
+            responses = [future.result(timeout=20) for future in futures]
+
+        self.assertEqual(sorted(response.status_code for response in responses), [200, 400])
+        me = self.client.get("/auth/me", headers=self.participant_headers).json()
+        with database.get_connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS account_count FROM paper_accounts WHERE owner_user_id = ?",
+                (me["user_id"],),
+            ).fetchone()["account_count"]
+        self.assertEqual(count, 1)
 
     def test_upgrade_and_downgrade_preserve_existing_accounts(self):
         self._assign_tier("ADVANCED")
