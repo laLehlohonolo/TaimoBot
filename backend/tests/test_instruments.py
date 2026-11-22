@@ -1,5 +1,6 @@
 import math
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from app.instruments import (
     INSTRUMENTS,
@@ -288,6 +289,106 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
         self.assertAlmostEqual(buy["monetary_risk"], 5.55)
         self.assertAlmostEqual(sell["monetary_risk"], 5.55)
         self.assertAlmostEqual(converted["monetary_risk"], 11.10)
+
+
+    def provenance_specifications(self, observed_at=None):
+        return {
+            **self.monetary_specifications(),
+            "broker": "ExampleBroker",
+            "symbol": "XAUUSD",
+            "specification_source": "official_contract_metadata",
+            "source_reference": "instrument-spec-2026-11-23",
+            "observed_at": observed_at or "2026-11-23T10:00:00+02:00",
+        }
+
+    def validate_provenance(self, specifications, now=None, max_age_seconds=300):
+        from app.instruments import validate_broker_specification_provenance
+        return validate_broker_specification_provenance(
+            specifications,
+            expected_broker="ExampleBroker",
+            expected_symbol="XAUUSD",
+            expected_account_currency="ZAR",
+            now=now or datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+            max_age_seconds=max_age_seconds,
+        )
+
+    def test_broker_provenance_accepts_matching_fresh_timezone_aware_metadata(self):
+        result = self.validate_provenance(self.provenance_specifications())
+        self.assertTrue(result["validated"])
+        self.assertEqual(result["broker"], "ExampleBroker")
+        self.assertEqual(result["symbol"], "XAUUSD")
+        self.assertEqual(result["account_currency"], "ZAR")
+        self.assertEqual(result["mode"], "provenance_gate_only")
+        self.assertAlmostEqual(result["age_seconds"], 120)
+
+    def test_broker_provenance_rejects_missing_required_metadata(self):
+        required = (
+            "broker", "symbol", "specification_source",
+            "source_reference", "observed_at", "quote_currency",
+            "account_currency",
+        )
+        for field in required:
+            specs = self.provenance_specifications()
+            del specs[field]
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, field):
+                    self.validate_provenance(specs)
+
+    def test_broker_provenance_rejects_wrong_broker_instrument_or_account_currency(self):
+        cases = (
+            ("broker", "OtherBroker", "requested broker"),
+            ("symbol", "EURUSD", "requested instrument"),
+            ("account_currency", "USD", "account currency"),
+        )
+        for field, value, message in cases:
+            specs = self.provenance_specifications()
+            specs[field] = value
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.validate_provenance(specs)
+
+    def test_broker_provenance_rejects_blank_source_identity(self):
+        for field in ("specification_source", "source_reference"):
+            specs = self.provenance_specifications()
+            specs[field] = " "
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, field):
+                    self.validate_provenance(specs)
+
+    def test_broker_provenance_rejects_stale_specifications(self):
+        specs = self.provenance_specifications("2026-11-23T07:55:00Z")
+        with self.assertRaisesRegex(ValueError, "stale"):
+            self.validate_provenance(specs)
+
+    def test_broker_provenance_rejects_future_dated_specifications(self):
+        specs = self.provenance_specifications("2026-11-23T08:03:00Z")
+        with self.assertRaisesRegex(ValueError, "future"):
+            self.validate_provenance(specs)
+
+    def test_broker_provenance_rejects_naive_or_malformed_timestamps(self):
+        for timestamp in ("2026-11-23T08:00:00", "not-a-timestamp", ""):
+            specs = self.provenance_specifications(timestamp)
+            with self.subTest(timestamp=timestamp):
+                with self.assertRaisesRegex(ValueError, "observed_at"):
+                    self.validate_provenance(specs)
+
+    def test_broker_provenance_rejects_invalid_clock_and_freshness_window(self):
+        from app.instruments import validate_broker_specification_provenance
+        specs = self.provenance_specifications()
+        with self.assertRaisesRegex(ValueError, "now"):
+            validate_broker_specification_provenance(
+                specs, "ExampleBroker", "XAUUSD", "ZAR",
+                now=datetime(2026, 11, 23, 8, 2),
+            )
+        for max_age in (0, -1, float("nan"), float("inf"), True, "bad"):
+            with self.subTest(max_age=max_age):
+                with self.assertRaisesRegex(ValueError, "max_age_seconds"):
+                    self.validate_provenance(specs, max_age_seconds=max_age)
+
+    def test_broker_provenance_honours_configured_freshness_boundary(self):
+        specs = self.provenance_specifications("2026-11-23T07:57:00Z")
+        result = self.validate_provenance(specs, max_age_seconds=300)
+        self.assertAlmostEqual(result["age_seconds"], 300)
 
 
 if __name__ == "__main__":
