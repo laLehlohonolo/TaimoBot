@@ -78,6 +78,45 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None, settl
         if existing:
             raise ValueError("Account already exists.")
 
+        entitlement = None
+        account_count = None
+        if owner_user_id is not None:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO participant_subscription_entitlements
+                    (user_id, tier)
+                VALUES (?, 'STANDARD')
+                """,
+                (owner_user_id,),
+            )
+            entitlement = connection.execute(
+                """
+                SELECT tier FROM participant_subscription_entitlements
+                WHERE user_id = ?
+                """,
+                (owner_user_id,),
+            ).fetchone()
+            tier_limits = {
+                "STANDARD": 1,
+                "ADVANCED": 3,
+                "PREMIUM": 5,
+                "EXCLUSIVE": 10,
+            }
+            tier = entitlement["tier"]
+            account_count = connection.execute(
+                """
+                SELECT COUNT(*) AS account_count
+                FROM paper_accounts WHERE owner_user_id = ?
+                """,
+                (owner_user_id,),
+            ).fetchone()["account_count"]
+            limit = tier_limits[tier]
+            if account_count >= limit:
+                raise ValueError(
+                    f"{tier.title()} subscription allows up to {limit} paper account(s); "
+                    f"this participant already owns {account_count}."
+                )
+
         connection.execute(
             """
             INSERT INTO paper_accounts
@@ -109,6 +148,8 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None, settl
         "risk_profile": profile["profile"],
         "per_trade_risk_percent": profile["risk_percent"],
         "maximum_combined_risk_percent": 1.0,
+        "subscription_tier": entitlement["tier"] if entitlement else None,
+        "account_count": account_count + 1 if account_count is not None else None,
         "mode": "paper_trading"
     }
 
