@@ -481,6 +481,40 @@ class PaperTradingTests(unittest.TestCase):
             second_account_trade["total_open_risk"], 50
         )
 
+    def test_new_account_requires_and_persists_settlement_currency(self):
+        response = self.client.post(
+            "/accounts",
+            json={
+                "account_id": "CURRENCY-USD-001",
+                "starting_balance": 2500,
+                "settlement_currency": "USD",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["settlement_currency"], "USD")
+
+        listed = self.client.get("/accounts")
+        account = next(
+            item for item in listed.json()["accounts"]
+            if item["account_id"] == "CURRENCY-USD-001"
+        )
+        self.assertEqual(account["settlement_currency"], "USD")
+
+        history = self.client.get("/accounts/CURRENCY-USD-001")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json()["settlement_currency"], "USD")
+
+    def test_new_account_rejects_unsupported_settlement_currency(self):
+        response = self.client.post(
+            "/accounts",
+            json={
+                "account_id": "CURRENCY-INVALID-001",
+                "starting_balance": 2500,
+                "settlement_currency": "BTC",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_account_risk_preview_uses_persisted_profile_and_open_risk(self):
         self.open_trade("ORDER-PREVIEW-001")
         response = self.client.post(
@@ -854,7 +888,7 @@ class PaperTradingTests(unittest.TestCase):
 
             migrated_account = connection.execute(
                 """
-                SELECT risk_profile
+                SELECT risk_profile, settlement_currency
                 FROM paper_accounts
                 WHERE account_id = 'LEGACY-001'
                 """
@@ -873,6 +907,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertIn("copy_group_id", columns)
         self.assertIsNotNone(group_table)
         self.assertEqual(migrated_account["risk_profile"], "STANDARD")
+        self.assertIsNone(migrated_account["settlement_currency"])
 
 
     def test_invalid_sell_stop_loss_is_rejected(self):
