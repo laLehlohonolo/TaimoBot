@@ -530,7 +530,7 @@ class PaperTradingTests(unittest.TestCase):
             entry_price=4000,
             stop_loss=4873.2406057255337,
             risk_percent=0.5,
-            side="BUY",
+            side="SELL",
         )
 
         actual_price_distance_risk = (
