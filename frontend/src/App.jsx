@@ -433,23 +433,19 @@ export default function App() {
     setOrderPreview(null);
     setOrderBusy(true);
     try {
-      const funding = Number(account.starting_balance);
-      const assignedRisk = funding < 5000 ? 0.25 : funding < 25000 ? 0.5 : 1.0;
-      const result = await apiRequest("/risk/preview", {
+      const result = await apiRequest("/accounts/" + encodeURIComponent(account.account_id) + "/risk/preview", {
         method: "POST",
         body: JSON.stringify({
-          account_balance: Number(account.current_balance),
           entry_price: Number(entryPrice),
           stop_loss: Number(stopLoss),
-          risk_percent: assignedRisk,
           side: orderSide
         })
+      }, session.access_token);
+      setOrderPreview({
+        ...result,
+        assignedRisk: Number(result.assigned_risk_percent),
+        projectedRisk: Number(result.projected_total_open_risk)
       });
-      const projectedRisk = Number(risk.current_open_risk) + Number(result.risk_amount);
-      if (projectedRisk > Number(risk.maximum_risk_amount) + 1e-9) {
-        throw new Error("This position would exceed the remaining combined account risk budget. Reduce the position risk or close an existing position first.");
-      }
-      setOrderPreview({ ...result, assignedRisk, projectedRisk });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Risk preview failed.");
     } finally {
