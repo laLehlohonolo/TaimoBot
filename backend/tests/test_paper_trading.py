@@ -2897,5 +2897,71 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(account["balance"], 10100)
 
 
+    def test_concurrent_group_close_requests_book_realized_pnl_once(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        first = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="CONCURRENT-GROUP-CLOSE-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+        second = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="CONCURRENT-GROUP-CLOSE-002",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+        start = Barrier(2)
+
+        def close_group():
+            start.wait()
+            try:
+                return ("closed", close_position_group(group_id, 4010))
+            except ValueError as error:
+                return ("rejected", str(error))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(close_group),
+                executor.submit(close_group),
+            ]
+            outcomes = [future.result() for future in futures]
+
+        with database.get_connection() as connection:
+            trades = connection.execute(
+                """
+                SELECT status, realized_pnl
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                """,
+                (first["trade_id"], second["trade_id"]),
+            ).fetchall()
+            group = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+            account = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()
+
+        self.assertEqual(sum(result[0] == "closed" for result in outcomes), 1)
+        self.assertEqual([row["status"] for row in trades], ["CLOSED", "CLOSED"])
+        self.assertEqual(sum(row["realized_pnl"] for row in trades), 100)
+        self.assertEqual(group["status"], "CLOSED")
+        self.assertEqual(account["balance"], 10100)
+
+
 if __name__ == "__main__":
     unittest.main()
