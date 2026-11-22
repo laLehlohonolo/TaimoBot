@@ -6,6 +6,7 @@ supplies verified, account-currency-aware contract specifications and the
 execution allowlist is deliberately updated.
 """
 import math
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from types import MappingProxyType
 
 
@@ -199,6 +200,41 @@ def validate_broker_specifications(specifications):
         raise ValueError("Minimum volume cannot exceed maximum volume.")
 
     return normalized
+
+
+def normalize_trade_volume(requested_volume, specifications):
+    """Round risk-sized volume down to the broker step or reject unsafe bounds.
+
+    The step grid is anchored at minimum_volume. This helper deliberately
+    rejects requests above maximum_volume rather than silently clipping them.
+    It is a sizing utility only; it does not establish that broker values are
+    authentic or connect specifications to the order execution path.
+    """
+    validated = validate_broker_specifications(specifications)
+
+    try:
+        requested = Decimal(str(requested_volume))
+        minimum = Decimal(str(validated["minimum_volume"]))
+        maximum = Decimal(str(validated["maximum_volume"]))
+        step = Decimal(str(validated["volume_step"]))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("Requested volume must be a finite positive number.")
+
+    if not requested.is_finite() or requested <= 0:
+        raise ValueError("Requested volume must be a finite positive number.")
+    if requested < minimum:
+        raise ValueError("Requested volume is below the broker minimum.")
+    if requested > maximum:
+        raise ValueError("Requested volume exceeds the broker maximum.")
+
+    steps = ((requested - minimum) / step).to_integral_value(
+        rounding=ROUND_FLOOR
+    )
+    normalized = minimum + steps * step
+    if normalized < minimum or normalized > maximum:
+        raise ValueError("No valid broker volume is available for this request.")
+
+    return float(normalized)
 
 
 # Execution approval is deliberately narrower than catalogue membership.
