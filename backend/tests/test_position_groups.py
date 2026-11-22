@@ -312,6 +312,16 @@ class PositionGroupTests(unittest.TestCase):
 
 
     def create_follower_relationship(self):
+        # This fixture intentionally uses two owned accounts for copy-trading tests.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE participant_subscription_entitlements
+                SET tier = 'ADVANCED'
+                WHERE user_id = ?
+                """,
+                (self.user_id,),
+            )
         create_paper_account("GROUP-FOLLOWER-001", 10000, owner_user_id=self.user_id)
         response = self.client.post(
             "/accounts/GROUP-FOLLOWER-001/copy-relationships",
