@@ -727,6 +727,7 @@ def account_risk_preview(
         return {
             **calculation,
             "account_id": account_id,
+            "settlement_currency": account["settlement_currency"],
             "risk_profile": assigned_profile["profile"],
             "starting_balance": assigned_profile["starting_balance"],
             "assigned_risk_percent": assigned_profile["risk_percent"],
