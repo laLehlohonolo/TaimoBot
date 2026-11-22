@@ -191,13 +191,18 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
 
 
     def monetary_specifications(self):
-        specs = self.valid_specifications()
-        specs.update({
+        return {
+            "tick_size": 0.00001,
+            "tick_value": 1.0,
+            "contract_size": 100000,
+            "minimum_volume": 0.01,
+            "maximum_volume": 100.0,
+            "volume_step": 0.01,
+            "quote_to_account_rate": 18.5,
             "tick_value_basis": "QUOTE_CURRENCY_PER_TICK_PER_LOT",
             "quote_currency": "USD",
             "account_currency": "ZAR",
-        })
-        return specs
+        }
 
     def test_monetary_stop_risk_uses_explicit_tick_and_conversion_conventions(self):
         from app.instruments import calculate_monetary_stop_risk
