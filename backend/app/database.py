@@ -258,6 +258,20 @@ def migrate_participant_milestones(connection):
     )
 
 
+def migrate_account_settlement_currency(connection):
+    """Add nullable settlement denomination without guessing legacy currency."""
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(
+            "PRAGMA table_info(paper_accounts)"
+        ).fetchall()
+    }
+    if "settlement_currency" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE paper_accounts ADD COLUMN settlement_currency TEXT"
+        )
+
+
 def migrate_account_risk_profiles(connection):
     """Add and assign persistent risk profiles to existing accounts."""
 
@@ -704,6 +718,7 @@ def init_db():
                 balance REAL NOT NULL
                     CHECK (balance >= 0),
                 risk_profile TEXT,
+                settlement_currency TEXT,
                 created_at TEXT NOT NULL
                     DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (owner_user_id) REFERENCES users(user_id)
@@ -865,6 +880,7 @@ def init_db():
         migrate_account_ownership(connection)
         migrate_participant_milestones(connection)
         migrate_account_risk_profiles(connection)
+        migrate_account_settlement_currency(connection)
         migrate_copy_execution_leases(connection)
 
         connection.execute(
