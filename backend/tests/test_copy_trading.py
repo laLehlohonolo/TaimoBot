@@ -827,6 +827,80 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.assertEqual(after_execution, before_execution)
 
 
+    def test_source_copy_close_retry_succeeds_after_transient_midflight_failure(self):
+        self.create_relationship("REL-SINGLE-CLOSE-RETRY")
+        source = self.open_trade("SOURCE-001", "SOURCE-SINGLE-RETRY")
+        copied = replicate_open_trade(source["trade_id"])
+        self.assertEqual(copied["successful_copies"], 1)
+        copied_trade_id = copied["copies"][0]["copied_trade_id"]
+
+        with database.get_connection() as connection:
+            connection.execute(
+                f"""
+                CREATE TRIGGER fail_copied_trade_close_once
+                BEFORE UPDATE OF status ON trades
+                WHEN OLD.trade_id = '{copied_trade_id}'
+                  AND NEW.status = 'CLOSED'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected transient copied-trade close failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+
+        with database.get_connection() as connection:
+            connection.execute("DROP TRIGGER fail_copied_trade_close_once")
+
+        result = close_trade_with_copies(source["trade_id"], 4010)
+
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertEqual(result["closed_copies"], 1)
+        self.assertEqual(result["copy_closures"][0]["trade_id"], copied_trade_id)
+
+        with database.get_connection() as connection:
+            trades = {
+                row["trade_id"]: (row["status"], row["realized_pnl"])
+                for row in connection.execute(
+                    """
+                    SELECT trade_id, status, realized_pnl
+                    FROM trades
+                    WHERE trade_id IN (?, ?)
+                    """,
+                    (source["trade_id"], copied_trade_id)
+                ).fetchall()
+            }
+            balances = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    "SELECT account_id, balance FROM paper_accounts"
+                ).fetchall()
+            }
+            execution = connection.execute(
+                """
+                SELECT status, failure_reason, lease_token, lease_expires_at
+                FROM copy_executions
+                WHERE source_trade_id = ?
+                """,
+                (source["trade_id"],)
+            ).fetchone()
+
+        self.assertEqual(
+            trades,
+            {
+                source["trade_id"]: ("CLOSED", 50),
+                copied_trade_id: ("CLOSED", 25),
+            },
+        )
+        self.assertAlmostEqual(balances["SOURCE-001"], 10050)
+        self.assertAlmostEqual(balances["FOLLOWER-001"], 5025)
+        self.assertEqual(execution["status"], "CLOSED")
+        self.assertIsNone(execution["failure_reason"])
+        self.assertIsNone(execution["lease_token"])
+        self.assertIsNone(execution["lease_expires_at"])
+
+
     def test_single_and_group_close_reject_boolean_nonfinite_and_overflow_prices(self):
         source = self.open_trade("SOURCE-001", "CLOSE-PRICE-VALIDATION-SOURCE")
         group = create_position_group("SOURCE-001", "XAUUSD", "BUY")
