@@ -2,7 +2,9 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, Literal
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from .auth import (
     AuthenticationError, AuthenticationRateLimitError,
