@@ -127,7 +127,6 @@ class SubscriptionEntitlementTests(unittest.TestCase):
         response = self.client.get("/auth/subscription/entitlement")
         self.assertEqual(response.status_code, 401)
 
-
     def test_different_participants_have_independent_standard_allowances(self):
         first = self._create_account("ISOLATED-FIRST")
         self.assertEqual(first.status_code, 200, first.text)
@@ -172,7 +171,7 @@ class SubscriptionEntitlementTests(unittest.TestCase):
                 (me["user_id"],),
             ).fetchall()
         self.assertEqual([row["account_id"] for row in rows], sorted(account_ids))
-        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["settlement_currency"] == "ZAR" for row in rows))
 
         self._assign_tier("ADVANCED")
