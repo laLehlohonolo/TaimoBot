@@ -853,9 +853,9 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.assertTrue(all(row["status"] == "CLOSED" for row in trades))
         realized = {row["account_id"]: row["realized_pnl"] for row in trades}
         self.assertAlmostEqual(realized["SOURCE-001"], 50)
-        self.assertAlmostEqual(realized["FOLLOWER-001"], 50)
+        self.assertAlmostEqual(realized["FOLLOWER-001"], 25)
         self.assertAlmostEqual(balances["SOURCE-001"], 10050)
-        self.assertAlmostEqual(balances["FOLLOWER-001"], 5050)
+        self.assertAlmostEqual(balances["FOLLOWER-001"], 5025)
         self.assertEqual(execution["status"], "CLOSED")
         self.assertEqual(execution["copied_trade_id"], copied_trade_id)
 
