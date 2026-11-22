@@ -921,18 +921,16 @@ class CopyTradingDatabaseTests(unittest.TestCase):
             )
 
         source = self.open_trade("SOURCE-001", "SOURCE-MULTI-RETRY")
-        first_copy = replicate_open_trade(source["trade_id"])
-        second_copy = replicate_open_trade(source["trade_id"])
-        self.assertEqual(first_copy["successful_copies"], 1)
-        self.assertEqual(second_copy["successful_copies"], 1)
+        copy_result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(copy_result["successful_copies"], 2)
+        self.assertEqual(len(copy_result["copies"]), 2)
         copied_ids = {
-            first_copy["copies"][0]["copied_trade_id"],
-            second_copy["copies"][0]["copied_trade_id"],
+            item["copied_trade_id"] for item in copy_result["copies"]
         }
         self.assertEqual(len(copied_ids), 2)
         later_follower_copy = next(
             item["copied_trade_id"]
-            for item in first_copy["copies"] + second_copy["copies"]
+            for item in copy_result["copies"]
             if item["follower_account_id"] == "FOLLOWER-002"
         )
 
