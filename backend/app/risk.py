@@ -202,6 +202,6 @@ def calculate_position_size(
         "entry_price": entry,
         "stop_loss": stop,
         "price_distance": price_distance,
-        "position_size": round(quantity, 8),
+        "position_size": rounded_quantity,
         "mode": "paper_trading"
     }
