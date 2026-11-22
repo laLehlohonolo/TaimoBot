@@ -434,6 +434,23 @@ class PaperTradingTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.open_trade("ORDER-STOPPED")
 
+    def test_emergency_stop_keeps_existing_positions_closeable(self):
+        trade = self.open_trade("ORDER-OPEN-BEFORE-STOP")
+        activate_emergency_stop()
+
+        with self.assertRaises(RuntimeError):
+            self.open_trade("ORDER-AFTER-STOP")
+
+        result = close_paper_trade(
+            trade_id=trade["trade_id"],
+            exit_price=3990
+        )
+
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertEqual(result["realized_pnl"], -50)
+        self.assertEqual(result["new_balance"], 9950)
+        self.assertEqual(result["remaining_open_risk"], 0)
+
     def test_invalid_buy_stop_loss_is_rejected(self):
         with self.assertRaises(RiskError):
             calculate_position_size(
