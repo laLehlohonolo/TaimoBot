@@ -2822,5 +2822,80 @@ class PaperTradingTests(unittest.TestCase):
         self.assertFalse(quality.json()["signals_generated"])
 
 
+    def test_concurrent_single_and_group_close_cannot_double_book_pnl(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        first = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="CONCURRENT-MIXED-CLOSE-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+        second = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="CONCURRENT-MIXED-CLOSE-002",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group_id,
+        )
+        start = Barrier(2)
+
+        def close_single(_):
+            start.wait()
+            try:
+                return ("single_closed", close_paper_trade(first["trade_id"], 4010))
+            except ValueError as error:
+                return ("single_rejected", str(error))
+
+        def close_group(_):
+            start.wait()
+            try:
+                return ("group_closed", close_position_group(group_id, 4010))
+            except ValueError as error:
+                return ("group_rejected", str(error))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            single_future = executor.submit(close_single, 1)
+            group_future = executor.submit(close_group, 2)
+            outcomes = [single_future.result(), group_future.result()]
+
+        with database.get_connection() as connection:
+            trades = connection.execute(
+                """
+                SELECT status, realized_pnl
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                ORDER BY trade_id
+                """,
+                (first["trade_id"], second["trade_id"]),
+            ).fetchall()
+            group = connection.execute(
+                "SELECT status FROM position_groups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+            account = connection.execute(
+                "SELECT balance FROM paper_accounts WHERE account_id = 'TEST-001'"
+            ).fetchone()
+
+        self.assertTrue(
+            any(status == "group_closed" for status, _ in outcomes),
+            outcomes,
+        )
+        self.assertEqual([row["status"] for row in trades], ["CLOSED", "CLOSED"])
+        self.assertEqual(sum(row["realized_pnl"] for row in trades), 100)
+        self.assertEqual(group["status"], "CLOSED")
+        self.assertEqual(account["balance"], 10100)
+
+
 if __name__ == "__main__":
     unittest.main()
