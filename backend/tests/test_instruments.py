@@ -7,6 +7,7 @@ from app.instruments import (
     get_instrument,
     list_instruments,
     validate_broker_specifications,
+    normalize_trade_volume,
 )
 
 
@@ -91,6 +92,52 @@ class InstrumentRegistryTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     validate_broker_specifications(value)
+
+
+    def test_volume_is_rounded_down_to_broker_step(self):
+        result = normalize_trade_volume(0.037, self.valid_specifications())
+        self.assertEqual(result, 0.03)
+
+    def test_volume_step_uses_minimum_as_grid_origin(self):
+        specifications = self.valid_specifications()
+        specifications["minimum_volume"] = 0.03
+        specifications["maximum_volume"] = 0.13
+        specifications["volume_step"] = 0.02
+        self.assertEqual(
+            normalize_trade_volume(0.10, specifications),
+            0.09
+        )
+
+    def test_exact_minimum_and_maximum_volumes_are_accepted(self):
+        specifications = self.valid_specifications()
+        self.assertEqual(
+            normalize_trade_volume(0.01, specifications),
+            0.01
+        )
+        self.assertEqual(
+            normalize_trade_volume(100.0, specifications),
+            100.0
+        )
+
+    def test_volume_below_broker_minimum_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "below the broker minimum"):
+            normalize_trade_volume(0.009, self.valid_specifications())
+
+    def test_volume_above_broker_maximum_is_rejected_not_clipped(self):
+        with self.assertRaisesRegex(ValueError, "exceeds the broker maximum"):
+            normalize_trade_volume(100.01, self.valid_specifications())
+
+    def test_invalid_requested_volume_is_rejected(self):
+        for value in (0, -1, float("nan"), float("inf"), True, "invalid", None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    normalize_trade_volume(value, self.valid_specifications())
+
+    def test_volume_normalization_requires_complete_broker_specifications(self):
+        specifications = self.valid_specifications()
+        del specifications["volume_step"]
+        with self.assertRaisesRegex(ValueError, "volume_step"):
+            normalize_trade_volume(0.05, specifications)
 
 
 
