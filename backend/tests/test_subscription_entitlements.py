@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -194,12 +195,12 @@ class SubscriptionEntitlementTests(unittest.TestCase):
         self.assertTrue(rows[0]["actor_user_id"])
         self.assertTrue(rows[0]["reason"])
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(sqlite3.IntegrityError):
             with database.get_connection() as connection:
                 connection.execute(
                     "UPDATE subscription_entitlement_audit SET reason = 'tampered'"
                 )
-        with self.assertRaises(Exception):
+        with self.assertRaises(sqlite3.IntegrityError):
             with database.get_connection() as connection:
                 connection.execute("DELETE FROM subscription_entitlement_audit")
 
