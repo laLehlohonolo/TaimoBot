@@ -174,7 +174,7 @@ jobs:
       - name: Start isolated paper API
         run: |
           cd ../backend
-          TAIMOBOT_DB_PATH=/tmp/taimobot-integration.db uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/taimobot-integration-api.log 2>&1 &
+          TAIMOBOT_DB_PATH=/tmp/taimobot-integration.db TAIMOBOT_ADMIN_EMAILS=integration@taimobot.test uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/taimobot-integration-api.log 2>&1 &
       - name: Start Vite development proxy
         run: npm run dev -- --host 127.0.0.1 --port 4173 > /tmp/taimobot-vite.log 2>&1 &
       - name: Test real frontend-to-backend HTTP flow
