@@ -36,6 +36,12 @@ Close and preview API fields default to zero for backward compatibility. There i
 
 The paper engine's XAUUSD quantity remains abstract paper units, not broker lots. No verified broker contract sizing, tick-value conversion, account-currency conversion, spread, commission, swap, or slippage model is enabled.
 
+### 5. Frontend currency labels are not backed by account currency data
+
+The current React workspace renders account balances, open-risk amounts, realized P&L, trade risk, and the new-account starting-balance field with an `R`/ZAR label. However, the account creation request sends only `account_id` and a numeric `starting_balance`; the backend `AccountRequest`, `create_paper_account`, `paper_accounts` schema, account list response, account detail response, and risk response do not carry an account currency. The frontend's participant currency preference is a separate, permanent display preference and does not establish the ledger denomination.
+
+This creates a contract mismatch: the UI presents amounts as ZAR while the persisted account record cannot prove that denomination. Do not solve this by silently treating the display preference as settlement currency or by adding an unreviewed conversion. Before multi-currency preferences can affect account displays, persist an immutable settlement currency at account creation, expose it consistently in account/detail/risk APIs, and define a reviewed backfill policy for existing accounts. Until then, currency labels must not imply a backend-verified denomination. Add frontend/API contract tests proving the displayed denomination matches the account's persisted settlement currency.
+
 ### 4. Paper accounts do not have an explicit settlement currency
 
 The `paper_accounts` schema stores starting balance and current balance but no account-currency field. `create_paper_account` accepts a numeric starting balance without a currency and close paths add realized P&L directly to that balance. The `/accounts` API also returns balances without a currency denomination. The `/participant/currency-preference` API is explicitly a write-once display preference backed by `participant_display_currency_preferences`; it is not an account settlement-currency ledger and must not be used to infer or convert account balances.
