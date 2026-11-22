@@ -6957,8 +6957,13 @@ class DailyMaintenanceTests(unittest.TestCase):
 
     def test_real_inventory_api_repeated_requests_preserve_database_backup_and_journal(self):
         from fastapi.testclient import TestClient
-        from app.main import app
+        from app import main as main_module
         from app.auth_routes import current_user
+
+        app = main_module.app
+
+        async def no_maintenance_scheduler():
+            return None
 
         root = Path(self.temp_dir.name) / "api-readonly-repeat"
         backup = self._make_inventory_backup(root, "taimobot-readonly.sqlite3")
@@ -6971,11 +6976,12 @@ class DailyMaintenanceTests(unittest.TestCase):
         try:
             with patch.dict(os.environ, {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
                 with patch.object(maintenance_module, "BACKUP_DIR", Path(root)):
-                    with TestClient(app) as client:
-                        # Application startup performs schema initialization. Take
-                        # the baseline after startup so this assertion isolates the
-                        # read-only GET endpoint rather than startup migrations.
-                        before = (
+                    with patch.object(main_module, "maintenance_scheduler", new=no_maintenance_scheduler):
+                        with TestClient(app) as client:
+                            # Application startup performs schema initialization. Take
+                            # the baseline after startup so this assertion isolates the
+                            # read-only GET endpoint rather than startup migrations.
+                            before = (
                             database.DB_PATH.read_bytes(),
                             backup.read_bytes(),
                             journal.read_bytes(),
