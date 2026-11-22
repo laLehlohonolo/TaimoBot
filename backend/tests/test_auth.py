@@ -221,7 +221,7 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         owner_headers = {"Authorization": "Bearer " + owner_login.json()["access_token"]}
         created = self.client.post(
             "/accounts",
-            json={"account_id": "OWNER-ACCOUNT", "starting_balance": 10000},
+            json={"account_id": "OWNER-ACCOUNT", "starting_balance": 10000, "settlement_currency": "ZAR"},
             headers=owner_headers
         )
         self.assertEqual(created.status_code, 200)
@@ -272,7 +272,7 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         }
         account = self.client.post(
             "/accounts",
-            json={"account_id": "ISOLATED-OWNER", "starting_balance": 10000},
+            json={"account_id": "ISOLATED-OWNER", "starting_balance": 10000, "settlement_currency": "ZAR"},
             headers=owner_headers,
         )
         self.assertEqual(account.status_code, 200)
