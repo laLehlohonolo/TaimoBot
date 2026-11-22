@@ -73,6 +73,37 @@ class DerivPublicClientRetryTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(connect.call_count, 3)
 
+    async def test_receive_timeout_retries_with_bounded_socket_cleanup(self):
+        class HangingSocket:
+            async def send(self, payload):
+                return None
+
+            async def recv(self):
+                await asyncio.Event().wait()
+
+        class HangingContext:
+            async def __aenter__(self):
+                return HangingSocket()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        with patch(
+            "app.deriv_public_client.websockets.connect",
+            side_effect=[HangingContext(), HangingContext(), HangingContext()],
+        ) as connect, patch(
+            "app.deriv_public_client.asyncio.sleep", new_callable=AsyncMock
+        ):
+            with self.assertRaises(TimeoutError):
+                await DerivPublicMarketDataClient(timeout=0.01).fetch_candles(
+                    "1HZ100V", "M1", count=1
+                )
+
+        self.assertEqual(connect.call_count, 3)
+        for call in connect.call_args_list:
+            self.assertEqual(call.kwargs["open_timeout"], 0.01)
+            self.assertEqual(call.kwargs["close_timeout"], 0.01)
+
     async def test_permanent_provider_error_is_not_retried(self):
         response = {
             "req_id": 2,
