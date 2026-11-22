@@ -39,7 +39,7 @@ class CopyTradeReplicationTests(unittest.TestCase):
             connection.execute(
                 """
                 UPDATE participant_subscription_entitlements
-                SET tier = 'ADVANCED'
+                SET tier = 'EXCLUSIVE'
                 WHERE user_id = ?
                 """,
                 (self.user_id,),
