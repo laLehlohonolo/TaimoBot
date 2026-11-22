@@ -1160,6 +1160,54 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.assertEqual(execution["copied_trade_id"], copied_trade_id)
 
 
+    def test_copy_volume_respects_follower_risk_profile_not_only_equity_ratio(self):
+        self.create_relationship("REL-PROFILE-SCALED")
+
+        # The source has R10,000 funding (STANDARD: 0.50% risk).
+        # The follower has R4,000 funding (STARTER: 0.25% risk).
+        # Pure equity scaling would permit 40% of source volume, but the
+        # follower's stricter risk profile permits only R10 risk, versus
+        # the source's R50. With the same R10 stop distance, quantities
+        # must therefore be 1.0 and 5.0 respectively.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE paper_accounts
+                SET starting_balance = 4000, balance = 4000,
+                    risk_profile = 'STARTER'
+                WHERE account_id = 'FOLLOWER-001'
+                """
+            )
+
+        source = self.open_trade("SOURCE-001", "SOURCE-ORDER-PROFILE-SCALED")
+        result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 1)
+        copied_id = result["copies"][0]["copied_trade_id"]
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT account_id, quantity, risk_amount
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                """,
+                (source["trade_id"], copied_id)
+            ).fetchall()
+
+        by_account = {row["account_id"]: row for row in rows}
+        self.assertAlmostEqual(by_account["SOURCE-001"]["quantity"], 5.0)
+        self.assertAlmostEqual(by_account["SOURCE-001"]["risk_amount"], 50.0)
+        self.assertAlmostEqual(by_account["FOLLOWER-001"]["quantity"], 1.0)
+        self.assertAlmostEqual(by_account["FOLLOWER-001"]["risk_amount"], 10.0)
+
+        follower_risk_percent = (
+            by_account["FOLLOWER-001"]["risk_amount"] / 4000 * 100
+        )
+        self.assertAlmostEqual(follower_risk_percent, 0.25)
+        self.assertLessEqual(follower_risk_percent, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
  
