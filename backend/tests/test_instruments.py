@@ -190,5 +190,80 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
         self.assertEqual(require_execution_approval("xauusd"), "XAUUSD")
 
 
+    def monetary_specifications(self):
+        specs = self.valid_specifications()
+        specs.update({
+            "tick_value_basis": "QUOTE_CURRENCY_PER_TICK_PER_LOT",
+            "quote_currency": "USD",
+            "account_currency": "ZAR",
+        })
+        return specs
+
+    def test_monetary_stop_risk_uses_explicit_tick_and_conversion_conventions(self):
+        from app.instruments import calculate_monetary_stop_risk
+        result = calculate_monetary_stop_risk(
+            1.10000, 1.09990, 0.03, self.monetary_specifications()
+        )
+        self.assertEqual(result["tick_count"], 10)
+        self.assertEqual(result["normalized_volume"], 0.03)
+        self.assertAlmostEqual(result["monetary_risk"], 5.55)
+        self.assertEqual(result["account_currency"], "ZAR")
+        self.assertEqual(result["mode"], "calculation_only")
+
+    def test_monetary_risk_rejects_missing_tick_value_basis(self):
+        from app.instruments import calculate_monetary_stop_risk
+        specs = self.monetary_specifications()
+        del specs["tick_value_basis"]
+        with self.assertRaisesRegex(ValueError, "tick_value_basis"):
+            calculate_monetary_stop_risk(1.1, 1.0999, 0.03, specs)
+
+    def test_monetary_risk_rejects_unknown_tick_value_basis(self):
+        from app.instruments import calculate_monetary_stop_risk
+        specs = self.monetary_specifications()
+        specs["tick_value_basis"] = "UNSPECIFIED"
+        with self.assertRaisesRegex(ValueError, "tick_value_basis"):
+            calculate_monetary_stop_risk(1.1, 1.0999, 0.03, specs)
+
+    def test_monetary_risk_requires_both_currencies(self):
+        from app.instruments import calculate_monetary_stop_risk
+        for field in ("quote_currency", "account_currency"):
+            specs = self.monetary_specifications()
+            del specs[field]
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, field):
+                    calculate_monetary_stop_risk(1.1, 1.0999, 0.03, specs)
+
+    def test_monetary_risk_rejects_stop_distance_not_aligned_to_tick_size(self):
+        from app.instruments import calculate_monetary_stop_risk
+        with self.assertRaisesRegex(ValueError, "multiple"):
+            calculate_monetary_stop_risk(
+                1.10000, 1.099905, 0.03, self.monetary_specifications()
+            )
+
+    def test_monetary_risk_rejects_zero_or_invalid_price(self):
+        from app.instruments import calculate_monetary_stop_risk
+        for entry, stop in ((1.1, 1.1), (0, 1.0999), (float("nan"), 1.0999)):
+            with self.subTest(entry=entry, stop=stop):
+                with self.assertRaises(ValueError):
+                    calculate_monetary_stop_risk(
+                        entry, stop, 0.03, self.monetary_specifications()
+                    )
+
+    def test_monetary_risk_uses_volume_after_broker_step_normalization(self):
+        from app.instruments import calculate_monetary_stop_risk
+        result = calculate_monetary_stop_risk(
+            1.10000, 1.09990, 0.037, self.monetary_specifications()
+        )
+        self.assertEqual(result["normalized_volume"], 0.03)
+        self.assertAlmostEqual(result["monetary_risk"], 5.55)
+
+    def test_monetary_risk_rejects_volume_outside_broker_bounds(self):
+        from app.instruments import calculate_monetary_stop_risk
+        with self.assertRaisesRegex(ValueError, "below the broker minimum"):
+            calculate_monetary_stop_risk(
+                1.1, 1.0999, 0.009, self.monetary_specifications()
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
