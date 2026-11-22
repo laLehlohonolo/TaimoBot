@@ -518,8 +518,11 @@ class PaperTradingTests(unittest.TestCase):
                 self.assertAlmostEqual(result["risk_amount"], funding * risk_percent / 100)
 
     def test_account_risk_preview_rejects_another_users_account(self):
-        other = register_user("other-risk-preview@taimobot.local", "OtherPassphrase-2026-Secure!")
-        create_paper_account("PRIVATE-PREVIEW", 10000, owner_user_id=other["user_id"])
+        owner = register_user("risk-preview-owner@taimobot.local", "OwnerPassphrase-2026-Secure!")
+        requester = register_user("risk-preview-requester@taimobot.local", "RequesterPassphrase-2026-Secure!")
+        create_paper_account("PRIVATE-PREVIEW", 10000, owner_user_id=owner["user_id"])
+        requester_session = create_session(requester["user_id"])
+        self.client.headers.update({"Authorization": "Bearer " + requester_session["access_token"]})
         response = self.client.post(
             "/accounts/PRIVATE-PREVIEW/risk/preview",
             json={"entry_price": 4000, "stop_loss": 3990, "side": "BUY"},
