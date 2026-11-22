@@ -202,6 +202,101 @@ def validate_broker_specifications(specifications):
     return normalized
 
 
+def validate_broker_specification_provenance(
+    specifications,
+    expected_broker,
+    expected_symbol,
+    expected_account_currency,
+    now=None,
+    max_age_seconds=300,
+):
+    """Require attributable, correctly scoped and fresh broker specifications.
+
+    This is a fail-closed metadata gate, not independent proof that a broker
+    or source is authentic. The adapter must obtain values from a trusted
+    broker source and preserve its provenance fields.
+    """
+    from datetime import datetime, timezone
+
+    if not isinstance(specifications, dict):
+        raise ValueError("Broker specifications must be supplied as an object.")
+
+    required = (
+        "broker",
+        "symbol",
+        "specification_source",
+        "source_reference",
+        "observed_at",
+        "quote_currency",
+        "account_currency",
+    )
+    missing = [field for field in required if field not in specifications]
+    if missing:
+        raise ValueError(
+            "Missing broker specification provenance fields: "
+            + ", ".join(missing)
+        )
+
+    for field in ("broker", "symbol", "specification_source", "source_reference"):
+        value = specifications[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(field + " must be a non-empty string.")
+
+    if specifications["broker"].strip().casefold() != str(expected_broker).strip().casefold():
+        raise ValueError("Broker specification does not match the requested broker.")
+    if specifications["symbol"].strip().upper() != str(expected_symbol).strip().upper():
+        raise ValueError("Broker specification does not match the requested instrument.")
+    if specifications["account_currency"].strip().upper() != str(expected_account_currency).strip().upper():
+        raise ValueError("Broker specification account currency does not match the account.")
+
+    quote_currency = specifications["quote_currency"]
+    if not isinstance(quote_currency, str) or not quote_currency.strip():
+        raise ValueError("quote_currency must be a non-empty string.")
+
+    if isinstance(max_age_seconds, bool):
+        raise ValueError("max_age_seconds must be a finite positive number.")
+    try:
+        max_age = float(max_age_seconds)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("max_age_seconds must be a finite positive number.")
+    if not math.isfinite(max_age) or max_age <= 0:
+        raise ValueError("max_age_seconds must be a finite positive number.")
+
+    timestamp = specifications["observed_at"]
+    if not isinstance(timestamp, str) or not timestamp.strip():
+        raise ValueError("observed_at must be a timezone-aware ISO-8601 timestamp.")
+    try:
+        observed_at = datetime.fromisoformat(timestamp.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("observed_at must be a timezone-aware ISO-8601 timestamp.")
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("observed_at must include a timezone offset.")
+
+    current_time = now if now is not None else datetime.now(timezone.utc)
+    if not isinstance(current_time, datetime) or current_time.tzinfo is None or current_time.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime.")
+
+    age_seconds = (current_time - observed_at).total_seconds()
+    if age_seconds < 0:
+        raise ValueError("Broker specifications are dated in the future.")
+    if age_seconds > max_age:
+        raise ValueError("Broker specifications are stale.")
+
+    return {
+        "validated": True,
+        "broker": specifications["broker"].strip(),
+        "symbol": specifications["symbol"].strip().upper(),
+        "specification_source": specifications["specification_source"].strip(),
+        "source_reference": specifications["source_reference"].strip(),
+        "observed_at": observed_at.astimezone(timezone.utc).isoformat(),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age,
+        "quote_currency": quote_currency.strip().upper(),
+        "account_currency": specifications["account_currency"].strip().upper(),
+        "mode": "provenance_gate_only",
+    }
+
+
 def normalize_trade_volume(requested_volume, specifications):
     """Round risk-sized volume down to the broker step or reject unsafe bounds.
 
