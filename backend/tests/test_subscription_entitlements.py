@@ -188,6 +188,91 @@ class SubscriptionEntitlementTests(unittest.TestCase):
             ).fetchone()["account_count"]
         self.assertEqual(count, 1)
 
+    def test_other_participant_cannot_read_or_mutate_account_or_group(self):
+        owned = self._create_account("PRIVATE-ACCOUNT")
+        self.assertEqual(owned.status_code, 200, owned.text)
+        group = self.client.post(
+            "/accounts/PRIVATE-ACCOUNT/groups",
+            headers=self.participant_headers,
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group.status_code, 200, group.text)
+        group_id = group.json()["group_id"]
+
+        other_headers = self._register_and_login(
+            "outsider@taimobot.local", "ParticipantPassphrase-2026!"
+        )
+        account_paths = [
+            "/accounts/PRIVATE-ACCOUNT",
+            "/accounts/PRIVATE-ACCOUNT/risk",
+            "/accounts/PRIVATE-ACCOUNT/trades",
+        ]
+        for path in account_paths:
+            with self.subTest(path=path):
+                response = self.client.get(path, headers=other_headers)
+                self.assertEqual(response.status_code, 404, response.text)
+
+        forbidden_actions = [
+            (
+                "post",
+                "/accounts/PRIVATE-ACCOUNT/groups",
+                {"symbol": "XAUUSD", "side": "BUY"},
+            ),
+            (
+                "post",
+                "/accounts/PRIVATE-ACCOUNT/risk/preview",
+                {"entry_price": 2000, "stop_loss": 1990, "side": "BUY"},
+            ),
+            ("get", f"/groups/{group_id}", None),
+            (
+                "post",
+                f"/groups/{group_id}/close",
+                {"exit_price": 2010},
+            ),
+            (
+                "post",
+                f"/groups/{group_id}/profit-preview",
+                {"current_price": 2010},
+            ),
+            (
+                "post",
+                "/trades",
+                {
+                    "account_id": "PRIVATE-ACCOUNT",
+                    "client_order_id": "OUTSIDER-ORDER",
+                    "symbol": "XAUUSD",
+                    "side": "BUY",
+                    "entry_price": 2000,
+                    "stop_loss": 1990,
+                    "risk_percent": 1.0,
+                },
+            ),
+        ]
+        for method, path, payload in forbidden_actions:
+            with self.subTest(method=method, path=path):
+                response = getattr(self.client, method)(
+                    path,
+                    headers=other_headers,
+                    json=payload,
+                ) if payload is not None else getattr(self.client, method)(
+                    path, headers=other_headers
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+
+        # The owner's account and group remain intact after rejected requests.
+        self.assertEqual(
+            self.client.get(
+                "/accounts/PRIVATE-ACCOUNT", headers=self.participant_headers
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(
+                f"/groups/{group_id}", headers=self.participant_headers
+            ).status_code,
+            200,
+        )
+
     def test_upgrade_and_downgrade_preserve_existing_accounts(self):
         self._assign_tier("ADVANCED")
         account_ids = ["TIER-PRESERVE-1", "TIER-PRESERVE-2"]
