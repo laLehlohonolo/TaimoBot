@@ -474,6 +474,22 @@ class PaperTradingTests(unittest.TestCase):
                         side="SELL"
                     )
 
+    def test_valid_sell_stop_loss_calculates_position_size(self):
+        result = calculate_position_size(
+            account_balance=10000,
+            entry_price=4000,
+            stop_loss=4010,
+            risk_percent=0.5,
+            side="SELL"
+        )
+
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["side"], "SELL")
+        self.assertEqual(result["risk_amount"], 50)
+        self.assertEqual(result["price_distance"], 10)
+        self.assertEqual(result["position_size"], 5)
+        self.assertEqual(result["projected_total_open_risk"], 50)
+
     def test_closing_trade_releases_risk_budget(self):
         first = self.open_trade("ORDER-001")
         self.open_trade("ORDER-002")
