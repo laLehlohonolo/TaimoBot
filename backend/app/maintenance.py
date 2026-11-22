@@ -1420,7 +1420,7 @@ def inspect_recovery_artifact_inventory(
                     item["sha256"] = sha256_file(path)
                     assert_managed_directories_unchanged()
                     with sqlite3.connect(
-                        f"file:{path.resolve()}?mode=ro", uri=True, timeout=10
+                        f"file:{path.resolve()}?mode=ro&immutable=1", uri=True, timeout=10
                     ) as check:
                         row = check.execute("PRAGMA integrity_check").fetchone()
                     item["integrity_check"] = row[0] if row else "no_result"
