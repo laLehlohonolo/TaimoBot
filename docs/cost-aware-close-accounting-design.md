@@ -36,6 +36,12 @@ Close and preview API fields default to zero for backward compatibility. There i
 
 The paper engine's XAUUSD quantity remains abstract paper units, not broker lots. No verified broker contract sizing, tick-value conversion, account-currency conversion, spread, commission, swap, or slippage model is enabled.
 
+### 4. Paper accounts do not have an explicit settlement currency
+
+The `paper_accounts` schema stores starting balance and current balance but no account-currency field. `create_paper_account` accepts a numeric starting balance without a currency and close paths add realized P&L directly to that balance. There is no account-currency conversion in this path. The separate `participant_display_currency_preferences` table is a display preference, not an account settlement-currency ledger, and must not be used to infer or convert account balances.
+
+Consequently, the currency denomination of existing paper balances is not established by the account record. Do not silently label existing balances as ZAR or another currency, convert them, or apply cross-currency costs. Before multi-currency reporting or account-specific cost calculation, define an immutable settlement currency for each account and a reviewed migration/backfill policy for existing accounts. Any conversion must identify its rate source, pair, bid/ask side, timestamp, freshness limit, and calculation provenance. Missing or stale conversion data must remain explicitly unavailable rather than being treated as a zero-cost or one-to-one conversion.
+
 ## Required invariants
 
 1. A closed trade's persisted realized P&L is net P&L: gross price movement minus the explicitly recorded cost components.
@@ -56,7 +62,9 @@ Before changing follower accounting, define a deterministic simulator policy. Do
 Each policy record should include:
 
 - immutable policy ID/version and effective-from timestamp;
-- account or account class, instrument, and account currency;
+- account or account class, instrument, and the account's immutable settlement currency;
+- an explicit quantity/contract-unit definition; account settlement currency must never be inferred from a participant's display-currency preference;
+- for any required quote-to-account conversion: currency pair, provider/source, bid/ask or documented conversion side, rate timestamp, server receipt timestamp, freshness limit, and provenance;
 - quantity/contract-unit definition and any required price/quote conversion;
 - spread model and whether spread is represented in executable bid/ask prices or as an explicit monetary charge (never both);
 - commission basis (per unit/lot, per side or round turn);
@@ -71,12 +79,13 @@ The preview and close must call the same pure calculator and allocator. Preview 
 
 ## Implementation sequence
 
-1. Specify and review the paper cost-policy contract and units; choose no rates until their provenance and assumptions are documented.
-2. Add policy storage/versioning and a pure per-position cost calculator with deterministic rounding and a final-leg remainder for group allocation.
-3. Make single-trade and group previews enumerate the exact source-and-copy close scope and calculate each account independently.
-4. Integrate the same calculator into transactional single/group closes; persist policy provenance, estimated-versus-actual status, and per-position cost components.
-5. Add tests for different source/follower policies, unequal quantities, holding periods, long/short positions, missing policies, stale policy versions, conversion failures, preview/close parity across copies and groups, account-balance reconciliation, duplicate/concurrent closes, and rollback.
-6. Keep all new execution behaviour paper-only. Broker integration remains a separate demo-only gate requiring verified contract specifications and quote/cost provenance.
+1. Define the account settlement-currency model, immutable currency assignment for new accounts, and an explicit reviewed backfill/migration policy for legacy balances. Do not assume legacy balances are ZAR.
+2. Specify and review the paper cost-policy contract and units; choose no rates until their provenance and assumptions are documented.
+3. Add policy storage/versioning and a pure per-position cost calculator with deterministic rounding and a final-leg remainder for group allocation.
+4. Make single-trade and group previews enumerate the exact source-and-copy close scope and calculate each account independently.
+5. Integrate the same calculator into transactional single/group closes; persist policy provenance, estimated-versus-actual status, and per-position cost components.
+6. Add tests for different source/follower policies, unequal quantities, holding periods, long/short positions, missing policies, stale policy versions, conversion failures, preview/close parity across copies and groups, account-balance reconciliation, duplicate/concurrent closes, and rollback.
+7. Keep all new execution behaviour paper-only. Broker integration remains a separate demo-only gate requiring verified contract specifications and quote/cost provenance.
 
 ## Out of scope
 
