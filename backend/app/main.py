@@ -115,6 +115,12 @@ class RiskPreviewRequest(BaseModel):
     side: Literal["BUY", "SELL"]
 
 
+class AccountRiskPreviewRequest(BaseModel):
+    entry_price: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    side: Literal["BUY", "SELL"]
+
+
 class AccountRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=100)
     starting_balance: float = Field(gt=0)
@@ -673,6 +679,59 @@ def risk_preview(request: RiskPreviewRequest):
             status_code=422,
             detail=str(error)
         )
+
+
+@app.post("/accounts/{account_id}/risk/preview")
+def account_risk_preview(
+    account_id: str,
+    request: AccountRiskPreviewRequest,
+    user=Depends(current_user),
+):
+    """Preview an order using only the authenticated account's persisted risk state."""
+    require_account_access(account_id, user)
+    connection = get_connection()
+    try:
+        account = connection.execute(
+            """
+            SELECT starting_balance, balance, risk_profile
+            FROM paper_accounts
+            WHERE account_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        if account is None:
+            raise HTTPException(status_code=404, detail="Paper account not found.")
+
+        assigned_profile = get_risk_profile(account["starting_balance"])
+        if account["risk_profile"] != assigned_profile["profile"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Persisted account risk profile does not match original funding; order preview is blocked.",
+            )
+
+        open_risk = get_open_risk(connection, account_id)
+        try:
+            calculation = calculate_position_size(
+                account_balance=account["balance"],
+                entry_price=request.entry_price,
+                stop_loss=request.stop_loss,
+                risk_percent=assigned_profile["risk_percent"],
+                side=request.side,
+                current_open_risk=open_risk,
+            )
+        except RiskError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        return {
+            **calculation,
+            "account_id": account_id,
+            "risk_profile": assigned_profile["profile"],
+            "starting_balance": assigned_profile["starting_balance"],
+            "assigned_risk_percent": assigned_profile["risk_percent"],
+            "preview_authority": "PERSISTED_ACCOUNT_STATE",
+        }
+    finally:
+        connection.close()
 
 
 @app.get("/accounts/{account_id}/risk")
