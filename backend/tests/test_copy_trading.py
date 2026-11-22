@@ -901,6 +901,147 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.assertIsNone(execution["lease_expires_at"])
 
 
+    def test_multi_follower_close_retry_is_atomic_after_later_follower_failure(self):
+        self.create_relationship("REL-MULTI-RETRY-1")
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO paper_accounts
+                    (account_id, starting_balance, balance, risk_profile)
+                VALUES ('FOLLOWER-002', 8000, 8000, 'STANDARD')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO copy_relationships (
+                    relationship_id, source_account_id, follower_account_id
+                )
+                VALUES ('REL-MULTI-RETRY-2', 'SOURCE-001', 'FOLLOWER-002')
+                """
+            )
+
+        source = self.open_trade("SOURCE-001", "SOURCE-MULTI-RETRY")
+        first_copy = replicate_open_trade(source["trade_id"])
+        second_copy = replicate_open_trade(source["trade_id"])
+        self.assertEqual(first_copy["successful_copies"], 1)
+        self.assertEqual(second_copy["successful_copies"], 1)
+        copied_ids = {
+            first_copy["copies"][0]["copied_trade_id"],
+            second_copy["copies"][0]["copied_trade_id"],
+        }
+        self.assertEqual(len(copied_ids), 2)
+        later_follower_copy = next(
+            item["copied_trade_id"]
+            for item in first_copy["copies"] + second_copy["copies"]
+            if item["follower_account_id"] == "FOLLOWER-002"
+        )
+
+        with database.get_connection() as connection:
+            before_balances = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    "SELECT account_id, balance FROM paper_accounts"
+                ).fetchall()
+            }
+            connection.execute(
+                f"""
+                CREATE TRIGGER fail_later_follower_close_once
+                BEFORE UPDATE OF status ON trades
+                WHEN OLD.trade_id = '{later_follower_copy}'
+                  AND NEW.status = 'CLOSED'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected later follower close failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            close_trade_with_copies(source["trade_id"], 4010)
+
+        with database.get_connection() as connection:
+            states_after_failure = {
+                row["trade_id"]: (row["status"], row["realized_pnl"])
+                for row in connection.execute(
+                    """
+                    SELECT trade_id, status, realized_pnl
+                    FROM trades
+                    WHERE trade_id = ? OR copied_from_trade_id = ?
+                    """,
+                    (source["trade_id"], source["trade_id"])
+                ).fetchall()
+            }
+            balances_after_failure = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    "SELECT account_id, balance FROM paper_accounts"
+                ).fetchall()
+            }
+            executions_after_failure = [
+                tuple(row) for row in connection.execute(
+                    """
+                    SELECT status, copied_trade_id, lease_token, lease_expires_at
+                    FROM copy_executions
+                    WHERE source_trade_id = ?
+                    ORDER BY relationship_id
+                    """,
+                    (source["trade_id"],)
+                ).fetchall()
+            ]
+            connection.execute("DROP TRIGGER fail_later_follower_close_once")
+
+        self.assertEqual(len(states_after_failure), 3)
+        self.assertTrue(all(state == ("OPEN", 0) for state in states_after_failure.values()))
+        self.assertEqual(balances_after_failure, before_balances)
+        self.assertEqual(len(executions_after_failure), 2)
+        self.assertTrue(all(row[0] == "COPIED" for row in executions_after_failure))
+        self.assertTrue(all(row[2] is None and row[3] is None for row in executions_after_failure))
+
+        result = close_trade_with_copies(source["trade_id"], 4010)
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertEqual(result["closed_copies"], 2)
+        self.assertEqual({item["trade_id"] for item in result["copy_closures"]}, copied_ids)
+
+        with database.get_connection() as connection:
+            final_trades = {
+                row["trade_id"]: (row["status"], row["realized_pnl"])
+                for row in connection.execute(
+                    """
+                    SELECT trade_id, status, realized_pnl
+                    FROM trades
+                    WHERE trade_id = ? OR copied_from_trade_id = ?
+                    """,
+                    (source["trade_id"], source["trade_id"])
+                ).fetchall()
+            }
+            final_balances = {
+                row["account_id"]: row["balance"]
+                for row in connection.execute(
+                    "SELECT account_id, balance FROM paper_accounts"
+                ).fetchall()
+            }
+            final_executions = [
+                tuple(row) for row in connection.execute(
+                    """
+                    SELECT status, copied_trade_id, lease_token, lease_expires_at
+                    FROM copy_executions
+                    WHERE source_trade_id = ?
+                    ORDER BY relationship_id
+                    """,
+                    (source["trade_id"],)
+                ).fetchall()
+            ]
+
+        self.assertEqual(final_trades[source["trade_id"]], ("CLOSED", 50))
+        for copied_id in copied_ids:
+            self.assertEqual(final_trades[copied_id], ("CLOSED", 25))
+        self.assertAlmostEqual(final_balances["SOURCE-001"], 10050)
+        self.assertAlmostEqual(final_balances["FOLLOWER-001"], 5025)
+        self.assertAlmostEqual(final_balances["FOLLOWER-002"], 8025)
+        self.assertEqual(len(final_executions), 2)
+        self.assertTrue(all(row[0] == "CLOSED" for row in final_executions))
+        self.assertTrue(all(row[2] is None and row[3] is None for row in final_executions))
+
+
     def test_single_and_group_close_reject_boolean_nonfinite_and_overflow_prices(self):
         source = self.open_trade("SOURCE-001", "CLOSE-PRICE-VALIDATION-SOURCE")
         group = create_position_group("SOURCE-001", "XAUUSD", "BUY")
