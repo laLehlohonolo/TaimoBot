@@ -98,6 +98,33 @@ class InstrumentRegistryTests(unittest.TestCase):
         result = normalize_trade_volume(0.037, self.valid_specifications())
         self.assertEqual(result, 0.03)
 
+    def test_normalized_volume_never_exceeds_request_and_stays_on_step_grid(self):
+        cases = (
+            (0.01, 1.00, 0.01, 0.039, 0.03),
+            (0.03, 0.13, 0.02, 0.10, 0.09),
+            (0.10, 1.00, 0.05, 0.249, 0.20),
+            (0.001, 0.010, 0.0005, 0.00249, 0.002),
+        )
+        from decimal import Decimal
+
+        for minimum, maximum, step, requested, expected in cases:
+            with self.subTest(requested=requested, step=step):
+                specifications = self.valid_specifications()
+                specifications["minimum_volume"] = minimum
+                specifications["maximum_volume"] = maximum
+                specifications["volume_step"] = step
+
+                normalized = normalize_trade_volume(requested, specifications)
+
+                self.assertEqual(normalized, expected)
+                self.assertLessEqual(normalized, requested)
+                self.assertGreaterEqual(normalized, minimum)
+                grid_steps = (
+                    (Decimal(str(normalized)) - Decimal(str(minimum)))
+                    / Decimal(str(step))
+                )
+                self.assertEqual(grid_steps, grid_steps.to_integral_value())
+
     def test_volume_step_uses_minimum_as_grid_origin(self):
         specifications = self.valid_specifications()
         specifications["minimum_volume"] = 0.03
