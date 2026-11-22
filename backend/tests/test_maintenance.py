@@ -6939,16 +6939,42 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(payload["live_database_replaced"])
 
     def test_real_inventory_api_repeated_requests_preserve_database_backup_and_journal(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.auth_routes import current_user
+
         root = Path(self.temp_dir.name) / "api-readonly-repeat"
         backup = self._make_inventory_backup(root, "taimobot-readonly.sqlite3")
         journal = database.DB_PATH.with_name("restore-execution.audit.jsonl")
         journal.write_text("", encoding="utf-8")
-        before = (database.DB_PATH.read_bytes(), backup.read_bytes(), journal.read_bytes())
-        first = self._call_real_inventory_api(root)
-        second = self._call_real_inventory_api(root)
+        previous = dict(app.dependency_overrides)
+        app.dependency_overrides[current_user] = lambda: {
+            "user_id": "inventory-admin", "email": "ops@example.com"
+        }
+        try:
+            with patch.dict(os.environ, {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
+                with patch.object(maintenance_module, "BACKUP_DIR", Path(root)):
+                    with TestClient(app) as client:
+                        # Application startup performs schema initialization. Take
+                        # the baseline after startup so this assertion isolates the
+                        # read-only GET endpoint rather than startup migrations.
+                        before = (
+                            database.DB_PATH.read_bytes(),
+                            backup.read_bytes(),
+                            journal.read_bytes(),
+                        )
+                        first = client.get("/maintenance/recovery-artifact-inventory")
+                        second = client.get("/maintenance/recovery-artifact-inventory")
+        finally:
+            app.dependency_overrides.clear()
+            app.dependency_overrides.update(previous)
+
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
-        self.assertEqual((database.DB_PATH.read_bytes(), backup.read_bytes(), journal.read_bytes()), before)
+        self.assertEqual(
+            (database.DB_PATH.read_bytes(), backup.read_bytes(), journal.read_bytes()),
+            before,
+        )
 
     def test_real_inventory_api_flags_reference_outside_managed_root(self):
         root = Path(self.temp_dir.name) / "api-outside-root"
