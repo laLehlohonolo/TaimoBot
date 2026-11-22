@@ -1,6 +1,6 @@
 # Subscription entitlements and participant account limits
 
-**Status:** Confirmed product requirement; backend enforcement not yet implemented.
+**Status:** Backend enforcement implemented for paper-account creation and admin-assigned entitlements; expanded lifecycle and isolation verification is in progress.
 **Scope:** Paper/demo accounts only. This document does not authorise live trading, real-money wallet access, or payment processing.
 
 ## Confirmed subscription tiers
