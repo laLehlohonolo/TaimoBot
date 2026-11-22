@@ -301,6 +301,7 @@ export default function App() {
   const [lastChecked, setLastChecked] = useState(null);
   const [newAccountId, setNewAccountId] = useState("");
   const [startingBalance, setStartingBalance] = useState("10000");
+  const [newAccountCurrency, setNewAccountCurrency] = useState("ZAR");
   const [creating, setCreating] = useState(false);
   const [orderSymbol, setOrderSymbol] = useState("XAUUSD");
   const [orderSide, setOrderSide] = useState("BUY");
@@ -415,7 +416,7 @@ export default function App() {
         body: JSON.stringify({
           account_id: newAccountId.trim(),
           starting_balance: Number(startingBalance),
-          settlement_currency: "ZAR"
+          settlement_currency: newAccountCurrency
         })
       }, session.access_token);
       setNewAccountId("");
@@ -576,7 +577,8 @@ export default function App() {
               <form className="create-account-form" onSubmit={createAccount}>
                 <h3>Create paper account</h3>
                 <label>Account ID<input required minLength={1} maxLength={100} value={newAccountId} onChange={event => setNewAccountId(event.target.value)} placeholder="e.g. TAIMO-001" /></label>
-                <label>Starting balance (ZAR)<input required type="number" min="1" step="0.01" value={startingBalance} onChange={event => setStartingBalance(event.target.value)} /></label>
+                <label>Settlement currency<select value={newAccountCurrency} onChange={event => setNewAccountCurrency(event.target.value)}><option value="ZAR">ZAR — South African Rand</option><option value="USD">USD — US Dollar</option><option value="EUR">EUR — Euro</option><option value="GBP">GBP — Pound Sterling</option><option value="KWD">KWD — Kuwaiti Dinar</option></select></label>
+                <label>Starting balance ({newAccountCurrency})<input required type="number" min="1" step="0.01" value={startingBalance} onChange={event => setStartingBalance(event.target.value)} /></label>
                 <button className="primary-button" disabled={creating}>{creating ? "Creating…" : "Create account"}</button>
               </form>
             </aside>
