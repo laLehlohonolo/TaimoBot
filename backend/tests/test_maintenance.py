@@ -6982,12 +6982,12 @@ class DailyMaintenanceTests(unittest.TestCase):
                             # the baseline after startup so this assertion isolates the
                             # read-only GET endpoint rather than startup migrations.
                             before = (
-                            database.DB_PATH.read_bytes(),
-                            backup.read_bytes(),
-                            journal.read_bytes(),
-                        )
-                        first = client.get("/maintenance/recovery-artifact-inventory")
-                        second = client.get("/maintenance/recovery-artifact-inventory")
+                                database.DB_PATH.read_bytes(),
+                                backup.read_bytes(),
+                                journal.read_bytes(),
+                            )
+                            first = client.get("/maintenance/recovery-artifact-inventory")
+                            second = client.get("/maintenance/recovery-artifact-inventory")
         finally:
             app.dependency_overrides.clear()
             app.dependency_overrides.update(previous)
