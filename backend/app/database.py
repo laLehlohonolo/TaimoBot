@@ -534,18 +534,49 @@ def ensure_session_calendar_schema(connection):
             SELECT RAISE(ABORT, 'Session calendar versions are immutable.');
         END;
 
-        CREATE TRIGGER IF NOT EXISTS validate_brain_session_calendar_status_transition
+        DROP TRIGGER IF EXISTS validate_brain_session_calendar_status_transition;
+        CREATE TRIGGER validate_brain_session_calendar_status_transition
         BEFORE UPDATE OF status ON brain_session_calendars
         WHEN NOT (
-            (OLD.status = 'PENDING_SOURCE_VERIFICATION' AND NEW.status IN (
-                'SOURCE_VERIFIED_PENDING_APPROVAL', 'REJECTED'
-            )) OR
-            (OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL' AND NEW.status IN (
-                'APPROVED', 'PENDING_SOURCE_VERIFICATION', 'REJECTED'
-            ))
+            (
+                OLD.status = 'PENDING_SOURCE_VERIFICATION'
+                AND NEW.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                AND EXISTS (
+                    SELECT 1 FROM brain_session_calendar_decisions
+                    WHERE calendar_id = NEW.calendar_id AND decision = 'VERIFY_SOURCE'
+                )
+            ) OR (
+                OLD.status = 'PENDING_SOURCE_VERIFICATION'
+                AND NEW.status = 'REJECTED'
+                AND EXISTS (
+                    SELECT 1 FROM brain_session_calendar_decisions
+                    WHERE calendar_id = NEW.calendar_id AND decision = 'REJECT'
+                )
+            ) OR (
+                OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                AND NEW.status = 'APPROVED'
+                AND EXISTS (
+                    SELECT 1 FROM brain_session_calendar_decisions
+                    WHERE calendar_id = NEW.calendar_id AND decision = 'APPROVE_CALENDAR'
+                )
+            ) OR (
+                OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                AND NEW.status = 'PENDING_SOURCE_VERIFICATION'
+                AND EXISTS (
+                    SELECT 1 FROM brain_session_calendar_decisions
+                    WHERE calendar_id = NEW.calendar_id AND decision = 'REQUEST_CHANGES'
+                )
+            ) OR (
+                OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                AND NEW.status = 'REJECTED'
+                AND EXISTS (
+                    SELECT 1 FROM brain_session_calendar_decisions
+                    WHERE calendar_id = NEW.calendar_id AND decision = 'REJECT'
+                )
+            )
         )
         BEGIN
-            SELECT RAISE(ABORT, 'Invalid session calendar status transition.');
+            SELECT RAISE(ABORT, 'Session calendar status changes require a matching recorded decision.');
         END;
 
         CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_delete
