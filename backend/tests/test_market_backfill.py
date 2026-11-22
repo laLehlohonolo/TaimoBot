@@ -572,6 +572,63 @@ class MarketBackfillTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(checkpoint["next_end_epoch"], 3240)
 
 
+    async def test_failed_concurrent_worker_cannot_demote_successful_cursor_advance(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database_file:
+            def factory():
+                connection = sqlite3.connect(database_file.name, timeout=10)
+                connection.row_factory = sqlite3.Row
+                ensure_market_observation_schema(connection)
+                return connection
+
+            failure_started = asyncio.Event()
+            release_failure = asyncio.Event()
+
+            class DelayedFailureClient:
+                async def collect_candle_range(
+                    self, symbol, timeframe, start_epoch, end_epoch, max_candles
+                ):
+                    failure_started.set()
+                    await release_failure.wait()
+                    raise OSError("late transient provider failure")
+
+            failing_task = asyncio.create_task(
+                run_backfill_batch_with_connection_factory(
+                    factory, DelayedFailureClient(), "1HZ100V", "M1",
+                    batch_size=3, now_epoch=3600,
+                )
+            )
+            await failure_started.wait()
+
+            successful_task = asyncio.create_task(
+                run_backfill_batch_with_connection_factory(
+                    factory,
+                    FakeRangeClient([candle(3480), candle(3540), candle(3600)]),
+                    "1HZ100V", "M1",
+                    batch_size=3, now_epoch=3600,
+                )
+            )
+            successful_result = await successful_task
+            self.assertEqual(successful_result["next_end_epoch"], 3420)
+            self.assertEqual(successful_result["batches_completed"], 1)
+
+            release_failure.set()
+            with self.assertRaisesRegex(OSError, "late transient provider failure"):
+                await failing_task
+
+            connection = factory()
+            try:
+                checkpoint = get_backfill_checkpoint(connection, "1HZ100V", "M1")
+                observation_count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM market_observations"
+                ).fetchone()["count"]
+            finally:
+                connection.close()
+
+            self.assertEqual(checkpoint["status"], "RUNNING")
+            self.assertEqual(checkpoint["next_end_epoch"], 3420)
+            self.assertEqual(checkpoint["batches_completed"], 1)
+            self.assertEqual(observation_count, 3)
+
     async def test_exhausted_deriv_retries_hold_backfill_cursor_for_operator_review(self):
         class FailingSocketContext:
             async def __aenter__(self):
