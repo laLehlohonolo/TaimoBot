@@ -414,7 +414,8 @@ export default function App() {
         method: "POST",
         body: JSON.stringify({
           account_id: newAccountId.trim(),
-          starting_balance: Number(startingBalance)
+          starting_balance: Number(startingBalance),
+          settlement_currency: "ZAR"
         })
       }, session.access_token);
       setNewAccountId("");
@@ -569,7 +570,7 @@ export default function App() {
               <h3>Your accounts</h3>
               {accounts.length === 0 ? <p className="muted">No paper accounts yet. Create one below.</p> : accounts.map(item => (
                 <button key={item.account_id} className={"account-choice " + (selectedId === item.account_id ? "selected" : "")} onClick={() => setSelectedId(item.account_id)}>
-                  <span>{item.account_id}</span><strong>R {Number(item.balance).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                  <span>{item.account_id}</span><strong>{item.settlement_currency ? item.settlement_currency + " " : "Unverified · "}{Number(item.balance).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
                 </button>
               ))}
               <form className="create-account-form" onSubmit={createAccount}>
@@ -585,7 +586,7 @@ export default function App() {
                 <>
                   <div className="workspace-heading"><div><p className="eyebrow">ACCOUNT / {account.account_id}</p><h2>Account overview</h2></div><StatusPill good={true}>Paper trading</StatusPill></div>
                   <div className="status-grid account-metrics">
-                    <MetricCard label="CURRENT BALANCE" value={"R " + Number(account.current_balance).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} note={"Starting balance R " + Number(account.starting_balance).toLocaleString("en-ZA")} />
+                    <MetricCard label="CURRENT BALANCE" value={(account.settlement_currency || "Unverified") + " " + Number(account.current_balance).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} note={"Starting balance " + (account.settlement_currency || "currency unverified") + " " + Number(account.starting_balance).toLocaleString("en-ZA")} />
                     <MetricCard label="OPEN POSITIONS" value={account.open_trades} note={account.total_trades + " total trades"} />
                     <MetricCard label="REALIZED P&L" value={"R " + Number(account.realized_pnl).toFixed(2)} note={account.closed_trades + " closed trades"} />
                   </div>
@@ -599,12 +600,12 @@ export default function App() {
                       <label>Take profit (optional)<input type="number" min="0.00000001" step="any" value={takeProfit} onChange={event => setTakeProfit(event.target.value)} /></label>
                       <div className="order-actions"><button className="secondary-button" type="button" disabled={orderBusy || !entryPrice || !stopLoss} onClick={previewPaperOrder}>{orderBusy ? "Checking…" : "Preview risk"}</button><button className="primary-button" type="submit" disabled={orderBusy || !entryPrice || !stopLoss || !risk || emergencyActive || safety?.new_orders_allowed === false}>{orderBusy ? "Submitting…" : "Open paper position"}</button></div>
                     </form>
-                    {orderPreview && <div className="preview-result" role="status"><strong>Estimated position size: {orderPreview.position_size}</strong><span>Risk amount: R {Number(orderPreview.risk_amount).toFixed(2)} · Assigned profile: {orderPreview.assignedRisk}%</span><small>Preview is indicative. The backend recalculates assigned risk and checks combined account exposure before accepting the order.</small></div>}
+                    {orderPreview && <div className="preview-result" role="status"><strong>Estimated position size: {orderPreview.position_size}</strong><span>Risk amount: {account.settlement_currency || "Unverified"} {Number(orderPreview.risk_amount).toFixed(2)} · Assigned profile: {orderPreview.assignedRisk}%</span><small>Preview is indicative. The backend recalculates assigned risk and checks combined account exposure before accepting the order.</small></div>}
                     <p className="muted">Paper execution only. The backend enforces your assigned risk profile and the combined 1% account ceiling. Existing positions are never closed automatically by this form.</p>
                   </div>
-                  {risk && <div className="panel risk-panel"><div><span className="card-label">OPEN RISK</span><strong>R {Number(risk.current_open_risk).toFixed(2)} / R {Number(risk.maximum_risk_amount).toFixed(2)}</strong></div><div className="risk-track"><span style={{ width: Math.min(100, risk.maximum_risk_amount ? (risk.current_open_risk / risk.maximum_risk_amount) * 100 : 0) + "%" }} /></div><p className="muted">Maximum combined account risk: {risk.maximum_risk_percent}% · remaining budget R {Number(risk.remaining_risk_budget).toFixed(2)}</p></div>}
+                  {risk && <div className="panel risk-panel"><div><span className="card-label">OPEN RISK</span><strong>{account.settlement_currency || "Unverified"} {Number(risk.current_open_risk).toFixed(2)} / {account.settlement_currency || "Unverified"} {Number(risk.maximum_risk_amount).toFixed(2)}</strong></div><div className="risk-track"><span style={{ width: Math.min(100, risk.maximum_risk_amount ? (risk.current_open_risk / risk.maximum_risk_amount) * 100 : 0) + "%" }} /></div><p className="muted">Maximum combined account risk: {risk.maximum_risk_percent}% · remaining budget R {Number(risk.remaining_risk_budget).toFixed(2)}</p></div>}
                   <div className="panel trades-panel"><div className="table-heading"><h3>Recent trades</h3><span className="muted">{trades.length} records</span></div>
-                    {trades.length === 0 ? <p className="muted">No trades recorded for this account.</p> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop loss</th><th>Risk</th><th>Status</th><th>Realized P&L</th><th>Actions</th></tr></thead><tbody>{trades.map(trade => <tr key={trade.trade_id}><td>{trade.symbol}</td><td>{trade.side}</td><td>{Number(trade.entry_price).toFixed(2)}</td><td>{Number(trade.stop_loss).toFixed(2)}</td><td>R {Number(trade.risk_amount).toFixed(2)}</td><td><span className={"trade-status " + trade.status.toLowerCase()}>{trade.status}</span></td><td>R {Number(trade.realized_pnl).toFixed(2)}</td><td>{trade.status === "OPEN" && <button className="text-button" disabled={closeBusy === trade.trade_id} onClick={() => closePaperTrade(trade)}>{closeBusy === trade.trade_id ? "Closing…" : "Close paper"}</button>}</td></tr>)}</tbody></table></div>}
+                    {trades.length === 0 ? <p className="muted">No trades recorded for this account.</p> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop loss</th><th>Risk</th><th>Status</th><th>Realized P&L</th><th>Actions</th></tr></thead><tbody>{trades.map(trade => <tr key={trade.trade_id}><td>{trade.symbol}</td><td>{trade.side}</td><td>{Number(trade.entry_price).toFixed(2)}</td><td>{Number(trade.stop_loss).toFixed(2)}</td><td>{account.settlement_currency || "Unverified"} {Number(trade.risk_amount).toFixed(2)}</td><td><span className={"trade-status " + trade.status.toLowerCase()}>{trade.status}</span></td><td>{account.settlement_currency || "Unverified"} {Number(trade.realized_pnl).toFixed(2)}</td><td>{trade.status === "OPEN" && <button className="text-button" disabled={closeBusy === trade.trade_id} onClick={() => closePaperTrade(trade)}>{closeBusy === trade.trade_id ? "Closing…" : "Close paper"}</button>}</td></tr>)}</tbody></table></div>}
                   </div>
                 </>
               ) : <div className="panel empty-state"><h2>{accounts.length ? "Select an account" : "Your paper workspace is ready"}</h2><p className="muted">{accounts.length ? "Choose an account to inspect its balance, risk and trade history." : "Create your first paper account to begin tracking simulated activity."}</p></div>}
