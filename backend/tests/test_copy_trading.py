@@ -1208,6 +1208,52 @@ class CopyTradingDatabaseTests(unittest.TestCase):
         self.assertLessEqual(follower_risk_percent, 1.0)
 
 
+    def test_copy_volume_scales_with_follower_equity_when_risk_profiles_match(self):
+        self.create_relationship("REL-EQUITY-PROPORTIONAL")
+
+        # Both accounts are STANDARD (0.50%); the follower has 80% of
+        # the source's equity. With the same entry and stop distance,
+        # independently calculated follower volume should also be 80%.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE paper_accounts
+                SET starting_balance = 8000, balance = 8000,
+                    risk_profile = 'STANDARD'
+                WHERE account_id = 'FOLLOWER-001'
+                """
+            )
+
+        source = self.open_trade("SOURCE-001", "SOURCE-ORDER-EQUITY-PROPORTIONAL")
+        result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 1)
+        copied_id = result["copies"][0]["copied_trade_id"]
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT account_id, quantity, risk_amount
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                """,
+                (source["trade_id"], copied_id)
+            ).fetchall()
+
+        by_account = {row["account_id"]: row for row in rows}
+        source_quantity = by_account["SOURCE-001"]["quantity"]
+        follower_quantity = by_account["FOLLOWER-001"]["quantity"]
+        source_risk = by_account["SOURCE-001"]["risk_amount"]
+        follower_risk = by_account["FOLLOWER-001"]["risk_amount"]
+
+        self.assertAlmostEqual(source_quantity, 5.0)
+        self.assertAlmostEqual(follower_quantity, 4.0)
+        self.assertAlmostEqual(follower_quantity / source_quantity, 0.80)
+        self.assertAlmostEqual(source_risk, 50.0)
+        self.assertAlmostEqual(follower_risk, 40.0)
+        self.assertAlmostEqual(follower_risk / source_risk, 0.80)
+
+
 if __name__ == "__main__":
     unittest.main()
  
