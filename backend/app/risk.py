@@ -172,7 +172,9 @@ def calculate_position_size(
             "Calculated position size is outside the supported numeric range."
         )
 
-    rounded_quantity = round(quantity, 8)
+    # Round down, never to nearest: nearest rounding can make the
+    # position's price-distance exposure exceed its reserved risk amount.
+    rounded_quantity = math.floor(quantity * 100_000_000) / 100_000_000
     if rounded_quantity <= 0:
         raise RiskError(
             "Calculated position size is below the supported precision."
