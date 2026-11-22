@@ -2,7 +2,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, Literal
 
 from .auth import (
     AuthenticationError, AuthenticationRateLimitError,
@@ -151,6 +151,111 @@ def require_admin(user):
             detail="Administrator privileges required."
         )
     return user
+
+
+
+class SubscriptionTierRequest(BaseModel):
+    tier: Literal["STANDARD", "ADVANCED", "PREMIUM", "EXCLUSIVE"]
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.get("/subscription/entitlement")
+def subscription_entitlement(user=Depends(current_user)):
+    """Return the authenticated participant's persisted account entitlement."""
+    from .database import get_connection
+
+    limits = {"STANDARD": 1, "ADVANCED": 3, "PREMIUM": 5, "EXCLUSIVE": 10}
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO participant_subscription_entitlements (user_id, tier)
+            VALUES (?, 'STANDARD')
+            """,
+            (user["user_id"],),
+        )
+        row = connection.execute(
+            """
+            SELECT tier, updated_at FROM participant_subscription_entitlements
+            WHERE user_id = ?
+            """,
+            (user["user_id"],),
+        ).fetchone()
+        count = connection.execute(
+            "SELECT COUNT(*) AS account_count FROM paper_accounts WHERE owner_user_id = ?",
+            (user["user_id"],),
+        ).fetchone()["account_count"]
+
+    limit = limits[row["tier"]]
+    return {
+        "user_id": user["user_id"],
+        "tier": row["tier"],
+        "maximum_accounts": limit,
+        "accounts_used": count,
+        "accounts_remaining": max(0, limit - count),
+        "updated_at": row["updated_at"],
+        "entitlement_source": "BACKEND",
+    }
+
+
+@router.put("/admin/participants/{participant_user_id}/subscription")
+def admin_update_subscription(
+    participant_user_id: str,
+    request: SubscriptionTierRequest,
+    admin=Depends(current_user),
+):
+    """Admin-only tier assignment with immutable audit history; no payment is implied."""
+    from uuid import uuid4
+    from .database import get_connection
+
+    require_admin(admin)
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        participant = connection.execute(
+            "SELECT user_id FROM users WHERE user_id = ?",
+            (participant_user_id,),
+        ).fetchone()
+        if participant is None:
+            raise HTTPException(status_code=404, detail="Participant not found.")
+
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO participant_subscription_entitlements (user_id, tier)
+            VALUES (?, 'STANDARD')
+            """,
+            (participant_user_id,),
+        )
+        previous = connection.execute(
+            """
+            SELECT tier FROM participant_subscription_entitlements WHERE user_id = ?
+            """,
+            (participant_user_id,),
+        ).fetchone()["tier"]
+        connection.execute(
+            """
+            UPDATE participant_subscription_entitlements
+            SET tier = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            """,
+            (request.tier, participant_user_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO subscription_entitlement_audit
+                (audit_id, actor_user_id, participant_user_id,
+                 previous_tier, new_tier, reason)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid4()), admin["user_id"], participant_user_id,
+             previous, request.tier, request.reason.strip()),
+        )
+    return {
+        "participant_user_id": participant_user_id,
+        "previous_tier": previous,
+        "new_tier": request.tier,
+        "payment_verified": False,
+        "message": "Administrator-assigned entitlement recorded; no payment was processed.",
+    }
+
 
 
 @router.get("/participant/timeline")
