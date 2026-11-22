@@ -237,6 +237,71 @@ def normalize_trade_volume(requested_volume, specifications):
     return float(normalized)
 
 
+def calculate_monetary_stop_risk(
+    entry_price, stop_loss, requested_volume, specifications
+):
+    """Calculate stop-distance risk using an explicit broker tick-value convention.
+
+    tick_value must mean quote-currency value per tick for one standard lot.
+    quote_to_account_rate must mean account-currency units per one quote-
+    currency unit. This calculation is deliberately not wired into execution.
+    """
+    validated = validate_broker_specifications(specifications)
+    basis = specifications.get("tick_value_basis")
+    if basis != "QUOTE_CURRENCY_PER_TICK_PER_LOT":
+        raise ValueError(
+            "tick_value_basis must explicitly identify quote-currency "
+            "value per tick per lot."
+        )
+
+    quote_currency = specifications.get("quote_currency")
+    account_currency = specifications.get("account_currency")
+    if not isinstance(quote_currency, str) or not quote_currency.strip():
+        raise ValueError("quote_currency is required.")
+    if not isinstance(account_currency, str) or not account_currency.strip():
+        raise ValueError("account_currency is required.")
+
+    try:
+        entry = Decimal(str(entry_price))
+        stop = Decimal(str(stop_loss))
+        tick_size = Decimal(str(validated["tick_size"]))
+        tick_value = Decimal(str(validated["tick_value"]))
+        conversion = Decimal(str(validated["quote_to_account_rate"]))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("Prices and broker monetary specifications must be finite numbers.")
+
+    if any(not value.is_finite() or value <= 0 for value in (
+        entry, stop, tick_size, tick_value, conversion
+    )):
+        raise ValueError("Prices and broker monetary specifications must be finite positive numbers.")
+    distance = abs(entry - stop)
+    if distance <= 0:
+        raise ValueError("Entry and stop loss must be different.")
+    ticks = distance / tick_size
+    if ticks != ticks.to_integral_value():
+        raise ValueError("Stop distance must be an exact multiple of broker tick_size.")
+
+    volume = Decimal(str(normalize_trade_volume(
+        requested_volume, specifications
+    )))
+    risk = ticks * tick_value * volume * conversion
+    if not risk.is_finite() or risk <= 0:
+        raise ValueError("Calculated monetary risk is outside the supported range.")
+
+    return {
+        "approved": True,
+        "normalized_volume": float(volume),
+        "stop_distance": float(distance),
+        "tick_count": int(ticks),
+        "tick_value_basis": basis,
+        "quote_currency": quote_currency.strip().upper(),
+        "account_currency": account_currency.strip().upper(),
+        "quote_to_account_rate": float(conversion),
+        "monetary_risk": float(risk),
+        "mode": "calculation_only",
+    }
+
+
 # Execution approval is deliberately narrower than catalogue membership.
 EXECUTION_ENABLED_SYMBOLS = frozenset({"XAUUSD"})
 
