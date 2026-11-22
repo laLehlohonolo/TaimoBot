@@ -266,7 +266,7 @@ function CurrencyPreferencePanel({ token }) {
         </form>
       )}
       {error && preference?.selected && <div className="notice error" role="alert">{error}</div>}
-      <p className="muted">Currency selection does not move or convert funds. Paper-account balances remain explicitly labelled in ZAR until a reliable exchange-rate source and conversion display are implemented.</p>
+      <p className="muted">Currency selection changes display preference only; it does not move, convert, or relabel funds. Each paper account is labelled using its own persisted settlement currency. Legacy accounts without a verified denomination remain marked currency unverified.</p>
     </section>
   );
 }
