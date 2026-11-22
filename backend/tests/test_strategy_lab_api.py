@@ -776,6 +776,15 @@ class StrategyLabSchemaTests(unittest.TestCase):
                     for epoch in (3480, 3540, 3600)
                 ]
 
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO market_backfill_checkpoints (
+                    symbol, timeframe, next_end_epoch, status, batches_completed
+                ) VALUES ('1HZ100V', 'M1', 3600, 'RUNNING', 0)
+                """
+            )
+
         real_client = DerivPublicMarketDataClient(timeout=1)
         recovered_client = CompleteRangeClient()
         run_path = "/admin/market-backfills/1HZ100V/M1/run"
