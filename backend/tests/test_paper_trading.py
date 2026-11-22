@@ -461,6 +461,19 @@ class PaperTradingTests(unittest.TestCase):
                 side="BUY"
             )
 
+    def test_invalid_sell_stop_loss_is_rejected(self):
+        invalid_stops = (3990, 4000)
+        for stop_loss in invalid_stops:
+            with self.subTest(stop_loss=stop_loss):
+                with self.assertRaises(RiskError):
+                    calculate_position_size(
+                        account_balance=10000,
+                        entry_price=4000,
+                        stop_loss=stop_loss,
+                        risk_percent=0.5,
+                        side="SELL"
+                    )
+
     def test_closing_trade_releases_risk_budget(self):
         first = self.open_trade("ORDER-001")
         self.open_trade("ORDER-002")
