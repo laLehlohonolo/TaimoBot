@@ -252,6 +252,10 @@ def decide_candidate(candidate_id: str, request: CandidateDecisionRequest, user=
     new_status = status_by_decision[request.decision]
 
     with get_connection() as connection:
+        # Serialize competing administrator decisions before reading status.
+        # Without this, two requests can both observe RESEARCH and append
+        # conflicting decisions before either status update commits.
+        connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
             "SELECT status FROM brain_strategy_candidates WHERE candidate_id = ?",
             (candidate_id,),
