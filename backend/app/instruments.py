@@ -289,7 +289,7 @@ def calculate_monetary_stop_risk(
         raise ValueError("Calculated monetary risk is outside the supported range.")
 
     return {
-        "approved": True,
+        "calculated": True,
         "normalized_volume": float(volume),
         "stop_distance": float(distance),
         "tick_count": int(ticks),
