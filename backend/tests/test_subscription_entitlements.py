@@ -214,6 +214,25 @@ class SubscriptionEntitlementTests(unittest.TestCase):
         restored = self._create_account("TIER-PRESERVE-3")
         self.assertEqual(restored.status_code, 200, restored.text)
 
+    def test_admin_tier_change_rejects_blank_audit_reason(self):
+        me = self.client.get("/auth/me", headers=self.participant_headers).json()
+        response = self.client.put(
+            f"/auth/admin/participants/{me['user_id']}/subscription",
+            headers=self.admin_headers,
+            json={"tier": "ADVANCED", "reason": "   "},
+        )
+        self.assertEqual(response.status_code, 422)
+        entitlement = self.client.get(
+            "/auth/subscription/entitlement",
+            headers=self.participant_headers,
+        )
+        self.assertEqual(entitlement.json()["tier"], "STANDARD")
+        with database.get_connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS audit_count FROM subscription_entitlement_audit"
+            ).fetchone()["audit_count"]
+        self.assertEqual(count, 0)
+
     def test_admin_tier_changes_write_immutable_audit_records(self):
         me = self.client.get("/auth/me", headers=self.participant_headers).json()
         self._assign_tier("ADVANCED")
