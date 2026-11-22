@@ -535,137 +535,144 @@ _SESSION_CALENDAR_SCHEMA_GUARD = threading.RLock()
 def ensure_session_calendar_schema(connection):
     """Create immutable, versioned calendar records and append-only review history."""
     with _SESSION_CALENDAR_SCHEMA_GUARD:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS brain_session_calendars (
-                calendar_id TEXT PRIMARY KEY,
-                provider TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                version INTEGER NOT NULL CHECK (version > 0),
-                status TEXT NOT NULL CHECK (status IN (
-                    'PENDING_SOURCE_VERIFICATION',
-                    'SOURCE_VERIFIED_PENDING_APPROVAL',
-                    'APPROVED', 'REJECTED'
-                )),
-                record_json TEXT NOT NULL,
-                submitted_by TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(provider, symbol, version),
-                FOREIGN KEY (submitted_by) REFERENCES users(user_id)
-            );
+        lock_path = DB_PATH.with_name(DB_PATH.name + ".schema.lock")
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS brain_session_calendars (
+                    calendar_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK (version > 0),
+                    status TEXT NOT NULL CHECK (status IN (
+                        'PENDING_SOURCE_VERIFICATION',
+                        'SOURCE_VERIFIED_PENDING_APPROVAL',
+                        'APPROVED', 'REJECTED'
+                    )),
+                    record_json TEXT NOT NULL,
+                    submitted_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(provider, symbol, version),
+                    FOREIGN KEY (submitted_by) REFERENCES users(user_id)
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_brain_session_calendars_symbol
-                ON brain_session_calendars(symbol, provider, version DESC);
+                CREATE INDEX IF NOT EXISTS idx_brain_session_calendars_symbol
+                    ON brain_session_calendars(symbol, provider, version DESC);
 
-            CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_record_mutation
-            BEFORE UPDATE OF provider, symbol, version, record_json, submitted_by, created_at
-            ON brain_session_calendars
-            BEGIN
-                SELECT RAISE(ABORT, 'Session calendar versions are immutable.');
-            END;
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_record_mutation
+                BEFORE UPDATE OF provider, symbol, version, record_json, submitted_by, created_at
+                ON brain_session_calendars
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar versions are immutable.');
+                END;
 
-            DROP TRIGGER IF EXISTS validate_brain_session_calendar_status_transition;
-            CREATE TRIGGER validate_brain_session_calendar_status_transition
-            BEFORE UPDATE OF status ON brain_session_calendars
-            WHEN NOT (
-                (
-                    OLD.status = 'PENDING_SOURCE_VERIFICATION'
-                    AND NEW.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
-                    AND EXISTS (
-                        SELECT 1 FROM brain_session_calendar_decisions
-                        WHERE calendar_id = NEW.calendar_id AND decision = 'VERIFY_SOURCE'
-                    )
-                ) OR (
-                    OLD.status = 'PENDING_SOURCE_VERIFICATION'
-                    AND NEW.status = 'REJECTED'
-                    AND EXISTS (
-                        SELECT 1 FROM brain_session_calendar_decisions
-                        WHERE calendar_id = NEW.calendar_id AND decision = 'REJECT'
-                    )
-                ) OR (
-                    OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
-                    AND NEW.status = 'APPROVED'
-                    AND EXISTS (
-                        SELECT 1 FROM brain_session_calendar_decisions
-                        WHERE calendar_id = NEW.calendar_id AND decision = 'APPROVE_CALENDAR'
-                    )
-                ) OR (
-                    OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
-                    AND NEW.status = 'PENDING_SOURCE_VERIFICATION'
-                    AND EXISTS (
-                        SELECT 1 FROM brain_session_calendar_decisions
-                        WHERE calendar_id = NEW.calendar_id AND decision = 'REQUEST_CHANGES'
-                    )
-                ) OR (
-                    OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
-                    AND NEW.status = 'REJECTED'
-                    AND EXISTS (
-                        SELECT 1 FROM brain_session_calendar_decisions
-                        WHERE calendar_id = NEW.calendar_id AND decision = 'REJECT'
+                DROP TRIGGER IF EXISTS validate_brain_session_calendar_status_transition;
+                CREATE TRIGGER validate_brain_session_calendar_status_transition
+                BEFORE UPDATE OF status ON brain_session_calendars
+                WHEN NOT (
+                    (
+                        OLD.status = 'PENDING_SOURCE_VERIFICATION'
+                        AND NEW.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'VERIFY_SOURCE'
+                        )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+                    ) OR (
+                        OLD.status = 'PENDING_SOURCE_VERIFICATION'
+                        AND NEW.status = 'REJECTED'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'REJECT'
+                        )
+                    ) OR (
+                        OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                        AND NEW.status = 'APPROVED'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'APPROVE_CALENDAR'
+                        )
+                    ) OR (
+                        OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                        AND NEW.status = 'PENDING_SOURCE_VERIFICATION'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'REQUEST_CHANGES'
+                        )
+                    ) OR (
+                        OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                        AND NEW.status = 'REJECTED'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'REJECT'
+                        )
                     )
                 )
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar status changes require a matching recorded decision.');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_delete
+                BEFORE DELETE ON brain_session_calendars
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar versions cannot be deleted.');
+                END;
+
+                CREATE TABLE IF NOT EXISTS brain_session_calendar_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    calendar_id TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK (decision IN (
+                        'VERIFY_SOURCE', 'APPROVE_CALENDAR', 'REQUEST_CHANGES', 'REJECT'
+                    )),
+                    rationale TEXT NOT NULL,
+                    evidence_url TEXT,
+                    decided_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (calendar_id) REFERENCES brain_session_calendars(calendar_id),
+                    FOREIGN KEY (decided_by) REFERENCES users(user_id)
+                );
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_decision_update
+                BEFORE UPDATE ON brain_session_calendar_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar decision history is append-only.');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_decision_delete
+                BEFORE DELETE ON brain_session_calendar_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar decision history is append-only.');
+                END;
+
+                CREATE TABLE IF NOT EXISTS brain_session_calendar_audit (
+                    event_id TEXT PRIMARY KEY,
+                    calendar_id TEXT NOT NULL,
+                    actor_user_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    details_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (calendar_id) REFERENCES brain_session_calendars(calendar_id),
+                    FOREIGN KEY (actor_user_id) REFERENCES users(user_id)
+                );
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_audit_update
+                BEFORE UPDATE ON brain_session_calendar_audit
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar audit history is append-only.');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_audit_delete
+                BEFORE DELETE ON brain_session_calendar_audit
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar audit history is append-only.');
+                END;
+                """
             )
-            BEGIN
-                SELECT RAISE(ABORT, 'Session calendar status changes require a matching recorded decision.');
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_delete
-            BEFORE DELETE ON brain_session_calendars
-            BEGIN
-                SELECT RAISE(ABORT, 'Session calendar versions cannot be deleted.');
-            END;
-
-            CREATE TABLE IF NOT EXISTS brain_session_calendar_decisions (
-                decision_id TEXT PRIMARY KEY,
-                calendar_id TEXT NOT NULL,
-                decision TEXT NOT NULL CHECK (decision IN (
-                    'VERIFY_SOURCE', 'APPROVE_CALENDAR', 'REQUEST_CHANGES', 'REJECT'
-                )),
-                rationale TEXT NOT NULL,
-                evidence_url TEXT,
-                decided_by TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (calendar_id) REFERENCES brain_session_calendars(calendar_id),
-                FOREIGN KEY (decided_by) REFERENCES users(user_id)
-            );
-
-            CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_decision_update
-            BEFORE UPDATE ON brain_session_calendar_decisions
-            BEGIN
-                SELECT RAISE(ABORT, 'Session calendar decision history is append-only.');
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_decision_delete
-            BEFORE DELETE ON brain_session_calendar_decisions
-            BEGIN
-                SELECT RAISE(ABORT, 'Session calendar decision history is append-only.');
-            END;
-
-            CREATE TABLE IF NOT EXISTS brain_session_calendar_audit (
-                event_id TEXT PRIMARY KEY,
-                calendar_id TEXT NOT NULL,
-                actor_user_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                details_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (calendar_id) REFERENCES brain_session_calendars(calendar_id),
-                FOREIGN KEY (actor_user_id) REFERENCES users(user_id)
-            );
-
-            CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_audit_update
-            BEFORE UPDATE ON brain_session_calendar_audit
-            BEGIN
-                SELECT RAISE(ABORT, 'Session calendar audit history is append-only.');
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_audit_delete
-            BEFORE DELETE ON brain_session_calendar_audit
-            BEGIN
-                SELECT RAISE(ABORT, 'Session calendar audit history is append-only.');
-            END;
-            """
-        )
 
 
 def migrate_subscription_entitlements(connection):
