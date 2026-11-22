@@ -34,6 +34,16 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.user_id = user["user_id"]
         session = create_session(self.user_id)
         create_paper_account("SOURCE", 10000, owner_user_id=self.user_id)
+        # These copy-trading fixtures intentionally require two owned accounts.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE participant_subscription_entitlements
+                SET tier = 'ADVANCED'
+                WHERE user_id = ?
+                """,
+                (self.user_id,),
+            )
         create_paper_account("FOLLOWER", 5000, owner_user_id=self.user_id)
         self.client = TestClient(app)
         self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
