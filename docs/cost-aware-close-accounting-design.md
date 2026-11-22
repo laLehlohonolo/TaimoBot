@@ -65,7 +65,6 @@ Each policy record should include:
 - account or account class, instrument, and the account's immutable settlement currency;
 - an explicit quantity/contract-unit definition; account settlement currency must never be inferred from a participant's display-currency preference;
 - for any required quote-to-account conversion: currency pair, provider/source, bid/ask or documented conversion side, rate timestamp, server receipt timestamp, freshness limit, and provenance;
-- quantity/contract-unit definition and any required price/quote conversion;
 - spread model and whether spread is represented in executable bid/ask prices or as an explicit monetary charge (never both);
 - commission basis (per unit/lot, per side or round turn);
 - swap basis, direction, holding-time/day-rollover rules, and applicable calendar;
