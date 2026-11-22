@@ -8,7 +8,7 @@ def get_account_history(account_id):
     with get_connection() as connection:
         account = connection.execute(
             """
-            SELECT account_id, starting_balance, balance, created_at
+            SELECT account_id, starting_balance, balance, settlement_currency, created_at
             FROM paper_accounts
             WHERE account_id = ?
             """,
@@ -37,6 +37,7 @@ def get_account_history(account_id):
         "account_id": account["account_id"],
         "starting_balance": account["starting_balance"],
         "current_balance": account["balance"],
+        "settlement_currency": account["settlement_currency"],
         "total_trades": statistics["total_trades"],
         "open_trades": statistics["open_trades"],
         "closed_trades": statistics["closed_trades"],
