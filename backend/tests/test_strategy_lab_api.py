@@ -416,8 +416,26 @@ class StrategyLabSchemaTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "strategy-lab-schema.db"
         init_db()
+        self.original_admin_emails = os.environ.get("TAIMOBOT_ADMIN_EMAILS")
+        os.environ["TAIMOBOT_ADMIN_EMAILS"] = "strategy-admin@taimobot.local"
+        admin = register_user("strategy-admin@taimobot.local", "AdminPassphrase-2026-Secure!")
+        participant = register_user("strategy-participant@taimobot.local", "ParticipantPassphrase-2026!")
+        self.admin_client = TestClient(app)
+        self.participant_client = TestClient(app)
+        self.admin_client.headers.update({
+            "Authorization": "Bearer " + create_session(admin["user_id"])["access_token"]
+        })
+        self.participant_client.headers.update({
+            "Authorization": "Bearer " + create_session(participant["user_id"])["access_token"]
+        })
 
     def tearDown(self):
+        self.admin_client.close()
+        self.participant_client.close()
+        if self.original_admin_emails is None:
+            os.environ.pop("TAIMOBOT_ADMIN_EMAILS", None)
+        else:
+            os.environ["TAIMOBOT_ADMIN_EMAILS"] = self.original_admin_emails
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
