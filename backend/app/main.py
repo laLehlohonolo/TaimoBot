@@ -125,6 +125,7 @@ class AccountRiskPreviewRequest(BaseModel):
 class AccountRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=100)
     starting_balance: float = Field(gt=0)
+    settlement_currency: Literal["ZAR", "USD", "EUR", "GBP", "KWD"]
 
 
 class PositionGroupRequest(BaseModel):
@@ -694,7 +695,7 @@ def account_risk_preview(
     try:
         account = connection.execute(
             """
-            SELECT starting_balance, balance, risk_profile
+            SELECT starting_balance, balance, risk_profile, settlement_currency
             FROM paper_accounts
             WHERE account_id = ?
             """,
@@ -774,6 +775,7 @@ def account_risk_status(account_id: str, user=Depends(current_user)):
 
         return {
             "account_id": account_id,
+            "settlement_currency": account["settlement_currency"],
             "account_balance": round(balance, 2),
             "open_positions": open_positions["position_count"],
             "current_open_risk": round(open_risk, 2),
@@ -793,7 +795,7 @@ def list_accounts(user=Depends(current_user)):
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT account_id, starting_balance, balance, risk_profile, created_at
+            SELECT account_id, starting_balance, balance, risk_profile, settlement_currency, created_at
             FROM paper_accounts
             WHERE owner_user_id = ?
             ORDER BY created_at DESC, account_id
@@ -809,6 +811,7 @@ def list_accounts(user=Depends(current_user)):
                 "starting_balance": float(row["starting_balance"]),
                 "balance": float(row["balance"]),
                 "risk_profile": row["risk_profile"],
+                "settlement_currency": row["settlement_currency"],
                 "created_at": row["created_at"],
                 "mode": "paper_trading"
             }
@@ -823,7 +826,8 @@ def create_account(request: AccountRequest, user=Depends(current_user)):
         return create_paper_account(
             request.account_id,
             request.starting_balance,
-            owner_user_id=user["user_id"]
+            owner_user_id=user["user_id"],
+            settlement_currency=request.settlement_currency
         )
     except ValueError as error:
         raise HTTPException(
