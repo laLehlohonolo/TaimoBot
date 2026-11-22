@@ -53,6 +53,16 @@ class PaperTradingTests(unittest.TestCase):
         user = register_user("paper-tests@taimobot.local", "TestPassphrase-2026-Secure!")
         self.user_id = user["user_id"]
         session = create_session(self.user_id)
+        # This broad integration fixture creates several independent accounts.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE participant_subscription_entitlements
+                SET tier = 'EXCLUSIVE'
+                WHERE user_id = ?
+                """,
+                (self.user_id,),
+            )
         create_paper_account("TEST-001", 10000, owner_user_id=self.user_id)
 
         self.client = TestClient(app)
