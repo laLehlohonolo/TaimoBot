@@ -6907,6 +6907,17 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(item["status"], "INCOMPLETE")
         self.assertEqual(item["artifact_type"], "INCOMPLETE_TEMPORARY")
 
+    def test_real_inventory_api_blocks_backup_with_sqlite_sidecar_without_mutating_it(self):
+        root = Path(self.temp_dir.name) / "api-sidecar"
+        backup = self._make_inventory_backup(root, "taimobot-sidecar.sqlite3")
+        sidecar = Path(str(backup) + "-wal")
+        sidecar.write_bytes(b"pending-wal-data")
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["artifacts"] if x["file_name"] == backup.name)
+        self.assertEqual(item["status"], "REVIEW_REQUIRED")
+        self.assertIn("SQLITE_SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING", item["issues"])
+        self.assertEqual(sidecar.read_bytes(), b"pending-wal-data")
+
     def test_real_inventory_api_blocks_invalid_restore_journal(self):
         root = Path(self.temp_dir.name) / "api-invalid-journal"
         root.mkdir()
