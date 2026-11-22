@@ -320,6 +320,26 @@ class PositionGroupTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.json()["relationship_id"]
 
+    def test_group_profit_preview_discloses_excluded_follower_copies(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+        opened = self.open_group_trade(group_id, "GROUP-PREVIEW-COPY-001")
+        self.assertEqual(opened.status_code, 200)
+        self.assertEqual(opened.json()["copy_summary"]["successful_copies"], 1)
+
+        response = self.client.post(
+            f"/groups/{group_id}/profit-preview",
+            json={"current_price": 4010},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["preview_scope"], "SOURCE_GROUP_POSITIONS_ONLY")
+        self.assertEqual(result["copy_positions_excluded"], 1)
+        self.assertEqual(result["position_count"], 1)
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["execution_triggered"])
+
     def test_group_close_closes_source_and_follower_copies(self):
         group_id = self.create_group()
         self.create_follower_relationship()
