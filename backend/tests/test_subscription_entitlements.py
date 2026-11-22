@@ -227,12 +227,12 @@ class SubscriptionEntitlementTests(unittest.TestCase):
             (
                 "post",
                 f"/groups/{group_id}/close",
-                {"exit_price": 2010},
+                {"exit_price": 2010.0},
             ),
             (
                 "post",
                 f"/groups/{group_id}/profit-preview",
-                {"current_price": 2010},
+                {"current_price": 2010.0},
             ),
             (
                 "post",
