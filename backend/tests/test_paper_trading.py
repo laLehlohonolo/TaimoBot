@@ -2001,6 +2001,49 @@ class PaperTradingTests(unittest.TestCase):
 
 
 
+    def test_concurrent_close_requests_book_realized_pnl_once(self):
+        trade = self.open_trade("CONCURRENT-CLOSE-ONCE")
+        start = Barrier(2)
+
+        def close_once(_):
+            start.wait()
+            try:
+                result = close_paper_trade(trade["trade_id"], 4010)
+                return ("closed", result)
+            except ValueError as error:
+                return ("rejected", str(error))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(close_once, range(2)))
+
+        self.assertEqual(
+            sum(1 for status, _ in outcomes if status == "closed"), 1
+        )
+        self.assertEqual(
+            sum(1 for status, _ in outcomes if status == "rejected"), 1
+        )
+
+        with database.get_connection() as connection:
+            ledger = connection.execute(
+                """
+                SELECT status, realized_pnl
+                FROM trades
+                WHERE trade_id = ?
+                """,
+                (trade["trade_id"],),
+            ).fetchone()
+            account = connection.execute(
+                """
+                SELECT balance
+                FROM paper_accounts
+                WHERE account_id = 'TEST-001'
+                """
+            ).fetchone()
+
+        self.assertEqual(ledger["status"], "CLOSED")
+        self.assertEqual(ledger["realized_pnl"], 50)
+        self.assertEqual(account["balance"], 10050)
+
     def test_single_execution_close_rolls_back_trade_when_balance_write_fails(self):
         trade = self.open_trade("ROLLBACK-SINGLE-BALANCE")
         with database.get_connection() as connection:
