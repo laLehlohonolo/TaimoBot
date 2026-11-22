@@ -298,7 +298,7 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
             "symbol": "XAUUSD",
             "specification_source": "official_contract_metadata",
             "source_reference": "instrument-spec-2026-11-23",
-            "observed_at": observed_at or "2026-11-23T10:00:00+02:00",
+            "observed_at": "2026-11-23T10:00:00+02:00" if observed_at is None else observed_at,
         }
 
     def validate_provenance(self, specifications, now=None, max_age_seconds=300):
