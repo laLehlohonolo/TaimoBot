@@ -49,7 +49,7 @@ def validate_symbol(symbol):
     return value
 
 
-def create_paper_account(account_id, starting_balance, owner_user_id=None):
+def create_paper_account(account_id, starting_balance, owner_user_id=None, settlement_currency="ZAR"):
     account_id = str(account_id).strip()
 
     balance = validate_positive_number(
@@ -58,6 +58,10 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None):
 
     if not account_id:
         raise ValueError("Account ID is required.")
+
+    currency = str(settlement_currency).strip().upper()
+    if currency not in {"ZAR", "USD", "EUR", "GBP", "KWD"}:
+        raise ValueError("Unsupported account settlement currency.")
 
     profile = get_risk_profile(balance)
 
@@ -82,16 +86,18 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None):
                 owner_user_id,
                 starting_balance,
                 balance,
-                risk_profile
+                risk_profile,
+                settlement_currency
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 account_id,
                 owner_user_id,
                 balance,
                 balance,
-                profile["profile"]
+                profile["profile"],
+                currency
             )
         )
 
@@ -99,6 +105,7 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None):
         "account_id": account_id,
         "starting_balance": balance,
         "balance": balance,
+        "settlement_currency": currency,
         "risk_profile": profile["profile"],
         "per_trade_risk_percent": profile["risk_percent"],
         "maximum_combined_risk_percent": 1.0,
