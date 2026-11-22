@@ -113,7 +113,7 @@ const accountId = "INT-" + unique;
 const created = await request("/accounts", {
   method: "POST",
   token,
-  body: { account_id: accountId, starting_balance: 10000 }
+  body: { account_id: accountId, starting_balance: 10000, settlement_currency: "ZAR" }
 });
 assert(created.response.status === 200, "Paper account creation failed: " + JSON.stringify(created.payload));
 console.log("PASS: Authenticated user can create a paper account.");
@@ -121,14 +121,17 @@ console.log("PASS: Authenticated user can create a paper account.");
 const accounts = await request("/accounts", { token });
 assert(accounts.response.status === 200 && accounts.payload.count === 1, "Account list did not return the user's account.");
 assert(accounts.payload.accounts[0].account_id === accountId, "Account ownership/list response mismatch.");
+assert(accounts.payload.accounts[0].settlement_currency === "ZAR", "Account list did not return persisted settlement currency.");
 console.log("PASS: Account list returns the signed-in user's account.");
 
 const account = await request("/accounts/" + encodeURIComponent(accountId), { token });
 assert(account.response.status === 200 && account.payload.account_id === accountId, "Account detail retrieval failed.");
+assert(account.payload.settlement_currency === "ZAR", "Account detail did not return persisted settlement currency.");
 console.log("PASS: Account overview endpoint works.");
 
 const risk = await request("/accounts/" + encodeURIComponent(accountId) + "/risk", { token });
 assert(risk.response.status === 200 && risk.payload.maximum_risk_percent === 1, "Risk endpoint did not report the enforced 1% cap.");
+assert(risk.payload.settlement_currency === "ZAR", "Risk endpoint did not return persisted settlement currency.");
 console.log("PASS: Account risk endpoint reports the 1% maximum.");
 
 await waitUntilMaintenanceEnds();
