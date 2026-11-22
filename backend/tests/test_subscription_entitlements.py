@@ -127,5 +127,82 @@ class SubscriptionEntitlementTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
 
+    def test_different_participants_have_independent_standard_allowances(self):
+        first = self._create_account("ISOLATED-FIRST")
+        self.assertEqual(first.status_code, 200, first.text)
+
+        second_headers = self._register_and_login(
+            "another-participant@taimobot.local", "ParticipantPassphrase-2026!"
+        )
+        second = self.client.post(
+            "/accounts",
+            headers=second_headers,
+            json={"account_id": "ISOLATED-SECOND", "starting_balance": 1000,
+                  "settlement_currency": "ZAR"},
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+
+        first_blocked = self._create_account("ISOLATED-FIRST-OVER")
+        second_blocked = self.client.post(
+            "/accounts",
+            headers=second_headers,
+            json={"account_id": "ISOLATED-SECOND-OVER", "starting_balance": 1000,
+                  "settlement_currency": "ZAR"},
+        )
+        self.assertEqual(first_blocked.status_code, 400)
+        self.assertEqual(second_blocked.status_code, 400)
+
+    def test_upgrade_and_downgrade_preserve_existing_accounts(self):
+        self._assign_tier("ADVANCED")
+        account_ids = ["TIER-PRESERVE-1", "TIER-PRESERVE-2", "TIER-PRESERVE-3"]
+        for account_id in account_ids:
+            response = self._create_account(account_id)
+            self.assertEqual(response.status_code, 200, response.text)
+
+        self._assign_tier("STANDARD")
+        blocked = self._create_account("TIER-PRESERVE-BLOCKED")
+        self.assertEqual(blocked.status_code, 400)
+
+        me = self.client.get("/auth/me", headers=self.participant_headers).json()
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                "SELECT account_id, starting_balance, balance, settlement_currency "
+                "FROM paper_accounts WHERE owner_user_id = ? ORDER BY account_id",
+                (me["user_id"],),
+            ).fetchall()
+        self.assertEqual([row["account_id"] for row in rows], sorted(account_ids))
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row["settlement_currency"] == "ZAR" for row in rows))
+
+        self._assign_tier("ADVANCED")
+        restored = self._create_account("TIER-PRESERVE-4")
+        self.assertEqual(restored.status_code, 200, restored.text)
+
+    def test_admin_tier_changes_write_immutable_audit_records(self):
+        me = self.client.get("/auth/me", headers=self.participant_headers).json()
+        self._assign_tier("ADVANCED")
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                "SELECT actor_user_id, participant_user_id, previous_tier, new_tier, reason "
+                "FROM subscription_entitlement_audit WHERE participant_user_id = ?",
+                (me["user_id"],),
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["participant_user_id"], me["user_id"])
+        self.assertEqual(rows[0]["previous_tier"], "STANDARD")
+        self.assertEqual(rows[0]["new_tier"], "ADVANCED")
+        self.assertTrue(rows[0]["actor_user_id"])
+        self.assertTrue(rows[0]["reason"])
+
+        with self.assertRaises(Exception):
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE subscription_entitlement_audit SET reason = 'tampered'"
+                )
+        with self.assertRaises(Exception):
+            with database.get_connection() as connection:
+                connection.execute("DELETE FROM subscription_entitlement_audit")
+
+
 if __name__ == "__main__":
     unittest.main()
