@@ -19,6 +19,8 @@ Set `VITE_API_BASE_URL` to the API base path or URL. The default is `/api`.
 - Private account, trade, position-group and copy-relationship endpoints require a bearer session and verify account ownership server-side.
 - Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes. Session tokens are random, expire after 12 hours, and are stored server-side only as SHA-256 hashes.
 - Repeated failed logins are temporarily throttled.
+- Signed-in users can change their password through `POST /auth/change-password` after confirming the current password. The backend revokes the user's other active sessions and retains the current session.
+- Password-change security notification email is not yet configured; the endpoint reports this explicitly. Email verification, password-reset delivery and secure first-administrator provisioning remain launch prerequisites.
 - The frontend keeps the bearer token in React memory only. Refreshing the page clears the session and requires signing in again. The token is not written to localStorage or sessionStorage.
 - The dashboard is read-only for trade execution. It can create paper accounts and inspect account balances, risk and trade history, but it cannot place or close orders.
 - Health and emergency-stop status are public read-only endpoints. Emergency-stop activation and resume require a persisted `ADMIN` role and verified email state in the backend database. Public registration creates participant accounts only.
