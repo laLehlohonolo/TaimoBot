@@ -73,6 +73,64 @@ function AuthPanel({ onAuthenticated }) {
   );
 }
 
+
+function PasswordChangePanel({ token }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    if (newPassword !== confirmPassword) {
+      setError("The new passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await apiRequest("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword
+        })
+      }, token);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setNotice(
+        result.security_notification === "NOT_CONFIGURED"
+          ? "Password updated. Other active sessions were signed out. Email security notifications are not configured yet."
+          : "Password updated. Other active sessions were signed out."
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update your password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel password-panel">
+      <p className="eyebrow">ACCOUNT SECURITY</p>
+      <h2>Change password</h2>
+      <p className="muted">Confirm your current password. Your other active sessions will be signed out after the change.</p>
+      <form className="auth-form" onSubmit={submit}>
+        <label>Current password<input type="password" autoComplete="current-password" required maxLength={1024} value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} /></label>
+        <label>New password<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} value={newPassword} onChange={event => setNewPassword(event.target.value)} /></label>
+        <label>Confirm new password<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} /></label>
+        {error && <div className="notice error" role="alert">{error}</div>}
+        {notice && <div className="notice success" role="status">{notice}</div>}
+        <button className="primary-button" type="submit" disabled={busy}>{busy ? "Updating…" : "Update password"}</button>
+      </form>
+    </section>
+  );
+}
+
 function MetricCard({ label, value, note }) {
   return <article className="panel metric-card"><span className="card-label">{label}</span><div className="metric">{value}</div><p>{note}</p></article>;
 }
@@ -566,6 +624,7 @@ export default function App() {
 
           {participantTimeline && <ParticipantJourney timeline={participantTimeline} />}
           <CurrencyPreferencePanel token={session.access_token} />
+          <PasswordChangePanel token={session.access_token} />
           <div className="account-layout">
             <aside className="panel account-sidebar">
               <h3>Your accounts</h3>
