@@ -748,6 +748,27 @@ def migrate_subscription_entitlements(connection):
     )
 
 
+def migrate_user_security_roles(connection):
+    """Add fail-closed account roles and email-verification state."""
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "role" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'PARTICIPANT' "
+            "CHECK (role IN ('PARTICIPANT', 'ADMIN'))"
+        )
+    if "email_verified" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (email_verified IN (0, 1))"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_role_verified ON users(role, email_verified)"
+    )
+
+
 def init_db():
     """Create tables and safely migrate existing paper-trading data."""
 
@@ -980,6 +1001,7 @@ def init_db():
         migrate_account_settlement_currency(connection)
         migrate_subscription_entitlements(connection)
         migrate_copy_execution_leases(connection)
+        migrate_user_security_roles(connection)
 
         connection.execute(
             """
