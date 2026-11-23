@@ -308,7 +308,6 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
             expected_broker="ExampleBroker",
             expected_symbol="XAUUSD",
             expected_account_currency="ZAR",
-            expected_quote_currency="USD",
             now=now or datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
             max_age_seconds=max_age_seconds,
         )
