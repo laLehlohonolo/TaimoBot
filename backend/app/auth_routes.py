@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from .auth import (
     AuthenticationError, AuthenticationRateLimitError,
     authenticate_user, create_session,
-    get_session_user, register_user, revoke_session
+    get_session_user, register_user, revoke_session, change_password
 )
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -17,6 +17,11 @@ bearer_scheme = HTTPBearer(auto_error=False)
 class RegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=12, max_length=1024)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=12, max_length=1024)
 
 
 class LoginRequest(BaseModel):
@@ -72,6 +77,29 @@ def auth_logout(
 ):
     revoke_session(credentials.credentials)
     return {"authenticated": False, "message": "Session revoked."}
+
+
+@router.post("/change-password")
+def auth_change_password(
+    request: PasswordChangeRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    user=Depends(current_user),
+):
+    try:
+        change_password(
+            user["user_id"],
+            request.current_password,
+            request.new_password,
+            credentials.credentials,
+        )
+    except AuthenticationError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        "password_changed": True,
+        "other_sessions_revoked": True,
+        "security_notification": "NOT_CONFIGURED",
+    }
+
 
 def require_account_access(account_id, user):
     from .database import get_connection
