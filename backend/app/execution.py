@@ -442,6 +442,42 @@ def open_paper_trade(
         if account is None:
             raise ValueError("Paper account not found.")
 
+        tier = "STANDARD"
+        if account["owner_user_id"]:
+            entitlement = connection.execute(
+                """
+                SELECT tier FROM participant_subscription_entitlements
+                WHERE user_id = ?
+                """,
+                (account["owner_user_id"],)
+            ).fetchone()
+            if entitlement is not None:
+                tier = entitlement["tier"]
+
+        position_limits = {
+            "STANDARD": 4,
+            "ADVANCED": 8,
+            "PREMIUM": 13,
+            "EXCLUSIVE": 20,
+        }
+        maximum_positions = position_limits.get(tier)
+        if maximum_positions is None:
+            raise ValueError("Account subscription entitlement requires administrator review.")
+
+        open_positions = connection.execute(
+            """
+            SELECT COUNT(*) AS position_count
+            FROM trades
+            WHERE account_id = ? AND status = 'OPEN'
+            """,
+            (account_id,)
+        ).fetchone()["position_count"]
+        if open_positions >= maximum_positions:
+            raise ValueError(
+                f"{tier.title()} account position limit reached "
+                f"({maximum_positions} open positions)."
+            )
+
         assigned_profile = get_risk_profile(
             account["starting_balance"]
         )
@@ -567,6 +603,7 @@ def open_paper_trade(
         "total_open_risk": risk["projected_total_open_risk"],
         "remaining_risk": risk["remaining_risk_after_trade"],
         "maximum_risk_percent": risk["maximum_risk_percent"],
+        "maximum_open_positions": maximum_positions,
         "status": "OPEN",
         "mode": "paper_trading"
     }
