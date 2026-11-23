@@ -400,6 +400,21 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.assertEqual(activate.status_code, 403)
         self.assertEqual(resume.status_code, 403)
 
+    def test_email_allowlist_cannot_grant_admin_privileges(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "allowlisted@example.com", "password": "AllowlistedPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "allowlisted@example.com", "password": "AllowlistedPassphrase-2026!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        with patch.dict("os.environ", {"TAIMOBOT_ADMIN_EMAILS": "allowlisted@example.com"}):
+            response = self.client.post("/safety/emergency-stop", headers=headers)
+        self.assertEqual(response.status_code, 403)
+
     def test_configured_admin_can_activate_and_resume_emergency_stop(self):
         deactivate_emergency_stop()
         registered = self.client.post(
@@ -407,23 +422,23 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
             json={"email": "admin@example.com", "password": "AdminPassphrase-2026!"}
         )
         self.assertEqual(registered.status_code, 200)
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE email = ?",
+                ("admin@example.com",),
+            )
         login = self.client.post(
             "/auth/login",
             json={"email": "admin@example.com", "password": "AdminPassphrase-2026!"}
         )
         headers = {"Authorization": "Bearer " + login.json()["access_token"]}
 
-        with __import__("unittest").mock.patch.dict(
-            "os.environ",
-            {"TAIMOBOT_ADMIN_EMAILS": " admin@example.com,other@example.com "},
-            clear=True
-        ):
-            activate = self.client.post("/safety/emergency-stop", headers=headers)
-            self.assertEqual(activate.status_code, 200)
-            self.assertTrue(activate.json()["emergency_stop"])
-            resume = self.client.post("/safety/resume", headers=headers)
-            self.assertEqual(resume.status_code, 200)
-            self.assertFalse(resume.json()["emergency_stop"])
+        activate = self.client.post("/safety/emergency-stop", headers=headers)
+        self.assertEqual(activate.status_code, 200)
+        self.assertTrue(activate.json()["emergency_stop"])
+        resume = self.client.post("/safety/resume", headers=headers)
+        self.assertEqual(resume.status_code, 200)
+        self.assertFalse(resume.json()["emergency_stop"])
 
 
 if __name__ == "__main__":
