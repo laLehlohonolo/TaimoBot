@@ -168,7 +168,7 @@ def authenticate_user(email, password):
 
     with get_connection() as connection:
         user = connection.execute(
-            "SELECT user_id, email, password_hash FROM users WHERE email = ?",
+            "SELECT user_id, email, password_hash, role, email_verified FROM users WHERE email = ?",
             (normalized_email,)
         ).fetchone()
 
@@ -180,7 +180,12 @@ def authenticate_user(email, password):
         raise AuthenticationError("Invalid email or password.")
 
     _clear_login_failures(normalized_email)
-    return {"user_id": user["user_id"], "email": user["email"]}
+    return {
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "role": user["role"],
+        "email_verified": bool(user["email_verified"]),
+    }
 
 
 def create_session(user_id):
@@ -216,7 +221,7 @@ def get_session_user(token):
     with get_connection() as connection:
         row = connection.execute(
             """
-            SELECT users.user_id, users.email
+            SELECT users.user_id, users.email, users.role, users.email_verified
             FROM auth_sessions
             JOIN users ON users.user_id = auth_sessions.user_id
             WHERE auth_sessions.token_hash = ?
@@ -228,7 +233,12 @@ def get_session_user(token):
     if row is None:
         raise AuthenticationError("Invalid or expired session.")
 
-    return {"user_id": row["user_id"], "email": row["email"]}
+    return {
+        "user_id": row["user_id"],
+        "email": row["email"],
+        "role": row["role"],
+        "email_verified": bool(row["email_verified"]),
+    }
 
 
 def revoke_session(token):
