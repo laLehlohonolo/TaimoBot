@@ -167,6 +167,7 @@ def subscription_entitlement(user=Depends(current_user)):
     from .database import get_connection
 
     limits = {"STANDARD": 1, "ADVANCED": 3, "PREMIUM": 5, "EXCLUSIVE": 10}
+    position_limits = {"STANDARD": 4, "ADVANCED": 8, "PREMIUM": 13, "EXCLUSIVE": 20}
     with get_connection() as connection:
         connection.execute(
             """
@@ -192,6 +193,7 @@ def subscription_entitlement(user=Depends(current_user)):
         "user_id": user["user_id"],
         "tier": row["tier"],
         "maximum_accounts": limit,
+        "maximum_open_positions_per_account": position_limits[row["tier"]],
         "accounts_used": count,
         "accounts_remaining": max(0, limit - count),
         "updated_at": row["updated_at"],
