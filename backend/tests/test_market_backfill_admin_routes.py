@@ -49,6 +49,12 @@ class MarketBackfillAdminRouteTests(unittest.TestCase):
             "/auth/register", json={"email": email, "password": password}
         )
         self.assertEqual(registered.status_code, 200, registered.text)
+        if email == "admin@example.com":
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE user_id = ?",
+                    (registered.json()["user_id"],),
+                )
         login = self.client.post(
             "/auth/login", json={"email": email, "password": password}
         )
