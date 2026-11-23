@@ -192,6 +192,75 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         )
         self.assertEqual(expired.status_code, 401)
 
+
+    def test_password_change_keeps_current_session_and_revokes_other_sessions(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "password-change@example.com", "password": "OriginalPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        user_id = registered.json()["user_id"]
+        first = create_session(user_id)
+        second = create_session(user_id)
+        first_headers = {"Authorization": "Bearer " + first["access_token"]}
+        second_headers = {"Authorization": "Bearer " + second["access_token"]}
+
+        changed = self.client.post(
+            "/auth/change-password",
+            json={
+                "current_password": "OriginalPassphrase-2026!",
+                "new_password": "UpdatedPassphrase-2026!",
+            },
+            headers=first_headers,
+        )
+        self.assertEqual(changed.status_code, 200)
+        self.assertTrue(changed.json()["password_changed"])
+        self.assertTrue(changed.json()["other_sessions_revoked"])
+        self.assertEqual(changed.json()["security_notification"], "NOT_CONFIGURED")
+        self.assertEqual(self.client.get("/auth/me", headers=first_headers).status_code, 200)
+        self.assertEqual(self.client.get("/auth/me", headers=second_headers).status_code, 401)
+        self.assertEqual(
+            self.client.post(
+                "/auth/login",
+                json={"email": "password-change@example.com", "password": "OriginalPassphrase-2026!"},
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/auth/login",
+                json={"email": "password-change@example.com", "password": "UpdatedPassphrase-2026!"},
+            ).status_code,
+            200,
+        )
+
+    def test_password_change_rejects_wrong_current_password_without_mutation(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "password-wrong@example.com", "password": "OriginalPassphrase-2026!"}
+        )
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "password-wrong@example.com", "password": "OriginalPassphrase-2026!"},
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        response = self.client.post(
+            "/auth/change-password",
+            json={
+                "current_password": "IncorrectPassphrase-2026!",
+                "new_password": "UpdatedPassphrase-2026!",
+            },
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            self.client.post(
+                "/auth/login",
+                json={"email": "password-wrong@example.com", "password": "OriginalPassphrase-2026!"},
+            ).status_code,
+            200,
+        )
+
     def test_auth_me_rejects_missing_or_invalid_bearer_token(self):
         missing = self.client.get("/auth/me")
         invalid = self.client.get(
