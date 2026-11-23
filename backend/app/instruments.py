@@ -553,6 +553,69 @@ def validate_fx_conversion_snapshot(
     }
 
 
+def calculate_fx_verified_stop_risk(
+    entry_price,
+    stop_loss,
+    requested_volume,
+    specifications,
+    expected_broker,
+    expected_symbol,
+    expected_account_currency,
+    expected_quote_currency,
+    fx_snapshot,
+    expected_fx_provider,
+    now=None,
+    max_age_seconds=300,
+):
+    """Calculate stop risk using an independently validated FX quote.
+
+    The FX quote is validated separately from broker contract metadata. Its
+    ask is used as the conservative quote-to-account conversion rate. This
+    remains calculation-only: it does not authenticate a provider, fetch data,
+    approve an order, or connect the result to execution.
+    """
+    from datetime import datetime, timezone
+
+    checked_at = now or datetime.now(timezone.utc)
+    broker_provenance = validate_broker_specification_provenance(
+        specifications,
+        expected_broker=expected_broker,
+        expected_symbol=expected_symbol,
+        expected_account_currency=expected_account_currency,
+        now=checked_at,
+        max_age_seconds=max_age_seconds,
+    )
+    expected_quote = str(expected_quote_currency).strip().upper()
+    if not expected_quote or broker_provenance["quote_currency"] != expected_quote:
+        raise ValueError("Broker specification quote currency does not match the requested instrument.")
+
+    fx = validate_fx_conversion_snapshot(
+        fx_snapshot,
+        expected_provider=expected_fx_provider,
+        expected_from_currency=expected_quote,
+        expected_to_currency=expected_account_currency,
+        now=checked_at,
+        max_age_seconds=max_age_seconds,
+    )
+
+    calculation_specs = dict(specifications)
+    calculation_specs["quote_to_account_rate"] = fx["conversion_rate"]
+    calculated = calculate_monetary_stop_risk(
+        entry_price, stop_loss, requested_volume, calculation_specs
+    )
+    if calculated["quote_currency"] != expected_quote:
+        raise ValueError("Monetary calculation quote currency does not match the requested instrument.")
+    if calculated["account_currency"] != str(expected_account_currency).strip().upper():
+        raise ValueError("Monetary calculation account currency does not match the requested account.")
+
+    return {
+        **calculated,
+        "broker_provenance": broker_provenance,
+        "fx_conversion": fx,
+        "mode": "independently_fx_validated_calculation_only",
+    }
+
+
 # Execution approval is deliberately narrower than catalogue membership.
 EXECUTION_ENABLED_SYMBOLS = frozenset({"XAUUSD"})
 
