@@ -465,5 +465,26 @@ class MarketObservationStoreTests(unittest.TestCase):
                 self.assertFalse(report["execution_triggered"])
 
 
+    def test_market_observations_are_append_only_at_database_level(self):
+        saved = save_market_observation(self.connection, self.valid_record())
+        self.connection.commit()
+        self.assertTrue(saved["inserted"])
+
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
+            self.connection.execute(
+                "UPDATE market_observations SET close = ? WHERE symbol = ?",
+                (9999.0, "1HZ100V"),
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
+            self.connection.execute(
+                "DELETE FROM market_observations WHERE symbol = ?",
+                ("1HZ100V",),
+            )
+
+        rows = list_market_observations(self.connection, symbol="1HZ100V")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["close"], 1001.0)
+
+
 if __name__ == "__main__":
     unittest.main()
