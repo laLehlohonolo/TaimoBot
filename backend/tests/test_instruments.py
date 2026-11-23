@@ -567,5 +567,70 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
                     )
 
 
+    def test_fx_verified_stop_risk_uses_independent_fx_ask_not_embedded_broker_rate(self):
+        from app.instruments import calculate_fx_verified_stop_risk
+        specs = self.provenance_specifications()
+        specs["quote_to_account_rate"] = 1.0
+        snapshot = {
+            "provider": "ExampleFX", "pair": "USD/ZAR",
+            "base_currency": "USD", "quote_currency": "ZAR",
+            "bid": 18.49, "ask": 18.51,
+            "observed_at": "2026-11-23T08:00:00Z",
+            "source_reference": "fx-quote-2026-11-23T08:00Z",
+        }
+        result = calculate_fx_verified_stop_risk(
+            1.10000, 1.09990, 0.03, specs,
+            "ExampleBroker", "XAUUSD", "ZAR", "USD",
+            snapshot, "ExampleFX",
+            now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+        )
+        self.assertAlmostEqual(result["quote_to_account_rate"], 18.51)
+        self.assertAlmostEqual(result["monetary_risk"], 5.553)
+        self.assertEqual(result["fx_conversion"]["conversion_side"], "ASK")
+        self.assertEqual(result["mode"], "independently_fx_validated_calculation_only")
+        self.assertNotIn("approved", result)
+
+    def test_fx_verified_stop_risk_rejects_stale_independent_fx_quote(self):
+        from app.instruments import calculate_fx_verified_stop_risk
+        snapshot = {
+            "provider": "ExampleFX", "pair": "USD/ZAR",
+            "base_currency": "USD", "quote_currency": "ZAR",
+            "bid": 18.49, "ask": 18.51,
+            "observed_at": "2026-11-23T07:54:59Z",
+            "source_reference": "old-fx-quote",
+        }
+        with self.assertRaisesRegex(ValueError, "stale"):
+            calculate_fx_verified_stop_risk(
+                1.10000, 1.09990, 0.03, self.provenance_specifications(),
+                "ExampleBroker", "XAUUSD", "ZAR", "USD",
+                snapshot, "ExampleFX",
+                now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+            )
+
+    def test_fx_verified_stop_risk_rejects_provider_and_currency_mismatches(self):
+        from app.instruments import calculate_fx_verified_stop_risk
+        snapshot = {
+            "provider": "ExampleFX", "pair": "USD/ZAR",
+            "base_currency": "USD", "quote_currency": "ZAR",
+            "bid": 18.49, "ask": 18.51,
+            "observed_at": "2026-11-23T08:00:00Z",
+            "source_reference": "fx-quote",
+        }
+        now = datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(ValueError, "provider"):
+            calculate_fx_verified_stop_risk(
+                1.10000, 1.09990, 0.03, self.provenance_specifications(),
+                "ExampleBroker", "XAUUSD", "ZAR", "USD",
+                snapshot, "OtherFX", now=now,
+            )
+        wrong_pair = dict(snapshot, pair="EUR/ZAR", base_currency="EUR")
+        with self.assertRaisesRegex(ValueError, "conversion direction"):
+            calculate_fx_verified_stop_risk(
+                1.10000, 1.09990, 0.03, self.provenance_specifications(),
+                "ExampleBroker", "XAUUSD", "ZAR", "USD",
+                wrong_pair, "ExampleFX", now=now,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
