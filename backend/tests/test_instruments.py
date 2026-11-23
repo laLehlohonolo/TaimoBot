@@ -452,5 +452,120 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
             )
 
 
+    def fx_snapshot(self, **overrides):
+        snapshot = {
+            "provider": "ExampleFX",
+            "pair": "USD/ZAR",
+            "base_currency": "USD",
+            "quote_currency": "ZAR",
+            "bid": 18.49,
+            "ask": 18.51,
+            "observed_at": "2026-11-23T08:00:00Z",
+            "source_reference": "fx-quote-2026-11-23T08:00Z",
+        }
+        snapshot.update(overrides)
+        return snapshot
+
+    def test_fx_conversion_snapshot_accepts_fresh_matching_usd_zar_quote(self):
+        from app.instruments import validate_fx_conversion_snapshot
+        result = validate_fx_conversion_snapshot(
+            self.fx_snapshot(), "ExampleFX", "USD", "ZAR",
+            now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+        )
+        self.assertTrue(result["validated"])
+        self.assertEqual(result["pair"], "USD/ZAR")
+        self.assertEqual(result["conversion_side"], "ASK")
+        self.assertAlmostEqual(result["conversion_rate"], 18.51)
+        self.assertEqual(result["mode"], "fx_conversion_validation_only")
+
+    def test_fx_conversion_snapshot_rejects_missing_fields(self):
+        from app.instruments import validate_fx_conversion_snapshot
+        for field in ("provider", "pair", "base_currency", "quote_currency", "bid", "ask", "observed_at", "source_reference"):
+            snapshot = self.fx_snapshot()
+            del snapshot[field]
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, field):
+                    validate_fx_conversion_snapshot(
+                        snapshot, "ExampleFX", "USD", "ZAR",
+                        now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+                    )
+
+    def test_fx_conversion_snapshot_rejects_wrong_provider_or_currency_direction(self):
+        from app.instruments import validate_fx_conversion_snapshot
+        cases = (
+            (self.fx_snapshot(), "OtherFX", "USD", "ZAR"),
+            (self.fx_snapshot(), "ExampleFX", "ZAR", "USD"),
+            (self.fx_snapshot(pair="EUR/ZAR"), "ExampleFX", "USD", "ZAR"),
+            (self.fx_snapshot(quote_currency="EUR"), "ExampleFX", "USD", "ZAR"),
+        )
+        for snapshot, provider, source, target in cases:
+            with self.subTest(provider=provider, source=source, target=target, pair=snapshot["pair"]):
+                with self.assertRaises(ValueError):
+                    validate_fx_conversion_snapshot(
+                        snapshot, provider, source, target,
+                        now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+                    )
+
+    def test_fx_conversion_snapshot_rejects_stale_and_future_quotes(self):
+        from app.instruments import validate_fx_conversion_snapshot
+        now = datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc)
+        for timestamp, message in (
+            ("2026-11-23T07:54:59Z", "stale"),
+            ("2026-11-23T08:02:01Z", "future"),
+        ):
+            with self.subTest(timestamp=timestamp):
+                with self.assertRaisesRegex(ValueError, message):
+                    validate_fx_conversion_snapshot(
+                        self.fx_snapshot(observed_at=timestamp),
+                        "ExampleFX", "USD", "ZAR", now=now,
+                    )
+
+    def test_fx_conversion_snapshot_rejects_invalid_bid_ask(self):
+        from app.instruments import validate_fx_conversion_snapshot
+        cases = (
+            (0, 18.5), (-1, 18.5), (float("nan"), 18.5),
+            (18.6, 18.5), (18.5, float("inf")), ("bad", 18.5),
+        )
+        for bid, ask in cases:
+            with self.subTest(bid=bid, ask=ask):
+                with self.assertRaises(ValueError):
+                    validate_fx_conversion_snapshot(
+                        self.fx_snapshot(bid=bid, ask=ask),
+                        "ExampleFX", "USD", "ZAR",
+                        now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+                    )
+
+    def test_fx_conversion_snapshot_rejects_naive_timestamps_and_invalid_freshness(self):
+        from app.instruments import validate_fx_conversion_snapshot
+        now = datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(ValueError, "timezone"):
+            validate_fx_conversion_snapshot(
+                self.fx_snapshot(observed_at="2026-11-23T08:00:00"),
+                "ExampleFX", "USD", "ZAR", now=now,
+            )
+        for max_age in (0, -1, float("nan"), float("inf"), True, "bad"):
+            with self.subTest(max_age=max_age):
+                with self.assertRaisesRegex(ValueError, "max_age_seconds"):
+                    validate_fx_conversion_snapshot(
+                        self.fx_snapshot(), "ExampleFX", "USD", "ZAR",
+                        now=now, max_age_seconds=max_age,
+                    )
+
+    def test_fx_conversion_snapshot_requires_timezone_aware_clock_and_currency_codes(self):
+        from app.instruments import validate_fx_conversion_snapshot
+        with self.assertRaisesRegex(ValueError, "now"):
+            validate_fx_conversion_snapshot(
+                self.fx_snapshot(), "ExampleFX", "USD", "ZAR",
+                now=datetime(2026, 11, 23, 8, 2),
+            )
+        for source, target in (("US", "ZAR"), ("USD", "ZAR1"), ("USD", "USD")):
+            with self.subTest(source=source, target=target):
+                with self.assertRaisesRegex(ValueError, "currencies"):
+                    validate_fx_conversion_snapshot(
+                        self.fx_snapshot(), "ExampleFX", source, target,
+                        now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
