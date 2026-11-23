@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from unittest.mock import patch
 
 from app import database
+from app.auth import register_user
 from app.database import init_db
 from app.maintenance import SAST
 from app.maintenance_scheduler import run_maintenance_for_date
@@ -21,6 +22,13 @@ class MaintenanceSchedulerTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = self.root / "taimobot.sqlite3"
         init_db()
+        admin = register_user("ops@example.com", "OpsAdminPassphrase-2026!")
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE user_id = ?",
+                (admin["user_id"],),
+            )
+        self.admin_user = {"user_id": admin["user_id"], "email": admin["email"]}
         deactivate_emergency_stop()
 
     def tearDown(self):
@@ -474,7 +482,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
                 result = retry_maintenance(
                     MaintenanceRetryRequest(run_date=day, retry_mode="FAILED"),
-                    {"email": "ops@example.com"},
+                    self.admin_user,
                 )
 
         self.assertEqual(result["status"], "MAINTENANCE_COMPLETE")
@@ -486,7 +494,7 @@ class MaintenanceSchedulerTests(unittest.TestCase):
 
     def test_admin_retry_endpoint_rejects_missing_run_and_mismatched_state(self):
         day = date(2026, 11, 19)
-        admin = {"email": "ops@example.com"}
+        admin = self.admin_user
         with patch.dict("os.environ", {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
             # The endpoint must safely return 404 even before the scheduler
             # has ever created its maintenance_runs table.
