@@ -37,10 +37,10 @@ class CopyTradingDatabaseTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO paper_accounts
-                    (account_id, starting_balance, balance, risk_profile)
+                    (account_id, starting_balance, balance, risk_profile, settlement_currency)
                 VALUES
-                    ('SOURCE-001', 10000, 10000, 'STANDARD'),
-                    ('FOLLOWER-001', 5000, 5000, 'STANDARD')
+                    ('SOURCE-001', 10000, 10000, 'STANDARD', 'ZAR'),
+                    ('FOLLOWER-001', 5000, 5000, 'STANDARD', 'ZAR')
                 """
             )
 
@@ -907,8 +907,8 @@ class CopyTradingDatabaseTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO paper_accounts
-                    (account_id, starting_balance, balance, risk_profile)
-                VALUES ('FOLLOWER-002', 8000, 8000, 'STANDARD')
+                    (account_id, starting_balance, balance, risk_profile, settlement_currency)
+                VALUES ('FOLLOWER-002', 8000, 8000, 'STANDARD', 'ZAR')
                 """
             )
             connection.execute(
