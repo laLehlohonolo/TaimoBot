@@ -272,5 +272,91 @@ class MarketBackfillAdminRouteTests(unittest.TestCase):
         self.assertEqual(checkpoint["batches_completed"], 1)
 
 
+    def test_recovery_is_idempotent_preserves_existing_candle_and_advances_exact_cursor(self):
+        from datetime import datetime, timezone
+
+        existing_timestamp = datetime.fromtimestamp(3540, timezone.utc).isoformat()
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO market_observations
+                    (symbol, timeframe, observed_at, source, open, high, low, close, volume)
+                VALUES ('1HZ100V', 'M1', ?, 'deriv', 700, 780, 690, 777, 4)
+                """,
+                (existing_timestamp,),
+            )
+
+        class FakeDerivClient:
+            async def collect_candle_range(
+                self, symbol, timeframe, start_epoch, end_epoch, max_candles
+            ):
+                self.requested_range = (symbol, timeframe, start_epoch, end_epoch, max_candles)
+                return [
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
+                        "open": 100,
+                        "high": 101,
+                        "low": 99,
+                        "close": 100,
+                        "volume": 0,
+                        "source": "deriv",
+                    }
+                    for epoch in (3480, 3540, 3600)
+                ]
+
+        approval = self.client.post(
+            "/admin/market-backfills/1HZ100V/M1/review",
+            headers=self.admin_headers,
+            json={
+                "decision": "RETRY_SAME_RANGE",
+                "confirm_retry": True,
+                "rationale": "Existing candle checked; exact range retry approved",
+            },
+        )
+        self.assertEqual(approval.status_code, 200, approval.text)
+
+        fake_client = FakeDerivClient()
+        with patch("app.main.DerivPublicMarketDataClient", return_value=fake_client):
+            response = self.client.post(
+                "/admin/market-backfills/1HZ100V/M1/run",
+                headers=self.admin_headers,
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(fake_client.requested_range, ("1HZ100V", "M1", 3480, 3600, 3))
+        self.assertEqual(body["received_count"], 3)
+        self.assertEqual(body["inserted_count"], 2)
+        self.assertEqual(body["duplicate_count"], 1)
+        self.assertEqual(body["next_end_epoch"], 3420)
+        self.assertEqual(body["status"], "RUNNING")
+
+        with database.get_connection() as connection:
+            observations = connection.execute(
+                """
+                SELECT observed_at, close FROM market_observations
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1' AND source = 'deriv'
+                ORDER BY observed_at
+                """
+            ).fetchall()
+            checkpoint = connection.execute(
+                """
+                SELECT next_end_epoch, status, batches_completed
+                FROM market_backfill_checkpoints
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()
+
+        self.assertEqual(len(observations), 3)
+        preserved = next(row for row in observations if row["observed_at"] == existing_timestamp)
+        self.assertEqual(preserved["close"], 777)
+        self.assertEqual(checkpoint["next_end_epoch"], 3420)
+        self.assertEqual(checkpoint["status"], "RUNNING")
+        self.assertEqual(checkpoint["batches_completed"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
