@@ -30,11 +30,12 @@ All trading and risk decisions remain server-side. The system remains paper-trad
 
 ## Global emergency-stop permissions
 
-The global emergency-stop and resume endpoints are administrator-only. The backend
-must be configured with `TAIMOBOT_ADMIN_EMAILS` (a comma-separated allowlist of
-administrator email addresses). If the variable is empty or unset, these controls
-fail closed and return HTTP 403 to regular users. Never put this setting in frontend
-environment variables or browser code.
+The global emergency-stop and resume endpoints require an authenticated user whose
+database role is `ADMIN` and whose email is marked verified. The backend checks
+the current database record on each request; a stale client role or email address
+cannot grant access. Public registration cannot create administrator accounts.
+The first-admin provisioning and verified-email delivery workflows remain
+prerequisites and are not yet available. Until then these controls fail closed.
 
 
 ## Backend browser-origin configuration
