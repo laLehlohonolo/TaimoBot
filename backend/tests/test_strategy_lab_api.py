@@ -22,6 +22,11 @@ class StrategyLabAdminApiTests(unittest.TestCase):
         os.environ["TAIMOBOT_ADMIN_EMAILS"] = "strategy-admin@taimobot.local"
         admin = register_user("strategy-admin@taimobot.local", "AdminPassphrase-2026-Secure!")
         participant = register_user("strategy-participant@taimobot.local", "ParticipantPassphrase-2026!")
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE user_id = ?",
+                (admin["user_id"],),
+            )
         self.admin_client = TestClient(app)
         self.participant_client = TestClient(app)
         self.admin_client.headers.update({
