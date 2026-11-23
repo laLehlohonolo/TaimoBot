@@ -21,20 +21,21 @@ Set `VITE_API_BASE_URL` to the API base path or URL. The default is `/api`.
 - Repeated failed logins are temporarily throttled.
 - The frontend keeps the bearer token in React memory only. Refreshing the page clears the session and requires signing in again. The token is not written to localStorage or sessionStorage.
 - The dashboard is read-only for trade execution. It can create paper accounts and inspect account balances, risk and trade history, but it cannot place or close orders.
-- Health and emergency-stop status are public read-only endpoints. Emergency-stop activation and resume require an authenticated email on the backend administrator allowlist.
+- Health and emergency-stop status are public read-only endpoints. Emergency-stop activation and resume require a persisted `ADMIN` role and verified email state in the backend database. Public registration creates participant accounts only.
 
-**Deployment warning:** administrator access is controlled by the backend `TAIMOBOT_ADMIN_EMAILS` allowlist; this is not a full role-management system. Do not expose the backend publicly until HTTPS, production CORS/origin restrictions, secret management, backups, monitoring and deployment hardening have been configured. Never place API keys, signing secrets, passwords or broker credentials in `VITE_*` variables; these are visible in browser assets.
+**Deployment warning:** the database-backed role check is implemented, but secure first-administrator provisioning and email-verification delivery are not yet implemented. Administrator controls therefore fail closed until those components are completed. Do not expose the backend publicly until HTTPS, production CORS/origin restrictions, secret management, backups, monitoring and deployment hardening have been configured. Never place API keys, signing secrets, passwords or broker credentials in `VITE_*` variables; these are visible in browser assets.
 
 All trading and risk decisions remain server-side. The system remains paper-trading only; no live broker execution is enabled.
 
 
 ## Global emergency-stop permissions
 
-The global emergency-stop and resume endpoints are administrator-only. The backend
-must be configured with `TAIMOBOT_ADMIN_EMAILS` (a comma-separated allowlist of
-administrator email addresses). If the variable is empty or unset, these controls
-fail closed and return HTTP 403 to regular users. Never put this setting in frontend
-environment variables or browser code.
+The global emergency-stop and resume endpoints require an authenticated user whose
+database role is `ADMIN` and whose email is marked verified. The backend checks
+the current database record on each request; a stale client role or email address
+cannot grant access. Public registration cannot create administrator accounts.
+The first-admin provisioning and verified-email delivery workflows remain
+prerequisites and are not yet available. Until then these controls fail closed.
 
 
 ## Backend browser-origin configuration
