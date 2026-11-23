@@ -111,6 +111,58 @@ class SubscriptionEntitlementTests(unittest.TestCase):
                 finally:
                     self.participant_headers = original_headers
 
+    def test_open_position_limits_are_enforced_per_account_for_each_tier(self):
+        from app.execution import open_paper_trade
+
+        limits = (
+            ("STANDARD", 4),
+            ("ADVANCED", 8),
+            ("PREMIUM", 13),
+            ("EXCLUSIVE", 20),
+        )
+        for tier, limit in limits:
+            with self.subTest(tier=tier):
+                email = f"positions-{tier.lower()}@taimobot.local"
+                headers = self._register_and_login(
+                    email, "ParticipantPassphrase-2026!"
+                )
+                original_headers = self.participant_headers
+                self.participant_headers = headers
+                try:
+                    self._assign_tier(tier)
+                    account_id = f"POSITIONS-{tier}"
+                    created = self._create_account(account_id)
+                    self.assertEqual(created.status_code, 200, created.text)
+
+                    with database.get_connection() as connection:
+                        connection.executemany(
+                            """
+                            INSERT INTO trades (
+                                trade_id, account_id, client_order_id, symbol,
+                                side, quantity, entry_price, stop_loss,
+                                status, risk_amount
+                            )
+                            VALUES (?, ?, ?, 'XAUUSD', 'BUY', 0.001, 2000, 1990,
+                                    'OPEN', 0.01)
+                            """,
+                            [
+                                (f"{tier}-OPEN-{i}", account_id, f"{tier}-ORDER-{i}")
+                                for i in range(limit)
+                            ],
+                        )
+
+                    with self.assertRaisesRegex(ValueError, str(limit)):
+                        open_paper_trade(
+                            account_id=account_id,
+                            client_order_id=f"{tier}-OVER-LIMIT",
+                            symbol="XAUUSD",
+                            side="BUY",
+                            entry_price=2000,
+                            stop_loss=1990,
+                        )
+                finally:
+                    self.participant_headers = original_headers
+
     def test_participant_cannot_assign_their_own_subscription_tier(self):
         me = self.client.get(
             "/auth/me", headers=self.participant_headers
