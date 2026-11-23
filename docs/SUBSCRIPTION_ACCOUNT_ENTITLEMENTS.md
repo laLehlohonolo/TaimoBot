@@ -1,6 +1,6 @@
 # Subscription entitlements and participant account limits
 
-**Status:** Backend enforcement implemented for paper-account creation and admin-assigned entitlements; expanded lifecycle and isolation verification is in progress.
+**Status:** Backend enforcement implemented for paper-account creation and admin-assigned entitlements. Tier-based open-position caps are enforced at paper-trade creation; expanded lifecycle and isolation verification is in progress.
 **Scope:** Paper/demo accounts only. This document does not authorise live trading, real-money wallet access, or payment processing.
 
 ## Confirmed subscription tiers
@@ -28,6 +28,20 @@ The tier name **Advanced** is confirmed. These are account-count entitlements, n
 8. Downgrading must not delete accounts or financial history. If the participant already owns more accounts than the new tier permits, preserve all existing accounts and block additional account creation until the count is below the new limit. Any future account closure/deactivation policy must preserve immutable history.
 9. Each account remains independently isolated: balance, immutable settlement currency, risk profile, open positions, realized/unrealized P&L, costs, and trade history.
 10. Enforce account ownership and account-count limits in backend services and database transactions. Frontend-only restrictions are not security controls.
+
+
+## Open-position entitlements
+
+The maximum number of simultaneously OPEN paper positions is enforced per individual account by the backend. Every separately opened trade entry counts as one position, including a copied entry. A partial close at TP1, TP2, TP3, or optional TP4 does not create a new position; it reduces the quantity of an existing position.
+
+| Subscription tier | Maximum open positions per account |
+|---|---:|
+| Standard | 4 |
+| Advanced | 8 |
+| Premium | 13 |
+| Exclusive | 20 |
+
+The position count is a hard ceiling, not a promise that all slots can be filled. Every new entry, including a copied entry, must independently pass the existing account risk, combined open-risk, margin, instrument-approval, and execution checks. The 1% combined open-risk ceiling is unchanged and takes precedence over unused position capacity. Pending orders require separate controls and are not counted as open positions until accepted and executed.
 
 ## Entitlement authority and payment boundary
 
