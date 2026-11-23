@@ -425,5 +425,116 @@ class MarketBackfillAdminRouteTests(unittest.TestCase):
         self.assertEqual(audit_count, 1)
 
 
+    def test_second_approved_retry_completes_partial_gap_without_overwriting_saved_candles(self):
+        from datetime import datetime, timezone
+
+        class BatchClient:
+            def __init__(self, epochs, price):
+                self.epochs = epochs
+                self.price = price
+
+            async def collect_candle_range(
+                self, symbol, timeframe, start_epoch, end_epoch, max_candles
+            ):
+                self.requested_range = (symbol, timeframe, start_epoch, end_epoch, max_candles)
+                return [
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
+                        "open": self.price,
+                        "high": self.price + 1,
+                        "low": self.price - 1,
+                        "close": self.price,
+                        "volume": 0,
+                        "source": "deriv",
+                    }
+                    for epoch in self.epochs
+                ]
+
+        approval_payload = {
+            "decision": "RETRY_SAME_RANGE",
+            "confirm_retry": True,
+            "rationale": "Retry exact range after inspecting remaining provider gap",
+        }
+
+        first_approval = self.client.post(
+            "/admin/market-backfills/1HZ100V/M1/review",
+            headers=self.admin_headers,
+            json=approval_payload,
+        )
+        self.assertEqual(first_approval.status_code, 200, first_approval.text)
+
+        partial_client = BatchClient((3480, 3600), 100)
+        with patch("app.main.DerivPublicMarketDataClient", return_value=partial_client):
+            partial_response = self.client.post(
+                "/admin/market-backfills/1HZ100V/M1/run",
+                headers=self.admin_headers,
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+        self.assertEqual(partial_response.status_code, 200, partial_response.text)
+        self.assertEqual(partial_response.json()["status"], "GAP_REVIEW")
+        self.assertEqual(partial_response.json()["next_end_epoch"], 3600)
+
+        second_approval = self.client.post(
+            "/admin/market-backfills/1HZ100V/M1/review",
+            headers=self.admin_headers,
+            json={
+                **approval_payload,
+                "rationale": "Previously stored candles checked; retry remaining gap",
+            },
+        )
+        self.assertEqual(second_approval.status_code, 200, second_approval.text)
+
+        complete_client = BatchClient((3480, 3540, 3600), 200)
+        with patch("app.main.DerivPublicMarketDataClient", return_value=complete_client):
+            complete_response = self.client.post(
+                "/admin/market-backfills/1HZ100V/M1/run",
+                headers=self.admin_headers,
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+        self.assertEqual(complete_response.status_code, 200, complete_response.text)
+        body = complete_response.json()
+        self.assertEqual(body["status"], "RUNNING")
+        self.assertEqual(body["next_end_epoch"], 3420)
+        self.assertEqual(body["received_count"], 3)
+        self.assertEqual(body["inserted_count"], 1)
+        self.assertEqual(body["duplicate_count"], 2)
+        self.assertFalse(body["signals_generated"])
+        self.assertFalse(body["execution_triggered"])
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT observed_at, open, close FROM market_observations
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1' AND source = 'deriv'
+                ORDER BY observed_at
+                """
+            ).fetchall()
+            checkpoint = connection.execute(
+                """
+                SELECT next_end_epoch, status, batches_completed
+                FROM market_backfill_checkpoints
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()
+            audit_count = connection.execute(
+                "SELECT COUNT(*) FROM market_backfill_review_audit"
+            ).fetchone()[0]
+
+        self.assertEqual(len(rows), 3)
+        by_epoch = {
+            int(datetime.fromisoformat(row["observed_at"]).timestamp()): row
+            for row in rows
+        }
+        self.assertEqual(by_epoch[3480]["close"], 100)
+        self.assertEqual(by_epoch[3600]["close"], 100)
+        self.assertEqual(by_epoch[3540]["close"], 200)
+        self.assertEqual(checkpoint["next_end_epoch"], 3420)
+        self.assertEqual(checkpoint["status"], "RUNNING")
+        self.assertEqual(checkpoint["batches_completed"], 2)
+        self.assertEqual(audit_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
