@@ -7957,10 +7957,10 @@ def _make_real_inventory_terminal_fence_race_test(scenario):
             calls["connections"] += 1
             with original_get_connection(*args, **kwargs) as connection:
                 yield connection
-            # The third connection is the last metadata read before the
-            # terminal filesystem fence. Mutating here models a writer landing
-            # immediately after that snapshot.
-            if scenario.startswith("fs_") and calls["connections"] == 3 and not calls["changed"]:
+            # The admin-role authorization adds one database read before
+            # inventory begins. The fourth connection is now the last metadata
+            # read before the terminal filesystem fence.
+            if scenario.startswith("fs_") and calls["connections"] == 4 and not calls["changed"]:
                 if scenario == "fs_append":
                     with backup.open("ab") as handle: handle.write(b"late append")
                 elif scenario == "fs_replace":
