@@ -445,6 +445,114 @@ def calculate_provenance_checked_stop_risk(
     }
 
 
+def validate_fx_conversion_snapshot(
+    snapshot,
+    expected_provider,
+    expected_from_currency,
+    expected_to_currency,
+    now=None,
+    max_age_seconds=300,
+):
+    """Validate a fresh, attributable FX quote for currency conversion.
+
+    The pair is expressed as FROM/TO (for example USD/ZAR), and bid/ask
+    represent TO-currency units per one FROM-currency unit. The ask is
+    returned as the conservative conversion rate for converting a FROM-
+    currency liability into TO currency. This validates metadata and quote
+    shape only; it does not authenticate the provider or fetch market data.
+    """
+    from datetime import datetime, timezone
+    import re
+
+    if not isinstance(snapshot, dict):
+        raise ValueError("FX conversion snapshot must be supplied as an object.")
+
+    required = (
+        "provider", "pair", "base_currency", "quote_currency",
+        "bid", "ask", "observed_at", "source_reference",
+    )
+    missing = [field for field in required if field not in snapshot]
+    if missing:
+        raise ValueError("Missing FX conversion fields: " + ", ".join(missing))
+
+    for field in ("provider", "pair", "base_currency", "quote_currency", "source_reference"):
+        value = snapshot[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must be a non-empty string.")
+
+    from_currency = str(expected_from_currency).strip().upper()
+    to_currency = str(expected_to_currency).strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", from_currency) or not re.fullmatch(r"[A-Z]{3}", to_currency):
+        raise ValueError("Expected conversion currencies must be three-letter codes.")
+    if from_currency == to_currency:
+        raise ValueError("FX conversion currencies must be different.")
+    if snapshot["provider"].strip().casefold() != str(expected_provider).strip().casefold():
+        raise ValueError("FX quote provider does not match the requested provider.")
+    if snapshot["base_currency"].strip().upper() != from_currency:
+        raise ValueError("FX quote base currency does not match the requested conversion direction.")
+    if snapshot["quote_currency"].strip().upper() != to_currency:
+        raise ValueError("FX quote quote currency does not match the requested conversion direction.")
+    if snapshot["pair"].strip().replace("/", "").replace("_", "").upper() != from_currency + to_currency:
+        raise ValueError("FX quote pair does not match the requested conversion direction.")
+
+    if isinstance(max_age_seconds, bool):
+        raise ValueError("max_age_seconds must be a finite positive number.")
+    try:
+        max_age = float(max_age_seconds)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("max_age_seconds must be a finite positive number.")
+    if not math.isfinite(max_age) or max_age <= 0:
+        raise ValueError("max_age_seconds must be a finite positive number.")
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime.")
+
+    observed_raw = snapshot["observed_at"]
+    if not isinstance(observed_raw, str) or not observed_raw.strip():
+        raise ValueError("observed_at must be a timezone-aware ISO-8601 timestamp.")
+    try:
+        observed_at = datetime.fromisoformat(observed_raw.strip().replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("observed_at must be a timezone-aware ISO-8601 timestamp.") from error
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("observed_at must include a timezone.")
+
+    age_seconds = (now.astimezone(timezone.utc) - observed_at.astimezone(timezone.utc)).total_seconds()
+    if age_seconds < 0:
+        raise ValueError("FX quote timestamp is in the future.")
+    if age_seconds > max_age:
+        raise ValueError("FX quote is stale.")
+
+    try:
+        bid = Decimal(str(snapshot["bid"]))
+        ask = Decimal(str(snapshot["ask"]))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("FX bid and ask must be finite positive numbers.")
+    if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= 0:
+        raise ValueError("FX bid and ask must be finite positive numbers.")
+    if ask < bid:
+        raise ValueError("FX ask cannot be below FX bid.")
+
+    return {
+        "validated": True,
+        "provider": snapshot["provider"].strip(),
+        "pair": from_currency + "/" + to_currency,
+        "from_currency": from_currency,
+        "to_currency": to_currency,
+        "bid": float(bid),
+        "ask": float(ask),
+        "conversion_rate": float(ask),
+        "conversion_side": "ASK",
+        "source_reference": snapshot["source_reference"].strip(),
+        "observed_at": observed_at.astimezone(timezone.utc).isoformat(),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age,
+        "mode": "fx_conversion_validation_only",
+    }
+
+
 # Execution approval is deliberately narrower than catalogue membership.
 EXECUTION_ENABLED_SYMBOLS = frozenset({"XAUUSD"})
 
