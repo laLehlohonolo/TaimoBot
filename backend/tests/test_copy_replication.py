@@ -71,6 +71,58 @@ class CopyTradeReplicationTests(unittest.TestCase):
             symbol="XAUUSD"
         )
 
+    def test_runtime_rejects_cross_currency_copy_even_for_legacy_relationship(self):
+        create_paper_account(
+            "SOURCE-USD",
+            10000,
+            owner_user_id=self.user_id,
+            settlement_currency="USD",
+        )
+        source = open_paper_trade(
+            account_id="SOURCE-USD",
+            client_order_id="SOURCE-USD-ORDER-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="XAUUSD",
+        )
+
+        # Simulate an old or manually inserted relationship that bypassed
+        # the relationship-creation guard. Runtime must still reject it.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO copy_relationships (
+                    relationship_id, source_account_id, follower_account_id
+                )
+                VALUES ('REL-CROSS-CURRENCY', 'SOURCE-USD', 'FOLLOWER')
+                """
+            )
+
+        result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn(
+            "Cross-currency copy is disabled",
+            result["copies"][0]["failure_reason"],
+        )
+
+        with database.get_connection() as connection:
+            copied_count = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE account_id = 'FOLLOWER'
+                  AND copied_from_trade_id = ?
+                """,
+                (source["trade_id"],),
+            ).fetchone()["total"]
+
+        self.assertEqual(copied_count, 0)
+
     def test_api_trade_creation_triggers_copy(self):
         response = self.client.post(
             "/trades",
