@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 const API = "http://127.0.0.1:4173/api";
 
 function getSastClockParts() {
@@ -86,6 +88,14 @@ console.log("PASS: Login returns a bearer session.");
 const me = await request("/auth/me", { token });
 assert(me.response.status === 200 && me.payload.email === email, "Authenticated identity check failed.");
 console.log("PASS: Bearer token authenticates the current user.");
+
+// This smoke test owns an isolated, disposable SQLite database. Promote only
+// its known CI fixture directly in that database; never expose an HTTP
+// endpoint that can grant administrator privileges.
+execFileSync("python", [
+  "-c",
+  "import sqlite3; db=sqlite3.connect('/tmp/taimobot-integration.db'); db.execute(\"UPDATE users SET role='ADMIN', email_verified=1 WHERE email=?\", ('integration@taimobot.test',)); db.commit(); db.close()"
+]);
 
 const testEntitlement = await request(
   "/auth/admin/participants/" + encodeURIComponent(me.payload.user_id) + "/subscription",
