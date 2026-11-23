@@ -448,6 +448,9 @@ def _copy_for_relationship(relationship, source):
                 (source["account_id"], follower_id)
             ).fetchall()
 
+            if len(currency_rows) != 2:
+                raise ValueError("Follower paper account not found.")
+
             currencies = {
                 row["account_id"]: row["settlement_currency"]
                 for row in currency_rows
