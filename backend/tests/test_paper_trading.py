@@ -39,11 +39,6 @@ class PaperTradingTests(unittest.TestCase):
         # The maintenance-window block itself is tested with an explicit clock override.
         self.maintenance_clock = patch("app.safety.is_maintenance_window", return_value=False)
         self.maintenance_clock.start()
-        self.admin_env = patch.dict(
-            "os.environ",
-            {"TAIMOBOT_ADMIN_EMAILS": "paper-tests@taimobot.local"}
-        )
-        self.admin_env.start()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "test.db"
@@ -52,6 +47,11 @@ class PaperTradingTests(unittest.TestCase):
         deactivate_emergency_stop()
         user = register_user("paper-tests@taimobot.local", "TestPassphrase-2026-Secure!")
         self.user_id = user["user_id"]
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE user_id = ?",
+                (self.user_id,),
+            )
         session = create_session(self.user_id)
         # This broad integration fixture creates several independent accounts.
         with database.get_connection() as connection:
@@ -71,7 +71,6 @@ class PaperTradingTests(unittest.TestCase):
     def tearDown(self):
         self.maintenance_clock.stop()
         self.client.close()
-        self.admin_env.stop()
         deactivate_emergency_stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
