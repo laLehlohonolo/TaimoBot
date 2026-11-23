@@ -95,7 +95,7 @@ class DailyMaintenanceTests(unittest.TestCase):
                 """,
                 [
                     ("admin-1", "ops@example.com", "test-only-hash", "ADMIN", 1),
-                    ("inventory-admin", "ops@example.com", "test-only-hash", "ADMIN", 1),
+                    ("inventory-admin", "inventory-admin@example.com", "test-only-hash", "ADMIN", 1),
                     ("user-1", "trader@example.com", "test-only-hash", "PARTICIPANT", 0),
                 ],
             )
