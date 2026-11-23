@@ -86,6 +86,18 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "maintenance-tests.sqlite3"
         init_db()
+        # Explicit isolated identities for endpoint authorization tests.
+        with database.get_connection() as connection:
+            connection.executemany(
+                """
+                INSERT INTO users (user_id, email, password_hash, role, email_verified)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    ("admin-1", "ops@example.com", "test-only-hash", "ADMIN", 1),
+                    ("user-1", "trader@example.com", "test-only-hash", "PARTICIPANT", 0),
+                ],
+            )
         deactivate_emergency_stop()
 
     def tearDown(self):
@@ -444,12 +456,12 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
 
-    def test_recovery_inventory_api_requires_explicit_admin_allowlist(self):
+    def test_recovery_inventory_api_uses_verified_database_role_not_email_allowlist(self):
         response = self._call_recovery_inventory_api(
             {"user_id": "admin-1", "email": "ops@example.com"},
             admin_emails="",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
     def test_recovery_inventory_api_normalizes_admin_email_case(self):
         with patch("app.main.inspect_recovery_artifact_inventory", return_value={
