@@ -32,4 +32,6 @@ jobs:
       - name: Install backend dependencies
         run: pip install -r requirements.txt
       - name: Verify live public market-data access
+        env:
+          PYTHONPATH: .
         run: python scripts/deriv_public_smoke.py
