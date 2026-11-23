@@ -195,5 +195,82 @@ class MarketBackfillAdminRouteTests(unittest.TestCase):
         self.assertEqual(count, 1)
 
 
+    def test_approved_retry_recovers_exact_range_and_advances_only_after_validated_persist(self):
+        from datetime import datetime, timezone
+
+        class FakeDerivClient:
+            async def collect_candle_range(
+                self, symbol, timeframe, start_epoch, end_epoch, max_candles
+            ):
+                self.requested_range = (symbol, timeframe, start_epoch, end_epoch, max_candles)
+                return [
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
+                        "open": 100,
+                        "high": 101,
+                        "low": 99,
+                        "close": 100,
+                        "volume": 0,
+                        "source": "deriv",
+                    }
+                    for epoch in (3480, 3540, 3600)
+                ]
+
+        approval = self.client.post(
+            "/admin/market-backfills/1HZ100V/M1/review",
+            headers=self.admin_headers,
+            json={
+                "decision": "RETRY_SAME_RANGE",
+                "confirm_retry": True,
+                "rationale": "Provider range inspected; exact retry approved",
+            },
+        )
+        self.assertEqual(approval.status_code, 200, approval.text)
+        fake_client = FakeDerivClient()
+        with patch("app.main.DerivPublicMarketDataClient", return_value=fake_client):
+            response = self.client.post(
+                "/admin/market-backfills/1HZ100V/M1/run",
+                headers=self.admin_headers,
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(fake_client.requested_range, ("1HZ100V", "M1", 3480, 3600, 3))
+        self.assertEqual(body["inserted_count"], 3)
+        self.assertEqual(body["next_end_epoch"], 3420)
+        self.assertEqual(body["status"], "RUNNING")
+        self.assertTrue(body["read_only"])
+        self.assertFalse(body["signals_generated"])
+        self.assertFalse(body["execution_triggered"])
+
+        with database.get_connection() as connection:
+            observations = connection.execute(
+                """
+                SELECT timestamp FROM market_observations
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                ORDER BY timestamp
+                """
+            ).fetchall()
+            audit_count = connection.execute(
+                "SELECT COUNT(*) FROM market_backfill_review_audit"
+            ).fetchone()[0]
+            checkpoint = connection.execute(
+                """
+                SELECT next_end_epoch, status, batches_completed
+                FROM market_backfill_checkpoints
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()
+
+        self.assertEqual(len(observations), 3)
+        self.assertEqual(audit_count, 1)
+        self.assertEqual(checkpoint["next_end_epoch"], 3420)
+        self.assertEqual(checkpoint["status"], "RUNNING")
+        self.assertEqual(checkpoint["batches_completed"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
