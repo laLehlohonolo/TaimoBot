@@ -1,5 +1,3 @@
-import os
-
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from typing import Literal
@@ -140,14 +138,27 @@ def require_relationship_access(relationship_id, user):
 
 
 def require_admin(user):
-    """Allow global safety controls only to explicitly configured administrators."""
-    configured = os.getenv("TAIMOBOT_ADMIN_EMAILS", "")
-    admin_emails = {
-        email.strip().lower()
-        for email in configured.split(",")
-        if email.strip()
-    }
-    if user.get("email", "").strip().lower() not in admin_emails:
+    """Authorize only a persisted, explicitly verified administrator account."""
+    user_id = user.get("user_id") if isinstance(user, dict) else None
+    if not user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator privileges required."
+        )
+
+    from .database import get_connection
+
+    with get_connection() as connection:
+        account = connection.execute(
+            "SELECT role, email_verified FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if (
+        account is None
+        or account["role"] != "ADMIN"
+        or int(account["email_verified"]) != 1
+    ):
         raise HTTPException(
             status_code=403,
             detail="Administrator privileges required."
