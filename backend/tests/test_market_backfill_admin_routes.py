@@ -135,16 +135,11 @@ class MarketBackfillAdminRouteTests(unittest.TestCase):
             audit["reviews"][0]["rationale"],
             "Provider gap investigated; retry exact range",
         )
-        self.assertEqual(
-            audit["reviews"][0]["decided_by"],
-            self.client.post(
-                "/auth/login",
-                json={
-                    "email": "admin@example.com",
-                    "password": "AdminPassphrase-2026!",
-                },
-            ).json()["user"]["user_id"],
-        )
+        with database.get_connection() as connection:
+            admin_user_id = connection.execute(
+                "SELECT user_id FROM users WHERE email = 'admin@example.com'"
+            ).fetchone()["user_id"]
+        self.assertEqual(audit["reviews"][0]["decided_by"], admin_user_id)
 
     def test_retry_requires_explicit_confirmation_and_non_whitespace_rationale(self):
         missing_confirmation = self.client.post(
