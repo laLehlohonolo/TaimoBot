@@ -845,7 +845,7 @@ def create_copy_relationship(follower_account_id, source_account_id):
     with transaction() as connection:
         accounts = connection.execute(
             """
-            SELECT account_id
+            SELECT account_id, settlement_currency
             FROM paper_accounts
             WHERE account_id IN (?, ?)
             """,
@@ -854,6 +854,24 @@ def create_copy_relationship(follower_account_id, source_account_id):
 
         if len(accounts) != 2:
             raise ValueError("Source or follower paper account not found.")
+
+        currencies = {
+            row["account_id"]: row["settlement_currency"]
+            for row in accounts
+        }
+        source_currency = currencies.get(source_id)
+        follower_currency = currencies.get(follower_id)
+
+        if not source_currency or not follower_currency:
+            raise ValueError(
+                "Copy rejected: both accounts must have a verified settlement currency."
+            )
+
+        if source_currency != follower_currency:
+            raise ValueError(
+                "Cross-currency copy is disabled until a fresh, independently "
+                "validated FX quote is available."
+            )
 
         existing = connection.execute(
             """
