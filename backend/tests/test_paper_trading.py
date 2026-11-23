@@ -1293,7 +1293,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(count, 1)
 
     def test_small_risk_reservations_keep_precision_and_enforce_one_percent_cap(self):
-        create_paper_account("SMALL-BALANCE", 1.00)
+        create_paper_account("SMALL-BALANCE", 1.00, owner_user_id=self.user_id)
 
         for index in range(4):
             result = open_paper_trade(
