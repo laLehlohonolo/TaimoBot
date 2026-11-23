@@ -1,0 +1,35 @@
+name: Deriv public market-data smoke
+
+on:
+  push:
+    branches: [main, test/restore-lock-valid-timestamps]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deriv-public-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deriv-public-market-data:
+    name: Deriv public WebSocket (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+      - name: Verify live public market-data access
+        run: python scripts/deriv_public_smoke.py
