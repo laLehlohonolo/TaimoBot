@@ -241,6 +241,48 @@ def get_session_user(token):
     }
 
 
+
+def change_password(user_id, current_password, new_password, current_token):
+    """Change a user's password and revoke every other active session."""
+    if not isinstance(current_token, str) or not current_token:
+        raise AuthenticationError("An active session is required.")
+
+    new_password_hash = _hash_password(new_password)
+    current_token_hash = hashlib.sha256(
+        current_token.encode("utf-8")
+    ).hexdigest()
+    now = _utc_now().isoformat()
+
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        account = connection.execute(
+            "SELECT password_hash FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if account is None or not _verify_password(current_password, account["password_hash"]):
+            raise AuthenticationError("Current password is incorrect.")
+
+        active_session = connection.execute(
+            """
+            SELECT 1 FROM auth_sessions
+            WHERE user_id = ? AND token_hash = ? AND expires_at > ?
+            """,
+            (user_id, current_token_hash, now),
+        ).fetchone()
+        if active_session is None:
+            raise AuthenticationError("An active session is required.")
+
+        connection.execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            (new_password_hash, user_id),
+        )
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE user_id = ? AND token_hash != ?",
+            (user_id, current_token_hash),
+        )
+
+    return True
+
 def revoke_session(token):
     if not isinstance(token, str) or not token:
         return False
