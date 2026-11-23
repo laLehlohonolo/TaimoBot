@@ -377,7 +377,7 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
         specs = self.provenance_specifications()
         with self.assertRaisesRegex(ValueError, "now"):
             validate_broker_specification_provenance(
-                specs, "ExampleBroker", "XAUUSD", "ZAR", "USD",
+                specs, "ExampleBroker", "XAUUSD", "ZAR",
                 now=datetime(2026, 11, 23, 8, 2),
             )
         for max_age in (0, -1, float("nan"), float("inf"), True, "bad"):
