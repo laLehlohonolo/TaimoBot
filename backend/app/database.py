@@ -400,6 +400,24 @@ def ensure_market_observation_schema(connection):
         ON market_observations(symbol, timeframe, observed_at DESC)
         """
     )
+    # Enforce the append-only contract in SQLite itself, not merely in the
+    # Python storage helper. This protects historical research evidence from
+    # accidental or ad-hoc UPDATE/DELETE operations by other code paths.
+    connection.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_market_observation_update
+        BEFORE UPDATE ON market_observations
+        BEGIN
+            SELECT RAISE(ABORT, 'market observations are append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_market_observation_delete
+        BEFORE DELETE ON market_observations
+        BEGIN
+            SELECT RAISE(ABORT, 'market observations are append-only');
+        END;
+        """
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS market_backfill_checkpoints (
