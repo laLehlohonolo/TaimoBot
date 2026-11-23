@@ -397,6 +397,49 @@ def calculate_monetary_stop_risk(
     }
 
 
+
+def calculate_provenance_checked_stop_risk(
+    entry_price,
+    stop_loss,
+    requested_volume,
+    specifications,
+    expected_broker,
+    expected_symbol,
+    expected_account_currency,
+    now=None,
+    max_age_seconds=300,
+):
+    """Calculate paper-analysis risk only after provenance/freshness checks.
+
+    This composes the metadata gate and monetary calculator. It does not verify
+    source authenticity, fetch live broker data, approve an order, or connect
+    the result to execution. The adapter remains responsible for supplying a
+    single coherent snapshot of contract and conversion inputs.
+    """
+    provenance = validate_broker_specification_provenance(
+        specifications,
+        expected_broker=expected_broker,
+        expected_symbol=expected_symbol,
+        expected_account_currency=expected_account_currency,
+        now=now,
+        max_age_seconds=max_age_seconds,
+    )
+    calculated = calculate_monetary_stop_risk(
+        entry_price, stop_loss, requested_volume, specifications
+    )
+
+    if calculated["quote_currency"] != provenance["quote_currency"]:
+        raise ValueError("Monetary calculation quote currency does not match provenance.")
+    if calculated["account_currency"] != provenance["account_currency"]:
+        raise ValueError("Monetary calculation account currency does not match provenance.")
+
+    return {
+        **calculated,
+        "provenance": provenance,
+        "mode": "provenance_checked_calculation_only",
+    }
+
+
 # Execution approval is deliberately narrower than catalogue membership.
 EXECUTION_ENABLED_SYMBOLS = frozenset({"XAUUSD"})
 
