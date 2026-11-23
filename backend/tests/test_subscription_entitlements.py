@@ -49,6 +49,12 @@ class SubscriptionEntitlementTests(unittest.TestCase):
             json={"email": email, "password": password},
         )
         self.assertEqual(registered.status_code, 200, registered.text)
+        if email == "admin@taimobot.local":
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE user_id = ?",
+                    (registered.json()["user_id"],),
+                )
         logged_in = self.client.post(
             "/auth/login",
             json={"email": email, "password": password},
