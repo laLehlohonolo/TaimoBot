@@ -249,9 +249,9 @@ class MarketBackfillAdminRouteTests(unittest.TestCase):
         with database.get_connection() as connection:
             observations = connection.execute(
                 """
-                SELECT timestamp FROM market_observations
+                SELECT observed_at FROM market_observations
                 WHERE symbol = '1HZ100V' AND timeframe = 'M1'
-                ORDER BY timestamp
+                ORDER BY observed_at
                 """
             ).fetchall()
             audit_count = connection.execute(
