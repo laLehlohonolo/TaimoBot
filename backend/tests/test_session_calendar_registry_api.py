@@ -1,4 +1,3 @@
-import os
 import tempfile
 import unittest
 import sqlite3
@@ -18,13 +17,14 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "session-calendars.db"
         init_db()
-        self.original_admin_emails = os.environ.get("TAIMOBOT_ADMIN_EMAILS")
-        os.environ["TAIMOBOT_ADMIN_EMAILS"] = (
-            "calendar-admin@taimobot.local,calendar-reviewer@taimobot.local"
-        )
         admin = register_user("calendar-admin@taimobot.local", "CalendarAdminPass-2026!")
         reviewer = register_user("calendar-reviewer@taimobot.local", "CalendarReviewerPass-2026!")
         participant = register_user("calendar-user@taimobot.local", "CalendarParticipantPass-2026!")
+        with database.get_connection() as connection:
+            connection.executemany(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE user_id = ?",
+                [(admin["user_id"],), (reviewer["user_id"],)],
+            )
         self.admin = TestClient(app)
         self.reviewer = TestClient(app)
         self.participant = TestClient(app)
@@ -37,10 +37,6 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
         self.admin.close()
         self.reviewer.close()
         self.participant.close()
-        if self.original_admin_emails is None:
-            os.environ.pop("TAIMOBOT_ADMIN_EMAILS", None)
-        else:
-            os.environ["TAIMOBOT_ADMIN_EMAILS"] = self.original_admin_emails
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
