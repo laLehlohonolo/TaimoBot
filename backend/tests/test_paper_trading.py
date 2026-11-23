@@ -1295,7 +1295,9 @@ class PaperTradingTests(unittest.TestCase):
     def test_small_risk_reservations_keep_precision_and_enforce_one_percent_cap(self):
         create_paper_account("SMALL-BALANCE", 1.00, owner_user_id=self.user_id)
 
-        for index in range(3):
+        # The shared fixture assigns this participant EXCLUSIVE access,
+        # so four small entries can be opened before the aggregate 1% cap.
+        for index in range(4):
             result = open_paper_trade(
                 account_id="SMALL-BALANCE",
                 client_order_id=f"SMALL-RISK-{index}",
@@ -1315,9 +1317,9 @@ class PaperTradingTests(unittest.TestCase):
                 """
             ).fetchone()["total"]
 
-        self.assertAlmostEqual(reserved, 0.0075, places=10)
-        # Keep this within the Standard four-position limit while proving
-        # the aggregate 1% risk ceiling is enforced on the next entry.
+        self.assertAlmostEqual(reserved, 0.01, places=10)
+        # The fifth order is below the EXCLUSIVE position cap, so this
+        # rejection specifically proves the aggregate 1% risk ceiling.
         with self.assertRaises(RiskError):
             open_paper_trade(
                 account_id="SMALL-BALANCE",
@@ -1325,7 +1327,6 @@ class PaperTradingTests(unittest.TestCase):
                 side="BUY",
                 entry_price=4000,
                 stop_loss=3990,
-                risk_percent=0.5,
                 symbol="XAUUSD",
             )
 
