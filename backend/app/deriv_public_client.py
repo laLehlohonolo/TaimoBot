@@ -9,6 +9,7 @@ import math
 from datetime import datetime
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from .deriv_market_data import normalize_active_symbols_response, normalize_deriv_candle
 from .instruments import get_instrument
@@ -54,7 +55,7 @@ class DerivPublicMarketDataClient:
         transient_errors = (
             TimeoutError,
             OSError,
-            websockets.exceptions.ConnectionClosed,
+            ConnectionClosed,
         )
 
         for attempt in range(max_attempts):
