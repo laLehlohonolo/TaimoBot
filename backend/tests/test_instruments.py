@@ -391,5 +391,65 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
         self.assertAlmostEqual(result["age_seconds"], 300)
 
 
+    def test_provenance_checked_monetary_risk_calculates_only_with_fresh_matching_metadata(self):
+        from app.instruments import calculate_provenance_checked_stop_risk
+        specs = self.provenance_specifications()
+        result = calculate_provenance_checked_stop_risk(
+            1.10000, 1.09990, 0.03, specs,
+            expected_broker="ExampleBroker",
+            expected_symbol="XAUUSD",
+            expected_account_currency="ZAR",
+            now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+        )
+        self.assertAlmostEqual(result["monetary_risk"], 5.55)
+        self.assertTrue(result["provenance"]["validated"])
+        self.assertEqual(result["mode"], "provenance_checked_calculation_only")
+        self.assertNotIn("approved", result)
+
+    def test_provenance_checked_monetary_risk_rejects_stale_metadata(self):
+        from app.instruments import calculate_provenance_checked_stop_risk
+        specs = self.provenance_specifications("2026-11-23T07:55:00Z")
+        with self.assertRaisesRegex(ValueError, "stale"):
+            calculate_provenance_checked_stop_risk(
+                1.10000, 1.09990, 0.03, specs,
+                "ExampleBroker", "XAUUSD", "ZAR",
+                now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+            )
+
+    def test_provenance_checked_monetary_risk_rejects_wrong_broker_or_symbol(self):
+        from app.instruments import calculate_provenance_checked_stop_risk
+        specs = self.provenance_specifications()
+        for broker, symbol in (("OtherBroker", "XAUUSD"), ("ExampleBroker", "EURUSD")):
+            with self.subTest(broker=broker, symbol=symbol):
+                with self.assertRaises(ValueError):
+                    calculate_provenance_checked_stop_risk(
+                        1.10000, 1.09990, 0.03, specs,
+                        broker, symbol, "ZAR",
+                        now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+                    )
+
+    def test_provenance_checked_monetary_risk_rejects_currency_mismatch(self):
+        from app.instruments import calculate_provenance_checked_stop_risk
+        specs = self.provenance_specifications()
+        specs["account_currency"] = "USD"
+        with self.assertRaisesRegex(ValueError, "account currency"):
+            calculate_provenance_checked_stop_risk(
+                1.10000, 1.09990, 0.03, specs,
+                "ExampleBroker", "XAUUSD", "ZAR",
+                now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+            )
+
+    def test_provenance_checked_monetary_risk_rejects_quote_currency_inconsistency(self):
+        from app.instruments import calculate_provenance_checked_stop_risk
+        specs = self.provenance_specifications()
+        specs["quote_currency"] = "EUR"
+        with self.assertRaisesRegex(ValueError, "quote currency does not match provenance"):
+            calculate_provenance_checked_stop_risk(
+                1.10000, 1.09990, 0.03, specs,
+                "ExampleBroker", "XAUUSD", "ZAR",
+                now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
