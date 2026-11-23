@@ -57,6 +57,21 @@ class CopyRelationshipApiTests(unittest.TestCase):
         self.assertEqual(result["status"], "ACTIVE")
         self.assertEqual(result["mode"], "paper_trading")
 
+    def test_cross_currency_copy_relationship_is_rejected(self):
+        create_paper_account(
+            "SOURCE-USD-001",
+            10000,
+            owner_user_id=self.user_id,
+            settlement_currency="USD",
+        )
+        response = self.client.post(
+            "/accounts/FOLLOWER-001/copy-relationships",
+            json={"source_account_id": "SOURCE-USD-001"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Cross-currency copy is disabled", response.json()["detail"])
+
     def test_list_copy_relationships(self):
         created = self.create_relationship()
         relationship_id = created.json()["relationship_id"]
