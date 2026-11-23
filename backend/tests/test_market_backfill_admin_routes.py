@@ -358,5 +358,72 @@ class MarketBackfillAdminRouteTests(unittest.TestCase):
         self.assertEqual(checkpoint["batches_completed"], 1)
 
 
+    def test_approved_retry_with_incomplete_provider_batch_returns_to_gap_review_without_cursor_advance(self):
+        from datetime import datetime, timezone
+
+        class IncompleteDerivClient:
+            async def collect_candle_range(
+                self, symbol, timeframe, start_epoch, end_epoch, max_candles
+            ):
+                return [
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
+                        "open": 100,
+                        "high": 101,
+                        "low": 99,
+                        "close": 100,
+                        "volume": 0,
+                        "source": "deriv",
+                    }
+                    for epoch in (3480, 3600)
+                ]
+
+        approval = self.client.post(
+            "/admin/market-backfills/1HZ100V/M1/review",
+            headers=self.admin_headers,
+            json={
+                "decision": "RETRY_SAME_RANGE",
+                "confirm_retry": True,
+                "rationale": "Retry approved after reviewing incomplete provider history",
+            },
+        )
+        self.assertEqual(approval.status_code, 200, approval.text)
+
+        with patch("app.main.DerivPublicMarketDataClient", return_value=IncompleteDerivClient()):
+            response = self.client.post(
+                "/admin/market-backfills/1HZ100V/M1/run",
+                headers=self.admin_headers,
+                json={"confirm_collection": True, "batch_size": 3},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "GAP_REVIEW")
+        self.assertEqual(body["next_end_epoch"], 3600)
+        self.assertEqual(body["inserted_count"], 2)
+        self.assertFalse(body["execution_triggered"])
+        self.assertFalse(body["signals_generated"])
+
+        checkpoint = self._checkpoint()
+        self.assertEqual(checkpoint["status"], "GAP_REVIEW")
+        self.assertEqual(checkpoint["next_end_epoch"], 3600)
+        self.assertIn("1 expected candle(s) are missing", checkpoint["last_error"])
+
+        with database.get_connection() as connection:
+            stored = connection.execute(
+                """
+                SELECT COUNT(*) FROM market_observations
+                WHERE symbol = '1HZ100V' AND timeframe = 'M1'
+                """
+            ).fetchone()[0]
+            audit_count = connection.execute(
+                "SELECT COUNT(*) FROM market_backfill_review_audit"
+            ).fetchone()[0]
+        self.assertEqual(stored, 2)
+        self.assertEqual(audit_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
