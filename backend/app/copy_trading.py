@@ -439,6 +439,34 @@ def _copy_for_relationship(relationship, source):
 
     try:
         with get_connection() as connection:
+            currency_rows = connection.execute(
+                """
+                SELECT account_id, settlement_currency
+                FROM paper_accounts
+                WHERE account_id IN (?, ?)
+                """,
+                (source["account_id"], follower_id)
+            ).fetchall()
+
+            currencies = {
+                row["account_id"]: row["settlement_currency"]
+                for row in currency_rows
+            }
+            source_currency = currencies.get(source["account_id"])
+            follower_currency = currencies.get(follower_id)
+
+            if not source_currency or not follower_currency:
+                raise ValueError(
+                    "Copy rejected: source and follower settlement currencies "
+                    "must both be verified."
+                )
+
+            if source_currency != follower_currency:
+                raise ValueError(
+                    "Cross-currency copy is disabled until a fresh, independently "
+                    "validated FX quote is available."
+                )
+
             account = connection.execute(
                 """
                 SELECT balance, starting_balance
