@@ -406,6 +406,7 @@ def calculate_provenance_checked_stop_risk(
     expected_broker,
     expected_symbol,
     expected_account_currency,
+    expected_quote_currency,
     now=None,
     max_age_seconds=300,
 ):
@@ -424,6 +425,10 @@ def calculate_provenance_checked_stop_risk(
         now=now,
         max_age_seconds=max_age_seconds,
     )
+    expected_quote = str(expected_quote_currency).strip().upper()
+    if not expected_quote or provenance["quote_currency"] != expected_quote:
+        raise ValueError("Broker specification quote currency does not match the requested instrument.")
+
     calculated = calculate_monetary_stop_risk(
         entry_price, stop_loss, requested_volume, specifications
     )
