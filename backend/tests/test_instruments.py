@@ -308,6 +308,7 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
             expected_broker="ExampleBroker",
             expected_symbol="XAUUSD",
             expected_account_currency="ZAR",
+            expected_quote_currency="USD",
             now=now or datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
             max_age_seconds=max_age_seconds,
         )
@@ -377,7 +378,7 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
         specs = self.provenance_specifications()
         with self.assertRaisesRegex(ValueError, "now"):
             validate_broker_specification_provenance(
-                specs, "ExampleBroker", "XAUUSD", "ZAR",
+                specs, "ExampleBroker", "XAUUSD", "ZAR", "USD",
                 now=datetime(2026, 11, 23, 8, 2),
             )
         for max_age in (0, -1, float("nan"), float("inf"), True, "bad"):
@@ -399,6 +400,7 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
             expected_broker="ExampleBroker",
             expected_symbol="XAUUSD",
             expected_account_currency="ZAR",
+            expected_quote_currency="USD",
             now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
         )
         self.assertAlmostEqual(result["monetary_risk"], 5.55)
@@ -412,7 +414,7 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stale"):
             calculate_provenance_checked_stop_risk(
                 1.10000, 1.09990, 0.03, specs,
-                "ExampleBroker", "XAUUSD", "ZAR",
+                "ExampleBroker", "XAUUSD", "ZAR", "USD",
                 now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
             )
 
@@ -424,7 +426,7 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     calculate_provenance_checked_stop_risk(
                         1.10000, 1.09990, 0.03, specs,
-                        broker, symbol, "ZAR",
+                        broker, symbol, "ZAR", "USD",
                         now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
                     )
 
@@ -435,18 +437,18 @@ class InstrumentExecutionApprovalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "account currency"):
             calculate_provenance_checked_stop_risk(
                 1.10000, 1.09990, 0.03, specs,
-                "ExampleBroker", "XAUUSD", "ZAR",
+                "ExampleBroker", "XAUUSD", "ZAR", "USD",
                 now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
             )
 
-    def test_provenance_checked_monetary_risk_rejects_quote_currency_inconsistency(self):
+    def test_provenance_checked_monetary_risk_rejects_quote_currency_mismatch_with_instrument(self):
         from app.instruments import calculate_provenance_checked_stop_risk
         specs = self.provenance_specifications()
         specs["quote_currency"] = "EUR"
-        with self.assertRaisesRegex(ValueError, "quote currency does not match provenance"):
+        with self.assertRaisesRegex(ValueError, "quote currency does not match the requested instrument"):
             calculate_provenance_checked_stop_risk(
                 1.10000, 1.09990, 0.03, specs,
-                "ExampleBroker", "XAUUSD", "ZAR",
+                "ExampleBroker", "XAUUSD", "ZAR", "USD",
                 now=datetime(2026, 11, 23, 8, 2, tzinfo=timezone.utc),
             )
 
