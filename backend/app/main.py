@@ -1192,8 +1192,8 @@ def close_trade(
         return close_trade_with_copies(
             trade_id,
             request.exit_price,
-            spread_cost=request.spread_cost,
-            commission_cost=request.commission_cost,
+            spread_cost=cost_inputs["spread_cost"],
+            commission_cost=cost_inputs["commission_cost"],
             swap_cost=cost_inputs["swap_cost"],
             other_costs=cost_inputs["other_costs"],
             cost_provenance_status=cost_inputs["cost_provenance_status"],
