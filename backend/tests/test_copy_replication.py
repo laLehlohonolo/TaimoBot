@@ -139,6 +139,24 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["copy_summary"]["successful_copies"], 1)
 
+    def test_source_profit_preview_discloses_open_copies_excluded_from_preview(self):
+        source = self.create_source_trade(order_id="SOURCE-PREVIEW-SCOPE")
+        result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(result["successful_copies"], 1)
+
+        response = self.client.post(
+            f"/trades/{source['trade_id']}/profit-preview",
+            json={"current_price": 4001},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()
+        self.assertEqual(preview["preview_scope"], "REQUESTED_POSITION_ONLY")
+        self.assertEqual(preview["close_scope"], "SOURCE_AND_OPEN_COPIES")
+        self.assertEqual(preview["open_copy_positions_excluded"], 1)
+        self.assertTrue(preview["read_only"])
+        self.assertFalse(preview["execution_triggered"])
+
     def test_follower_position_size_is_calculated_from_own_funding(self):
         source = self.create_source_trade()
         result = replicate_open_trade(source["trade_id"])
