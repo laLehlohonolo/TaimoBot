@@ -157,6 +157,48 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(copied["risk_amount"], 25)
         self.assertEqual(copied["copied_from_trade_id"], source["trade_id"])
 
+    def test_copied_entry_respects_follower_subscription_position_limit(self):
+        source = self.create_source_trade(order_id="SOURCE-FOLLOWER-CAP")
+        with database.get_connection() as connection:
+            connection.executemany(
+                """
+                INSERT INTO trades (
+                    trade_id, account_id, client_order_id, symbol,
+                    side, quantity, entry_price, stop_loss,
+                    status, risk_amount
+                )
+                VALUES (?, 'FOLLOWER', ?, 'XAUUSD', 'BUY',
+                        0.001, 4000, 3990, 'OPEN', 0.01)
+                """,
+                [
+                    (f"FOLLOWER-CAP-{i}", f"FOLLOWER-CAP-ORDER-{i}")
+                    for i in range(20)
+                ],
+            )
+
+        result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn(
+            "Exclusive account position limit reached (20 open positions)",
+            result["copies"][0]["failure_reason"],
+        )
+        with database.get_connection() as connection:
+            follower_state = connection.execute(
+                """
+                SELECT COUNT(*) AS open_positions,
+                       SUM(CASE WHEN copied_from_trade_id = ? THEN 1 ELSE 0 END)
+                           AS copied_entries
+                FROM trades
+                WHERE account_id = 'FOLLOWER' AND status = 'OPEN'
+                """,
+                (source["trade_id"],),
+            ).fetchone()
+        self.assertEqual(follower_state["open_positions"], 20)
+        self.assertEqual(follower_state["copied_entries"], 0)
+
     def test_repeated_replication_does_not_create_duplicate(self):
         source = self.create_source_trade()
         first = replicate_open_trade(source["trade_id"])
