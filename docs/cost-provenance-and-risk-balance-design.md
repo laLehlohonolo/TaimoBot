@@ -95,3 +95,35 @@ Before enabling a complete preview:
 ## 8. Rollout boundary
 
 This is a design document only. No ledger, risk, balance, UI, or API behaviour has been changed by this document. Keep the PR draft, unmerged, and paper-only. Do not enable live trading or real-money handling.
+
+
+## 9. Operating-mode separation required before implementation
+
+The earlier blanket eligibility rule needs a product-level distinction so it does not silently turn ordinary paper accounts into unusable accounts.
+
+### 9.1 Gross-only research simulation
+
+- This mode is for strategy research, signal evaluation, and price-movement experiments.
+- Results are explicitly labelled **GROSS / COSTS EXCLUDED / NOT NET PROFIT**.
+- It must use an isolated research ledger or ephemeral simulation balance. It must not post gross-only results into a participant's account balance or account equity used for order sizing.
+- It must not be represented as evidence that the account satisfies the 1% all-in risk requirement.
+- It may continue to run when no approved cost policy exists because it does not authorize participant account orders or change their financial ledger.
+
+### 9.2 Cost-aware participant paper accounts
+
+- Participant paper-account orders use the account's persisted balance and the hard 1% combined open-risk limit.
+- A new account-backed order is eligible only when every closed result affecting that account's balance has an approved cost provenance: a named, versioned simulation cost policy, or verified execution evidence where applicable.
+- Missing or manually unverified costs must not be silently treated as zero, and must not increase the account's risk base.
+- If the account has unresolved cost provenance, risk-increasing orders and account risk previews are blocked; existing positions remain closable.
+- A policy must be explicitly approved, versioned, instrument/account-currency aware, and tested against preview/close parity before it can make an account eligible. No policy parameters are approved by this document.
+
+### 9.3 No cross-mode balance contamination
+
+- Research simulation balances, participant paper-account balances, and any future real-money wallet must remain separate ledgers.
+- A gross-only research result must never be copied into a participant balance, used to raise a risk budget, or presented as a net result.
+- A cost-policy version change applies prospectively unless an auditable reconciliation explicitly reprocesses eligible historical records. Never silently rewrite history.
+- The existing 1% per-trade and combined-open-risk ceilings remain unchanged in account-backed trading.
+
+### 9.4 Implementation gate
+
+Before code changes, approve the cost-policy specification and its instrument/account-currency inputs. Then implement provenance, ledger migration, common close accounting, follower-specific cost calculation, complete preview scope, and UI labels. Until those gates pass, keep account-backed paper execution in its existing paper-only safety boundary and do not claim all-in risk compliance for balances with unresolved costs.
