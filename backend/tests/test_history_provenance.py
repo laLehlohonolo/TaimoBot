@@ -113,12 +113,15 @@ class TradeHistoryProvenanceTests(unittest.TestCase):
         self.assertEqual(trade["net_pnl_status"], "VERIFIED_ACTUAL_COSTS")
 
     def test_open_trade_does_not_count_as_closed_or_verified_net_pnl(self):
-        self.insert_trade("open", "OPEN", 0, None, "UNKNOWN")
+        # An OPEN row must never contribute even if legacy data contains a stale P&L value.
+        self.insert_trade("open", "OPEN", 999, 888, "UNKNOWN")
         with patch("app.history.get_connection", side_effect=self.history_connection):
             account = get_account_history("paper-1")
             trade = get_trade_history("paper-1")["trades"][0]
 
         self.assertEqual(account["closed_trades"], 0)
+        self.assertEqual(account["realized_pnl"], 0)
+        self.assertEqual(account["gross_realized_pnl"], 0)
         self.assertEqual(account["net_pnl_status"], "NO_CLOSED_TRADES")
         self.assertIsNone(account["net_realized_pnl"])
         self.assertEqual(trade["net_pnl_status"], "NOT_CLOSED")
