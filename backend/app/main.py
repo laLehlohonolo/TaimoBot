@@ -1103,12 +1103,24 @@ def trade_profit_preview(
     with get_connection() as connection:
         trade = connection.execute(
             """
-            SELECT trade_id, account_id, symbol, side, quantity, entry_price, status
+            SELECT trade_id, account_id, symbol, side, quantity, entry_price,
+                   status, copied_from_trade_id
             FROM trades
             WHERE trade_id = ?
             """,
             (trade_id,)
         ).fetchone()
+        open_copy_positions_excluded = 0
+        if trade is not None and trade["copied_from_trade_id"] is None:
+            open_copy_positions_excluded = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE copied_from_trade_id = ?
+                  AND status = 'OPEN'
+                """,
+                (trade_id,),
+            ).fetchone()["total"]
 
     if trade is None:
         raise HTTPException(status_code=404, detail="Trade not found.")
@@ -1142,6 +1154,13 @@ def trade_profit_preview(
         **result,
         "read_only": True,
         "execution_triggered": False,
+        "preview_scope": "REQUESTED_POSITION_ONLY",
+        "close_scope": (
+            "FOLLOWER_ONLY"
+            if trade["copied_from_trade_id"] is not None
+            else "SOURCE_AND_OPEN_COPIES"
+        ),
+        "open_copy_positions_excluded": open_copy_positions_excluded,
     }
 
 
