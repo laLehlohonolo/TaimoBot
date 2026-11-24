@@ -65,6 +65,26 @@ class TSSISecurityInterlockTests(unittest.TestCase):
                     "WHERE event_id = 'tssi-test-event-002'"
                 )
 
+    def test_reused_event_id_cannot_rewrite_or_misattribute_security_event(self):
+        activate_security_lock(
+            "Original integrity alert", "tssi-test-event-003", "MONITOR_A"
+        )
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            activate_security_lock(
+                "Different alert", "tssi-test-event-003", "MONITOR_B"
+            )
+
+        status = get_security_status()
+        self.assertEqual(status["lock_reason"], "Original integrity alert")
+        self.assertEqual(status["lock_event_id"], "tssi-test-event-003")
+        with database.get_connection() as connection:
+            event = connection.execute(
+                "SELECT reason, actor FROM tssi_security_events "
+                "WHERE event_id = 'tssi-test-event-003'"
+            ).fetchone()
+        self.assertEqual(event["reason"], "Original integrity alert")
+        self.assertEqual(event["actor"], "MONITOR_A")
+
 
 if __name__ == "__main__":
     unittest.main()
