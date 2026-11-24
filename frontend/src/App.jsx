@@ -136,6 +136,75 @@ function MetricCard({ label, value, note }) {
 }
 
 
+function AdminSecurityPanel({ token, safety, onRefresh }) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const lockActive = safety?.tssi_lock_active !== false;
+  const stateLabel = !safety
+    ? "Unknown"
+    : safety.tssi_lock_active
+      ? (String(safety.tssi_status || "").includes("FAIL_CLOSED") ? "Fail-closed" : "Locked")
+      : "Clear";
+
+  async function activateLock(event) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    if (!reason.trim()) {
+      setError("Enter a reason for activating the TSSI security lock.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await apiRequest("/tssi/lock", {
+        method: "POST",
+        body: JSON.stringify({ reason: reason.trim() })
+      }, token);
+      setReason("");
+      setNotice("TSSI security lock activated. New entries are blocked. Existing paper positions are not automatically closed.");
+      await onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "TSSI lock activation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel integrity" aria-label="TSSI administrator controls">
+      <div>
+        <p className="eyebrow">TAIMO SECURITY &amp; SYSTEM INTEGRITY</p>
+        <h2>Security interlock</h2>
+        <p className="integrity-copy">This control activates the independent trading-entry veto. It is intentionally one-way through ordinary application controls; emergency-stop resume cannot clear it.</p>
+        <p className="muted">Current TSSI state: <strong>{stateLabel}</strong></p>
+        {safety?.lock_reason && <p className="muted">Recorded reason: {safety.lock_reason}</p>}
+      </div>
+      <div>
+        {lockActive ? (
+          <div className="notice error" role="status">
+            <strong>{stateLabel === "Unknown" ? "Security state unavailable" : "TSSI lock active"}</strong>
+            <span>New trading entries remain blocked. Do not attempt to bypass this control; recovery requires a separately authorised procedure that is not yet implemented.</span>
+          </div>
+        ) : (
+          <form className="auth-form" onSubmit={activateLock}>
+            <label>Reason for security lock<input required minLength={3} maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="Describe the confirmed security concern" /></label>
+            {error && <div className="notice error" role="alert">{error}</div>}
+            {notice && <div className="notice success" role="status">{notice}</div>}
+            <button className="primary-button" type="submit" disabled={busy || !safety || safety.tssi_lock_active !== false}>{busy ? "Activating…" : "Activate TSSI security lock"}</button>
+            <p className="muted">This action blocks new entries and has no ordinary in-app unlock path.</p>
+          </form>
+        )}
+        {error && lockActive && <div className="notice error" role="alert">{error}</div>}
+        {notice && lockActive && <div className="notice success" role="status">{notice}</div>}
+      </div>
+    </section>
+  );
+}
+
+
 function StrategyLibrary({ token }) {
   const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -579,6 +648,8 @@ export default function App() {
 
   const connected = Boolean(health?.status === "healthy");
   const emergencyActive = Boolean(safety?.emergency_stop);
+  const tssiState = !safety ? "Unknown" : safety.tssi_lock_active ? (String(safety.tssi_status || "").includes("FAIL_CLOSED") ? "Fail-closed" : "Locked") : "Clear";
+  const verifiedAdmin = session?.user?.role === "ADMIN" && session?.user?.email_verified === true;
 
   return (
     <main className="shell">
@@ -609,9 +680,12 @@ export default function App() {
         <MetricCard label="API HEALTH" value={connected ? "Online" : "Offline"} note={health?.api || "Waiting for backend response"} />
         <MetricCard label="TRADING MODE" value="Paper" note="Simulated execution only · no live orders" />
         <MetricCard label="EMERGENCY STOP" value={safety ? (emergencyActive ? "Active" : "Inactive") : "Unknown"} note={safety ? (emergencyActive ? "New orders are blocked by the backend." : "Backend reports new orders are permitted.") : "Safety state not verified"} />
+        <MetricCard label="TSSI SECURITY" value={tssiState} note={safety?.tssi_lock_active ? "The security interlock blocks new entries." : safety ? "No TSSI lock is currently reported." : "Security state could not be verified."} />
       </section>
 
       {error && <div className="notice error" role="alert"><strong>Workspace notice</strong><span>{error}</span></div>}
+
+      {verifiedAdmin && <AdminSecurityPanel token={session.access_token} safety={safety} onRefresh={refreshPublicStatus} />}
 
       {!session ? (
         <AuthPanel onAuthenticated={(nextSession, justRegistered) => { setSession(nextSession); setShowWelcome(Boolean(justRegistered)); }} />
