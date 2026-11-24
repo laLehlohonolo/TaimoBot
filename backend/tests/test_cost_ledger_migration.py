@@ -28,7 +28,7 @@ class TradeCostLedgerMigrationTests(unittest.TestCase):
     def tearDown(self):
         self.connection.close()
 
-    def test_migration_preserves_legacy_closed_pnl_and_zero_costs(self):
+    def test_migration_preserves_legacy_pnl_and_marks_costs_unknown(self):
         migrate_trade_cost_ledger(self.connection)
 
         closed = self.connection.execute(
@@ -36,6 +36,7 @@ class TradeCostLedgerMigrationTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(closed["realized_pnl"], 12.75)
         self.assertEqual(closed["gross_realized_pnl"], 12.75)
+        self.assertEqual(closed["cost_provenance_status"], "UNKNOWN")
         for field in ("spread_cost", "commission_cost", "swap_cost", "other_costs"):
             self.assertEqual(closed[field], 0)
 
@@ -47,6 +48,7 @@ class TradeCostLedgerMigrationTests(unittest.TestCase):
         ).fetchone()
         self.assertIsNone(opened["gross_realized_pnl"])
         self.assertEqual(opened["realized_pnl"], 0)
+        self.assertEqual(opened["cost_provenance_status"], "UNKNOWN")
 
     def test_migration_is_idempotent(self):
         migrate_trade_cost_ledger(self.connection)
@@ -62,11 +64,14 @@ class TradeCostLedgerMigrationTests(unittest.TestCase):
             "commission_cost",
             "swap_cost",
             "other_costs",
+            "cost_provenance_status",
         }.issubset(columns))
         closed = self.connection.execute(
-            "SELECT gross_realized_pnl FROM trades WHERE trade_id = 'legacy-closed'"
+            "SELECT gross_realized_pnl, cost_provenance_status "
+            "FROM trades WHERE trade_id = 'legacy-closed'"
         ).fetchone()
         self.assertEqual(closed["gross_realized_pnl"], 12.75)
+        self.assertEqual(closed["cost_provenance_status"], "UNKNOWN")
 
 
 if __name__ == "__main__":
