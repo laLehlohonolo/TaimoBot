@@ -62,7 +62,6 @@ def normalize_active_symbols_response(payload):
             "subgroup": subgroup,
             "submarket": submarket,
             "underlying_symbol_name": display_name,
-            "underlying_symbol_type": symbol_type,
         }
         missing_metadata = [
             field for field, value in required_text_metadata.items()
@@ -73,6 +72,13 @@ def normalize_active_symbols_response(payload):
                 f"Deriv symbol metadata is incomplete for {symbol}: "
                 f"missing or blank fields: {', '.join(missing_metadata)}."
             )
+        # Deriv's live active_symbols payload may omit this descriptive field.
+        # Preserve the observation-only symbol without fabricating its value.
+        if not isinstance(symbol_type, str) or not symbol_type.strip():
+            symbol_type = None
+            missing_metadata.append("underlying_symbol_type")
+        else:
+            symbol_type = symbol_type.strip()
         if market.strip().lower() != instrument["asset_class"]:
             raise ValueError("Deriv symbol market metadata does not match the instrument catalogue.")
         if isinstance(trade_count, bool) or not isinstance(trade_count, int) or trade_count < 0:
@@ -83,7 +89,7 @@ def normalize_active_symbols_response(payload):
         discovered.append({
             **instrument,
             "display_name": display_name.strip(),
-            "underlying_symbol_type": symbol_type.strip(),
+            "underlying_symbol_type": symbol_type,
             "trade_count": trade_count,
             "market": market.strip(),
             "subgroup": subgroup.strip(),
@@ -91,7 +97,11 @@ def normalize_active_symbols_response(payload):
             "pip_size": pip_size,
             "exchange_is_open": bool(record["exchange_is_open"]),
             "is_trading_suspended": bool(record["is_trading_suspended"]),
-            "provider_metadata_status": "UNVERIFIED_PROVIDER_RESPONSE",
+            "provider_metadata_status": (
+                "INCOMPLETE_PROVIDER_RESPONSE" if missing_metadata
+                else "UNVERIFIED_PROVIDER_RESPONSE"
+            ),
+            "missing_provider_metadata": missing_metadata,
             "execution_eligible": False,
         })
         seen.add(symbol)
