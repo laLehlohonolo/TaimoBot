@@ -484,6 +484,51 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
             response = self.client.post("/safety/emergency-stop", headers=headers)
         self.assertEqual(response.status_code, 403)
 
+    def test_admin_role_without_verified_email_cannot_control_emergency_stop(self):
+        deactivate_emergency_stop()
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "unverified-admin@example.com", "password": "UnverifiedAdminPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 0 WHERE email = ?",
+                ("unverified-admin@example.com",),
+            )
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "unverified-admin@example.com", "password": "UnverifiedAdminPassphrase-2026!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        response = self.client.post("/safety/emergency-stop", headers=headers)
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_role_revocation_takes_effect_for_existing_session(self):
+        deactivate_emergency_stop()
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "revoked-admin@example.com", "password": "RevokedAdminPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE email = ?",
+                ("revoked-admin@example.com",),
+            )
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "revoked-admin@example.com", "password": "RevokedAdminPassphrase-2026!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'PARTICIPANT' WHERE email = ?",
+                ("revoked-admin@example.com",),
+            )
+        response = self.client.post("/safety/emergency-stop", headers=headers)
+        self.assertEqual(response.status_code, 403)
+
     def test_configured_admin_can_activate_and_resume_emergency_stop(self):
         deactivate_emergency_stop()
         registered = self.client.post(
