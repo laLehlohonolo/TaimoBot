@@ -2,6 +2,7 @@
 
 from .database import get_connection
 from .maintenance import is_maintenance_window
+from .tssi import require_security_clear
 
 
 def _set_emergency_stop(active):
@@ -59,6 +60,10 @@ def is_emergency_stop_active():
 
 
 def require_trading_enabled():
+    # TSSI is an independent veto: neither Engine/Brain nor the ordinary
+    # emergency-stop resume endpoint can clear this security interlock.
+    require_security_clear()
+
     if is_emergency_stop_active():
         raise RuntimeError(
             "Trading blocked: emergency stop is active."
