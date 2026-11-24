@@ -60,9 +60,9 @@ class DerivMarketDataAdapterTests(unittest.TestCase):
                         "msg_type": "active_symbols", "active_symbols": [record]
                     })
 
-    def test_active_symbols_requires_trade_count_and_symbol_type(self):
+    def test_active_symbols_requires_non_negative_trade_count(self):
         for field, value in (("trade_count", None), ("trade_count", -1),
-                             ("trade_count", True), ("underlying_symbol_type", "")):
+                             ("trade_count", True)):
             record = self.active_record()
             if value is None:
                 record.pop(field)
@@ -74,7 +74,26 @@ class DerivMarketDataAdapterTests(unittest.TestCase):
                         "msg_type": "active_symbols", "active_symbols": [record]
                     })
 
-    def test_incomplete_text_metadata_reports_symbol_and_missing_fields(self):
+    def test_missing_symbol_type_is_preserved_as_incomplete_not_inferred(self):
+        for missing_value in (None, ""):
+            record = self.active_record()
+            if missing_value is None:
+                record.pop("underlying_symbol_type")
+            else:
+                record["underlying_symbol_type"] = missing_value
+            result = normalize_active_symbols_response({
+                "msg_type": "active_symbols", "active_symbols": [record]
+            })[0]
+            self.assertIsNone(result["underlying_symbol_type"])
+            self.assertEqual(
+                result["provider_metadata_status"], "INCOMPLETE_PROVIDER_RESPONSE"
+            )
+            self.assertEqual(
+                result["missing_provider_metadata"], ["underlying_symbol_type"]
+            )
+            self.assertFalse(result["execution_eligible"])
+
+    def test_incomplete_required_text_metadata_reports_symbol_and_missing_fields(self):
         record = self.active_record("1HZ100V")
         record.pop("subgroup")
         record["underlying_symbol_name"] = "  "
