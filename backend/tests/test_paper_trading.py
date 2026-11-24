@@ -570,6 +570,71 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(result["new_balance"], 10050)
         self.assertEqual(result["remaining_open_risk"], 0)
 
+        with database.get_connection() as connection:
+            ledger = connection.execute(
+                """
+                SELECT realized_pnl, gross_realized_pnl,
+                       spread_cost, commission_cost, swap_cost, other_costs,
+                       cost_provenance_status
+                FROM trades WHERE trade_id = ?
+                """,
+                (trade["trade_id"],),
+            ).fetchone()
+
+        self.assertEqual(ledger["realized_pnl"], 50)
+        self.assertEqual(ledger["gross_realized_pnl"], 50)
+        self.assertEqual(
+            [ledger["spread_cost"], ledger["commission_cost"],
+             ledger["swap_cost"], ledger["other_costs"]],
+            [0, 0, 0, 0],
+        )
+        self.assertEqual(ledger["cost_provenance_status"], "UNKNOWN")
+
+    def test_direct_group_close_persists_gross_pnl_and_unknown_cost_provenance(self):
+        group_response = self.client.post(
+            "/accounts/TEST-001/groups",
+            json={"symbol": "XAUUSD", "side": "BUY"},
+        )
+        self.assertEqual(group_response.status_code, 200)
+        group_id = group_response.json()["group_id"]
+
+        trades = [
+            open_paper_trade(
+                account_id="TEST-001",
+                client_order_id=f"DIRECT-GROUP-CLOSE-{number}",
+                side="BUY",
+                entry_price=4000,
+                stop_loss=3990,
+                risk_percent=0.5,
+                symbol="XAUUSD",
+                position_group_id=group_id,
+            )
+            for number in (1, 2)
+        ]
+
+        result = close_position_group(group_id, 4010)
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertEqual(result["realized_pnl"], 100)
+
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT realized_pnl, gross_realized_pnl,
+                       cost_provenance_status
+                FROM trades
+                WHERE trade_id IN (?, ?)
+                ORDER BY trade_id
+                """,
+                (trades[0]["trade_id"], trades[1]["trade_id"]),
+            ).fetchall()
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["realized_pnl"] == 50 for row in rows))
+        self.assertTrue(all(row["gross_realized_pnl"] == 50 for row in rows))
+        self.assertTrue(
+            all(row["cost_provenance_status"] == "UNKNOWN" for row in rows)
+        )
+
     def test_open_risk_is_account_specific(self):
         self.open_trade("ORDER-001")
         create_paper_account("TEST-002", 10000)
