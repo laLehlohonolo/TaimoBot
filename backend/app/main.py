@@ -162,18 +162,32 @@ class TradeRequest(BaseModel):
 
 class CloseTradeRequest(BaseModel):
     exit_price: StrictFloat = Field(gt=0)
-    spread_cost: StrictFloat = Field(default=0, ge=0)
-    commission_cost: StrictFloat = Field(default=0, ge=0)
-    swap_cost: StrictFloat = Field(default=0, ge=0)
-    other_costs: StrictFloat = Field(default=0, ge=0)
+    spread_cost: StrictFloat | None = Field(default=None, ge=0)
+    commission_cost: StrictFloat | None = Field(default=None, ge=0)
+    swap_cost: StrictFloat | None = Field(default=None, ge=0)
+    other_costs: StrictFloat | None = Field(default=None, ge=0)
 
 
 class CloseGroupRequest(BaseModel):
     exit_price: StrictFloat = Field(gt=0)
-    spread_cost: StrictFloat = Field(default=0, ge=0)
-    commission_cost: StrictFloat = Field(default=0, ge=0)
-    swap_cost: StrictFloat = Field(default=0, ge=0)
-    other_costs: StrictFloat = Field(default=0, ge=0)
+    spread_cost: StrictFloat | None = Field(default=None, ge=0)
+    commission_cost: StrictFloat | None = Field(default=None, ge=0)
+    swap_cost: StrictFloat | None = Field(default=None, ge=0)
+    other_costs: StrictFloat | None = Field(default=None, ge=0)
+
+
+def _close_cost_inputs(request):
+    """Separate omitted costs from explicitly supplied, unverified estimates."""
+    fields = (
+        "spread_cost", "commission_cost", "swap_cost", "other_costs"
+    )
+    complete = all(field in request.model_fields_set for field in fields)
+    status = "MANUAL_UNVERIFIED" if complete else "UNKNOWN"
+    values = {
+        field: getattr(request, field) if getattr(request, field) is not None else 0
+        for field in fields
+    }
+    return {**values, "cost_provenance_status": status}
 
 
 class ProfitPreviewRequest(BaseModel):
@@ -1037,14 +1051,16 @@ def close_group(
     user=Depends(current_user)
 ):
     require_group_access(group_id, user)
+    cost_inputs = _close_cost_inputs(request)
     try:
         return close_position_group_with_copies(
             group_id=group_id,
             exit_price=request.exit_price,
             spread_cost=request.spread_cost,
             commission_cost=request.commission_cost,
-            swap_cost=request.swap_cost,
-            other_costs=request.other_costs,
+            swap_cost=cost_inputs["swap_cost"],
+            other_costs=cost_inputs["other_costs"],
+            cost_provenance_status=cost_inputs["cost_provenance_status"],
         )
     except ValueError as error:
         status_code = (
@@ -1171,14 +1187,16 @@ def close_trade(
     user=Depends(current_user)
 ):
     require_trade_access(trade_id, user)
+    cost_inputs = _close_cost_inputs(request)
     try:
         return close_trade_with_copies(
             trade_id,
             request.exit_price,
             spread_cost=request.spread_cost,
             commission_cost=request.commission_cost,
-            swap_cost=request.swap_cost,
-            other_costs=request.other_costs,
+            swap_cost=cost_inputs["swap_cost"],
+            other_costs=cost_inputs["other_costs"],
+            cost_provenance_status=cost_inputs["cost_provenance_status"],
         )
     except ValueError as error:
         raise HTTPException(
