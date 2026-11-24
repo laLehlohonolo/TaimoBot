@@ -555,5 +555,57 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.assertFalse(resume.json()["emergency_stop"])
 
 
+    def test_tssi_lock_activation_is_admin_only_and_cannot_be_cleared_by_resume(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "tssi-admin@example.com", "password": "TSSILockAdminPassphrase-2026!"},
+        )
+        self.assertEqual(registered.status_code, 200)
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE email = ?",
+                ("tssi-admin@example.com",),
+            )
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "tssi-admin@example.com", "password": "TSSILockAdminPassphrase-2026!"},
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+
+        activated = self.client.post(
+            "/tssi/lock",
+            json={"reason": "Administrator confirmed a security integrity concern"},
+            headers=headers,
+        )
+        self.assertEqual(activated.status_code, 200)
+        self.assertTrue(activated.json()["tssi_lock_active"])
+        self.assertFalse(activated.json()["new_orders_allowed"])
+
+        resumed = self.client.post("/safety/resume", headers=headers)
+        self.assertEqual(resumed.status_code, 200)
+        status = self.client.get("/safety/status", headers=headers)
+        self.assertTrue(status.json()["tssi_lock_active"])
+        self.assertFalse(status.json()["new_orders_allowed"])
+        self.assertEqual(status.json()["block_reason"], "TSSI_SECURITY_LOCK")
+
+    def test_participant_cannot_activate_tssi_security_lock(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "tssi-participant@example.com", "password": "TSSIParticipantPassphrase-2026!"},
+        )
+        self.assertEqual(registered.status_code, 200)
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "tssi-participant@example.com", "password": "TSSIParticipantPassphrase-2026!"},
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        response = self.client.post(
+            "/tssi/lock",
+            json={"reason": "Participant attempted to activate the security lock"},
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main()
