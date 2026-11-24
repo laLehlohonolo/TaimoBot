@@ -65,6 +65,7 @@ from .strategy_knowledge import list_strategies, create_strategy, get_strategy
 from .strategy_lab_routes import router as strategy_lab_router
 from .session_calendar_routes import router as session_calendar_router
 from .profit_taking import evaluate_position_profit, evaluate_group_profit
+from .tssi import get_security_status
 from .safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
@@ -634,9 +635,16 @@ def safety_status():
     emergency_stop = is_emergency_stop_active()
     maintenance_active = is_maintenance_window()
     maintenance = get_maintenance_status()
-    new_orders_allowed = not emergency_stop and not maintenance_active
+    tssi = get_security_status()
+    new_orders_allowed = (
+        not emergency_stop
+        and not maintenance_active
+        and not tssi["tssi_lock_active"]
+    )
 
-    if emergency_stop:
+    if tssi["tssi_lock_active"]:
+        block_reason = "TSSI_SECURITY_LOCK"
+    elif emergency_stop:
         block_reason = "EMERGENCY_STOP"
     elif maintenance_active:
         block_reason = "DAILY_MAINTENANCE"
@@ -645,6 +653,7 @@ def safety_status():
 
     return {
         "emergency_stop": emergency_stop,
+        **tssi,
         "maintenance_window_active": maintenance_active,
         "maintenance": maintenance,
         "new_orders_allowed": new_orders_allowed,
