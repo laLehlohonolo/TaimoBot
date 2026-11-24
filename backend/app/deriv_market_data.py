@@ -57,9 +57,22 @@ def normalize_active_symbols_response(payload):
         display_name = record.get("underlying_symbol_name")
         symbol_type = record.get("underlying_symbol_type")
         trade_count = record.get("trade_count")
-        if not all(isinstance(value, str) and value.strip()
-                   for value in (market, subgroup, submarket, display_name, symbol_type)):
-            raise ValueError("Deriv symbol metadata is incomplete.")
+        required_text_metadata = {
+            "market": market,
+            "subgroup": subgroup,
+            "submarket": submarket,
+            "underlying_symbol_name": display_name,
+            "underlying_symbol_type": symbol_type,
+        }
+        missing_metadata = [
+            field for field, value in required_text_metadata.items()
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing_metadata:
+            raise ValueError(
+                f"Deriv symbol metadata is incomplete for {symbol}: "
+                f"missing or blank fields: {', '.join(missing_metadata)}."
+            )
         if market.strip().lower() != instrument["asset_class"]:
             raise ValueError("Deriv symbol market metadata does not match the instrument catalogue.")
         if isinstance(trade_count, bool) or not isinstance(trade_count, int) or trade_count < 0:
