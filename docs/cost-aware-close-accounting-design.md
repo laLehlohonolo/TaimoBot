@@ -18,7 +18,7 @@ Design and implementation review for the paper-trading branch. This document rec
 
 ### 1. Follower copy costs are not independently modelled
 
-When a source trade is closed together with its open copies, supplied costs apply to the source trade only. Each follower copy is closed with zero recorded costs. Group close behaves similarly: group costs are allocated across source positions, while follower copies receive zero costs.
+When a source trade is closed together with its open copies, supplied costs apply to the source trade only. Each follower copy is closed with zero recorded costs. Group close behaves similarly: group costs are allocated across source positions, while follower copies receive zero costs. In the current close transaction, those follower rows are nevertheless persisted with `gross_realized_pnl` equal to `realized_pnl` and all four cost columns set to zero. That is a zero-cost accounting result, not evidence that the follower incurred no costs.
 
 This avoids the unsafe alternative of blindly copying the source's absolute costs into separate follower accounts. However, follower realized P&L and balances can be overstated whenever follower-side charges should apply.
 
@@ -32,7 +32,7 @@ The single-trade response now makes its limited scope explicit; it is still not 
 
 ### 3. Cost inputs are caller-supplied and default to zero
 
-Close and preview API fields default to zero for backward compatibility. There is no configured, versioned, per-account/per-instrument paper execution cost policy that derives those amounts. A zero value therefore means "zero supplied", not proof that an execution would incur no cost.
+Close and preview API fields default to zero for backward compatibility. The request models currently cannot distinguish an omitted cost field from an explicitly supplied zero, and the close service receives only numeric values. There is no configured, versioned, per-account/per-instrument paper execution cost policy that derives those amounts. A zero value therefore means "zero supplied", not proof that an execution would incur no cost. The API/ledger currently has no cost-completeness or provenance status to warn consumers that the amount is unknown.
 
 The paper engine's XAUUSD quantity remains abstract paper units, not broker lots. No verified broker contract sizing, tick-value conversion, account-currency conversion, spread, commission, swap, or slippage model is enabled.
 
