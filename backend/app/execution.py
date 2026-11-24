@@ -267,7 +267,7 @@ def get_position_group(group_id):
                         THEN risk_amount ELSE 0 END
                     ), 0
                 ) AS combined_open_risk,
-                COALESCE(SUM(realized_pnl), 0) AS realized_pnl
+                COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN realized_pnl ELSE 0 END), 0) AS realized_pnl
             FROM trades
             WHERE position_group_id = ?
             """,
