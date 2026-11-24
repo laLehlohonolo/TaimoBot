@@ -673,11 +673,17 @@ def close_paper_trade(trade_id, exit_price):
             UPDATE trades
             SET status = 'CLOSED',
                 realized_pnl = ?,
+                gross_realized_pnl = ?,
+                spread_cost = 0,
+                commission_cost = 0,
+                swap_cost = 0,
+                other_costs = 0,
+                cost_provenance_status = 'UNKNOWN',
                 closed_at = CURRENT_TIMESTAMP
             WHERE trade_id = ?
               AND status = 'OPEN'
             """,
-            (pnl, trade_id)
+            (pnl, pnl, trade_id)
         )
 
         if update_result.rowcount != 1:
@@ -812,11 +818,17 @@ def close_position_group(group_id, exit_price):
                 UPDATE trades
                 SET status = 'CLOSED',
                     realized_pnl = ?,
+                    gross_realized_pnl = ?,
+                    spread_cost = 0,
+                    commission_cost = 0,
+                    swap_cost = 0,
+                    other_costs = 0,
+                    cost_provenance_status = 'UNKNOWN',
                     closed_at = CURRENT_TIMESTAMP
                 WHERE trade_id = ?
                   AND status = 'OPEN'
                 """,
-                (pnl, trade["trade_id"])
+                (pnl, pnl, trade["trade_id"])
             )
 
             if result.rowcount != 1:
