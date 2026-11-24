@@ -1154,10 +1154,10 @@ def trade_profit_preview(
                 "quantity": trade["quantity"],
             },
             request.current_price,
-            spread_cost=cost_inputs["spread_cost"],
-            commission_cost=cost_inputs["commission_cost"],
-            swap_cost=cost_inputs["swap_cost"],
-            other_costs=cost_inputs["other_costs"],
+            spread_cost=request.spread_cost,
+            commission_cost=request.commission_cost,
+            swap_cost=request.swap_cost,
+            other_costs=request.other_costs,
             minimum_net_profit=request.minimum_net_profit,
         )
     except ValueError as error:
