@@ -50,7 +50,7 @@ def ensure_tssi_schema(connection):
 
 
 def activate_security_lock(reason, event_id, actor="SYSTEM"):
-    """Persist a security lock; repeated activation remains locked."""
+    """Persist a security lock without allowing event-ID reuse to rewrite history."""
     clean_reason = str(reason or "").strip()
     clean_event_id = str(event_id or "").strip()
     clean_actor = str(actor or "").strip()
@@ -63,14 +63,29 @@ def activate_security_lock(reason, event_id, actor="SYSTEM"):
 
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
+        existing = connection.execute(
             """
-            INSERT OR IGNORE INTO tssi_security_events
-                (event_id, event_type, reason, actor)
-            VALUES (?, 'LOCK_ACTIVATED', ?, ?)
+            SELECT event_type, reason, actor
+            FROM tssi_security_events WHERE event_id = ?
             """,
-            (clean_event_id, clean_reason, clean_actor),
-        )
+            (clean_event_id,),
+        ).fetchone()
+        if existing is not None and (
+            existing["event_type"] != "LOCK_ACTIVATED"
+            or existing["reason"] != clean_reason
+            or existing["actor"] != clean_actor
+        ):
+            raise ValueError("TSSI event ID already exists with different event data.")
+
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO tssi_security_events
+                    (event_id, event_type, reason, actor)
+                VALUES (?, 'LOCK_ACTIVATED', ?, ?)
+                """,
+                (clean_event_id, clean_reason, clean_actor),
+            )
         connection.execute(
             """
             UPDATE tssi_security_state
