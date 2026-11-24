@@ -74,6 +74,18 @@ class DerivMarketDataAdapterTests(unittest.TestCase):
                         "msg_type": "active_symbols", "active_symbols": [record]
                     })
 
+    def test_incomplete_text_metadata_reports_symbol_and_missing_fields(self):
+        record = self.active_record("1HZ100V")
+        record.pop("subgroup")
+        record["underlying_symbol_name"] = "  "
+        with self.assertRaisesRegex(
+            ValueError,
+            r"1HZ100V: missing or blank fields: subgroup, underlying_symbol_name",
+        ):
+            normalize_active_symbols_response({
+                "msg_type": "active_symbols", "active_symbols": [record]
+            })
+
     def test_deriv_candle_converts_epoch_and_marks_unverified(self):
         result = normalize_deriv_candle("1HZ100V", {
             "epoch": 1795256100, "open": 1000, "high": 1002,
