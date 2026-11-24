@@ -19,6 +19,8 @@ from app.execution import (
     open_paper_trade,
     close_paper_trade,
     close_position_group,
+    create_position_group,
+    get_position_group,
     validate_symbol
 )
 from app.risk import (
@@ -3029,6 +3031,45 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(sum(row["realized_pnl"] for row in trades), 100)
         self.assertEqual(group["status"], "CLOSED")
         self.assertEqual(account["balance"], 10100)
+
+
+    def test_position_group_realized_pnl_excludes_stale_open_trade_values(self):
+        group = create_position_group("TEST-001", "XAUUSD", "BUY")
+        closed = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="GROUP-CLOSED-LEG",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group["group_id"],
+        )
+        opened = open_paper_trade(
+            account_id="TEST-001",
+            client_order_id="GROUP-OPEN-LEG",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            symbol="XAUUSD",
+            position_group_id=group["group_id"],
+        )
+        close_paper_trade(closed["trade_id"], 3990)
+
+        # Simulate a legacy/stale P&L value on an OPEN row.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE trades
+                SET realized_pnl = 999, gross_realized_pnl = 888
+                WHERE trade_id = ?
+                """,
+                (opened["trade_id"],),
+            )
+
+        summary = get_position_group(group["group_id"])
+        self.assertEqual(summary["open_positions"], 1)
+        self.assertEqual(summary["closed_positions"], 1)
+        self.assertEqual(summary["realized_pnl"], -50)
 
 
 if __name__ == "__main__":
