@@ -186,6 +186,11 @@ def migrate_trade_cost_ledger(connection):
         "commission_cost": "REAL NOT NULL DEFAULT 0",
         "swap_cost": "REAL NOT NULL DEFAULT 0",
         "other_costs": "REAL NOT NULL DEFAULT 0",
+        "cost_provenance_status": (
+            "TEXT NOT NULL DEFAULT 'UNKNOWN' "
+            "CHECK (cost_provenance_status IN "
+            "('UNKNOWN', 'MANUAL_UNVERIFIED', 'ESTIMATED', 'ACTUAL'))"
+        ),
     }
     for column_name, column_type in new_columns.items():
         if column_name not in existing_columns:
@@ -193,8 +198,9 @@ def migrate_trade_cost_ledger(connection):
                 f"ALTER TABLE trades ADD COLUMN {column_name} {column_type}"
             )
 
-    # Legacy realized_pnl remains authoritative net P&L for old rows.
-    # With no historical cost records, preserve it as both gross and net.
+    # Preserve historical P&L and balances, but do not infer that historical
+    # costs were zero. The additive column defaults every legacy row to UNKNOWN;
+    # only a later, evidence-backed reconciliation may assign another status.
     connection.execute(
         """
         UPDATE trades
