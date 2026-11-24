@@ -26,7 +26,8 @@ def get_account_history(account_id):
                     AS open_trades,
                 SUM(CASE WHEN status = 'CLOSED' THEN 1 ELSE 0 END)
                     AS closed_trades,
-                COALESCE(SUM(realized_pnl), 0) AS realized_pnl,
+                COALESCE(SUM(CASE WHEN status = 'CLOSED'
+                    THEN realized_pnl ELSE 0 END), 0) AS realized_pnl,
                 COALESCE(SUM(CASE WHEN status = 'CLOSED'
                     THEN gross_realized_pnl ELSE 0 END), 0) AS gross_realized_pnl,
                 COALESCE(SUM(CASE WHEN status = 'CLOSED'
