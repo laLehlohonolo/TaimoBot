@@ -730,7 +730,7 @@ def _reconcile_pending_copy_executions_for_closed_source(connection, source_trad
 
 def close_trade_with_copies(
     trade_id, exit_price, *, spread_cost=0, commission_cost=0,
-    swap_cost=0, other_costs=0
+    swap_cost=0, other_costs=0, cost_provenance_status="UNKNOWN"
 ):
     """
     Close an original source trade and every open direct copy atomically.
@@ -782,6 +782,7 @@ def close_trade_with_copies(
             # Costs supplied for this close belong only to the requested
             # position. Do not silently duplicate source costs onto copies
             # held in separate follower accounts.
+            is_requested_position = trade["trade_id"] == trade_id
             costs = (
                 {
                     "spread_cost": spread_cost,
@@ -789,7 +790,7 @@ def close_trade_with_copies(
                     "swap_cost": swap_cost,
                     "other_costs": other_costs,
                 }
-                if trade["trade_id"] == trade_id
+                if is_requested_position
                 else {}
             )
             accounting = calculate_close_accounting(gross_pnl, **costs)
@@ -802,6 +803,9 @@ def close_trade_with_copies(
                 "is_copy": trade["copied_from_trade_id"] is not None,
                 "realized_pnl": pnl,
                 **accounting,
+                "cost_provenance_status": (
+                    cost_provenance_status if is_requested_position else "UNKNOWN"
+                ),
                 "position_group_id": trade["position_group_id"]
             })
 
@@ -837,6 +841,7 @@ def close_trade_with_copies(
                     commission_cost = ?,
                     swap_cost = ?,
                     other_costs = ?,
+                    cost_provenance_status = ?,
                     closed_at = CURRENT_TIMESTAMP
                 WHERE trade_id = ?
                   AND status = 'OPEN'
@@ -848,6 +853,7 @@ def close_trade_with_copies(
                     result["commission_cost"],
                     result["swap_cost"],
                     result["other_costs"],
+                    result["cost_provenance_status"],
                     result["trade_id"]
                 )
             )
@@ -950,7 +956,7 @@ def close_trade_with_copies(
 
 def close_position_group_with_copies(
     group_id, exit_price, *, spread_cost=0, commission_cost=0,
-    swap_cost=0, other_costs=0
+    swap_cost=0, other_costs=0, cost_provenance_status="UNKNOWN"
 ):
     """Atomically close a source group and copies, allocating costs to sources."""
     group_id = str(group_id).strip()
@@ -1050,13 +1056,17 @@ def close_position_group_with_copies(
                 account_pnl.get(account_id, 0.0) + pnl
             )
 
+            is_source_position = trade["trade_id"] in allocated
             results.append({
                 "trade_id": trade["trade_id"],
                 "account_id": account_id,
                 "source_trade_id": trade["copied_from_trade_id"],
                 "is_copy": trade["copied_from_trade_id"] is not None,
                 "realized_pnl": pnl,
-                **accounting
+                **accounting,
+                "cost_provenance_status": (
+                    cost_provenance_status if is_source_position else "UNKNOWN"
+                ),
             })
 
         new_balances = {}
@@ -1094,6 +1104,7 @@ def close_position_group_with_copies(
                     commission_cost = ?,
                     swap_cost = ?,
                     other_costs = ?,
+                    cost_provenance_status = ?,
                     closed_at = CURRENT_TIMESTAMP
                 WHERE trade_id = ? AND status = 'OPEN'
                 """,
@@ -1104,6 +1115,7 @@ def close_position_group_with_copies(
                     item["commission_cost"],
                     item["swap_cost"],
                     item["other_costs"],
+                    item["cost_provenance_status"],
                     item["trade_id"]
                 )
             )
