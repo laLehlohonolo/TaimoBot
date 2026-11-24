@@ -24,11 +24,11 @@ This avoids the unsafe alternative of blindly copying the source's absolute cost
 
 ### 2. Previews do not cover the full close scope
 
-- A single-trade preview evaluates only the requested trade, while closing an original source trade also closes its open direct copies.
+- A single-trade preview evaluates only the requested position. Its response now declares `preview_scope: REQUESTED_POSITION_ONLY`, reports whether the close scope is `SOURCE_AND_OPEN_COPIES` or `FOLLOWER_ONLY`, and includes `open_copy_positions_excluded` for a source position.
 - A group preview evaluates only source-group positions. It returns `preview_scope: SOURCE_GROUP_POSITIONS_ONLY` and `copy_positions_excluded` so the omission is visible.
 - Preview and close currently use separate calculation paths (`profit_taking.py` and `close_accounting.py`) that have parity tests for source-only examples, but they do not share one cost-allocation engine.
 
-A preview must not be presented as the expected total financial impact of a source-and-copy close while follower positions are excluded.
+The single-trade response now makes its limited scope explicit; it is still not the expected total financial impact of a source-and-copy close while follower positions are excluded. Group previews have the same source-only limitation.
 
 ### 3. Cost inputs are caller-supplied and default to zero
 
@@ -36,23 +36,25 @@ Close and preview API fields default to zero for backward compatibility. There i
 
 The paper engine's XAUUSD quantity remains abstract paper units, not broker lots. No verified broker contract sizing, tick-value conversion, account-currency conversion, spread, commission, swap, or slippage model is enabled.
 
-### 4. Risk-profile thresholds are duplicated in the frontend preview
+### 4. Account-authoritative risk preview is implemented; generic preview remains
 
-The backend assigns the authoritative risk profile from original account funding in `backend/app/risk.py`, and `open_paper_trade` deliberately ignores the participant-supplied `risk_percent` before recalculating the assigned allowance inside the transaction. The React preview independently repeats the current funding thresholds (below 5,000; below 25,000; otherwise PREMIUM) to choose a preview percentage before calling `/risk/preview`. Those values currently match the backend, but the duplication can drift and produce a preview that differs from the order the backend will accept. The current `/risk/preview` route is also unauthenticated and accepts caller-supplied balance and risk percentage; treat it only as a generic calculator, not an account-authoritative allowance or trusted account disclosure.
+The authenticated `POST /accounts/{account_id}/risk/preview` route derives the assigned risk profile from persisted original funding, verifies the stored profile, reads the persisted account balance and current open risk, and calculates the preview without accepting a client-supplied balance or risk percentage. It returns `preview_authority: PERSISTED_ACCOUNT_STATE`, the assigned profile, settlement currency, and calculated exposure. The React workspace calls this account-scoped route. Order acceptance independently recalculates and enforces the same backend-assigned risk profile and the hard combined 1% ceiling.
 
-Keep the backend as the sole authority. The existing `GET /accounts/{account_id}/risk` route is already authenticated and account-scoped, but currently returns balance/open-risk budget rather than the assigned per-trade profile or a price/stop-specific preview. Extend it with a clearly defined authenticated preview operation (or add a sibling account-scoped endpoint) that derives the profile from persisted original funding and calculates using persisted balance/open risk; do not accept client-supplied account balance or risk percentage as authoritative. Prefer returning the assigned profile/preview allowance from that backend-owned contract consumed by the frontend. Add contract tests at the threshold boundaries (4,999.99/5,000 and 24,999.99/25,000) and a frontend/API integration test proving preview and accepted-order risk agree. The existing order transaction and combined 1% backend limit remain mandatory regardless of preview output.
+The generic `POST /risk/preview` route remains unauthenticated and accepts caller-supplied balance/risk inputs; it is only a generic calculator and must not be treated as account-authoritative.
 
-### 5. Frontend currency labels are not backed by account currency data
+Backend tests cover the 4,999.99/5,000 and 24,999.99/25,000 funding boundaries, persisted open-risk inclusion, invalid stop direction, full combined-risk rejection, and cross-user account access denial. Preserve the backend as the sole authority and keep order-transaction checks mandatory regardless of preview output.
 
-The current React workspace renders account balances, open-risk amounts, realized P&L, trade risk, and the new-account starting-balance field with an `R`/ZAR label. However, the account creation request sends only `account_id` and a numeric `starting_balance`; the backend `AccountRequest`, `create_paper_account`, `paper_accounts` schema, account list response, account detail response, and risk response do not carry an account currency. The frontend's participant currency preference is a separate, permanent display preference and does not establish the ledger denomination.
+### 5. New accounts persist immutable settlement currency; legacy accounts remain unverified
 
-This creates a contract mismatch: the UI presents amounts as ZAR while the persisted account record cannot prove that denomination. Do not solve this by silently treating the display preference as settlement currency or by adding an unreviewed conversion. Before multi-currency preferences can affect account displays, persist an immutable settlement currency at account creation, expose it consistently in account/detail/risk APIs, and define a reviewed backfill policy for existing accounts. Until then, currency labels must not imply a backend-verified denomination. Add frontend/API contract tests proving the displayed denomination matches the account's persisted settlement currency.
+New account creation requires an explicit supported `settlement_currency` (`ZAR`, `USD`, `EUR`, `GBP`, or `KWD`). The backend stores it on `paper_accounts`, returns it in account creation/list/detail and risk responses, and prevents changing a non-null account denomination through a database trigger. The React workspace displays the account's persisted settlement currency rather than treating the participant's display preference as the ledger denomination.
 
-### 6. Paper accounts do not have an explicit settlement currency
+The migration adds a nullable currency column and deliberately leaves existing legacy accounts null; it does not guess or silently backfill ZAR. The UI labels those balances as currency unverified. The participant currency preference remains display-only and does not move, convert, or relabel funds. Tests cover required/unsupported currency, persistence through list/detail, immutability, and legacy migration preserving a null denomination.
 
-The `paper_accounts` schema stores starting balance and current balance but no account-currency field. `create_paper_account` accepts a numeric starting balance without a currency and close paths add realized P&L directly to that balance. The `/accounts` API also returns balances without a currency denomination. The `/participant/currency-preference` API is explicitly a write-once display preference backed by `participant_display_currency_preferences`; it is not an account settlement-currency ledger and must not be used to infer or convert account balances.
+### 6. Legacy denomination and FX conversion remain unresolved
 
-Consequently, the currency denomination of existing paper balances is not established by the account record. Do not silently label existing balances as ZAR or another currency, convert them, or apply cross-currency costs. Before multi-currency reporting or account-specific cost calculation, define an immutable settlement currency for each account and a reviewed migration/backfill policy for existing accounts. Any conversion must identify its rate source, pair, bid/ask side, timestamp, freshness limit, and calculation provenance. Missing or stale conversion data must remain explicitly unavailable rather than being treated as a zero-cost or one-to-one conversion.
+Although new accounts now carry an immutable settlement currency, migrated legacy accounts remain nullable and therefore currency-unverified until an explicit, reviewed backfill decision is made. Do not infer their denomination from location, participant preference, historical UI labels, or a default. Do not convert legacy balances or apply cross-currency costs without an approved policy.
+
+No FX conversion is implied by the account-currency work. Any future conversion must identify its rate source, pair, bid/ask side, timestamp, freshness limit, and calculation provenance. Missing or stale conversion data must remain explicitly unavailable rather than being treated as a zero-cost or one-to-one conversion.
 
 ## Required invariants
 
