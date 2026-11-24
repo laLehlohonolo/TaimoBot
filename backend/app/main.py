@@ -65,7 +65,7 @@ from .strategy_knowledge import list_strategies, create_strategy, get_strategy
 from .strategy_lab_routes import router as strategy_lab_router
 from .session_calendar_routes import router as session_calendar_router
 from .profit_taking import evaluate_position_profit, evaluate_group_profit
-from .tssi import get_security_status
+from .tssi import activate_security_lock, get_security_status
 from .safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
@@ -187,6 +187,10 @@ class ProfitPreviewRequest(BaseModel):
 
 class CopyRelationshipRequest(BaseModel):
     source_account_id: str = Field(min_length=1, max_length=100)
+
+
+class TSSILockRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class MaintenanceRetryRequest(BaseModel):
@@ -628,6 +632,20 @@ def preflight_maintenance_restore(request: MaintenanceRestorePreflightRequest, u
         return verify_approved_restore_plan(plan, artifact_hashes)
     except (OSError, sqlite3.Error, ValueError, KeyError) as error:
         raise HTTPException(status_code=409, detail="Restore preflight blocked: " + str(error)[:180]) from error
+
+
+@app.post("/tssi/lock")
+def activate_tssi_lock(request: TSSILockRequest, user=Depends(current_user)):
+    """Admin-only, one-way activation of the independent TSSI security lock."""
+    require_admin(user)
+    try:
+        return activate_security_lock(
+            request.reason.strip(),
+            uuid4().hex,
+            actor=user["user_id"],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.get("/safety/status")
