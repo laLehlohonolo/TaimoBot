@@ -186,6 +186,11 @@ def migrate_trade_cost_ledger(connection):
         "commission_cost": "REAL NOT NULL DEFAULT 0",
         "swap_cost": "REAL NOT NULL DEFAULT 0",
         "other_costs": "REAL NOT NULL DEFAULT 0",
+        "cost_provenance_status": (
+            "TEXT NOT NULL DEFAULT 'UNKNOWN' "
+            "CHECK (cost_provenance_status IN "
+            "('UNKNOWN', 'MANUAL_UNVERIFIED', 'ESTIMATED', 'ACTUAL'))"
+        ),
     }
     for column_name, column_type in new_columns.items():
         if column_name not in existing_columns:
@@ -193,8 +198,9 @@ def migrate_trade_cost_ledger(connection):
                 f"ALTER TABLE trades ADD COLUMN {column_name} {column_type}"
             )
 
-    # Legacy realized_pnl remains authoritative net P&L for old rows.
-    # With no historical cost records, preserve it as both gross and net.
+    # Preserve historical P&L and balances, but do not infer that historical
+    # costs were zero. The additive column defaults every legacy row to UNKNOWN;
+    # only a later, evidence-backed reconciliation may assign another status.
     connection.execute(
         """
         UPDATE trades
@@ -254,6 +260,33 @@ def migrate_participant_milestones(connection):
               WHERE paper_accounts.owner_user_id = participant_milestones.user_id
                 AND trades.status IN ('OPEN', 'CLOSED')
           )
+        """
+    )
+
+
+def migrate_account_settlement_currency(connection):
+    """Add nullable settlement denomination without guessing legacy currency."""
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(
+            "PRAGMA table_info(paper_accounts)"
+        ).fetchall()
+    }
+    if "settlement_currency" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE paper_accounts ADD COLUMN settlement_currency TEXT"
+        )
+
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_paper_account_settlement_currency_immutable
+        BEFORE UPDATE OF settlement_currency ON paper_accounts
+        FOR EACH ROW
+        WHEN OLD.settlement_currency IS NOT NULL
+         AND NEW.settlement_currency IS NOT OLD.settlement_currency
+        BEGIN
+            SELECT RAISE(ABORT, 'Account settlement currency is immutable.');
+        END
         """
     )
 
@@ -341,6 +374,407 @@ def seed_strategy_knowledge(connection):
         )
 
 
+
+
+def ensure_market_observation_schema(connection):
+    """Create the append-only, deduplicated market candle store."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_observations (
+            observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            open REAL NOT NULL CHECK (open > 0),
+            high REAL NOT NULL CHECK (high > 0),
+            low REAL NOT NULL CHECK (low > 0),
+            close REAL NOT NULL CHECK (close > 0),
+            volume REAL NOT NULL CHECK (volume >= 0),
+            provenance_status TEXT NOT NULL DEFAULT 'UNVERIFIED_EXTERNAL_INPUT',
+            received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (symbol, timeframe, observed_at, source),
+            CHECK (low <= open AND low <= close),
+            CHECK (high >= open AND high >= close),
+            CHECK (low <= high)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_observations_lookup
+        ON market_observations(symbol, timeframe, observed_at DESC)
+        """
+    )
+    # Enforce the append-only contract in SQLite itself, not merely in the
+    # Python storage helper. This protects historical research evidence from
+    # accidental or ad-hoc UPDATE/DELETE operations by other code paths.
+    connection.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_market_observation_update
+        BEFORE UPDATE ON market_observations
+        BEGIN
+            SELECT RAISE(ABORT, 'market observations are append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_market_observation_delete
+        BEFORE DELETE ON market_observations
+        BEGIN
+            SELECT RAISE(ABORT, 'market observations are append-only');
+        END;
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_backfill_checkpoints (
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            next_end_epoch INTEGER,
+            status TEXT NOT NULL CHECK (status IN (
+                'NOT_STARTED', 'RUNNING', 'COMPLETE', 'GAP_REVIEW', 'FAILED'
+            )),
+            earliest_observed_at TEXT,
+            latest_observed_at TEXT,
+            batches_completed INTEGER NOT NULL DEFAULT 0 CHECK (batches_completed >= 0),
+            last_error TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, timeframe)
+        )
+        """
+    )
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS market_backfill_review_audit (
+            review_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN ('RETRY_SAME_RANGE')),
+            rationale TEXT NOT NULL,
+            decided_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (decided_by) REFERENCES users(user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_market_backfill_review_history
+            ON market_backfill_review_audit(symbol, timeframe, created_at DESC);
+
+        CREATE TRIGGER IF NOT EXISTS prevent_market_backfill_review_update
+        BEFORE UPDATE ON market_backfill_review_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Backfill review history is append-only.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_market_backfill_review_delete
+        BEFORE DELETE ON market_backfill_review_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Backfill review history is append-only.');
+        END;
+        """
+    )
+
+
+def ensure_strategy_lab_schema(connection):
+    """Create private, administrator-governed strategy research records."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS brain_strategy_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            instruments_json TEXT NOT NULL,
+            timeframes_json TEXT NOT NULL,
+            market_conditions TEXT NOT NULL,
+            entry_logic TEXT NOT NULL,
+            exit_logic TEXT NOT NULL,
+            invalidation_logic TEXT NOT NULL,
+            risk_notes TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'RESEARCH', 'REJECTED', 'APPROVED_FOR_STAGING'
+            )),
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (created_by) REFERENCES users(user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_brain_strategy_candidates_status
+            ON brain_strategy_candidates(status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS brain_strategy_candidate_decisions (
+            decision_id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN (
+                'REQUEST_MORE_RESEARCH', 'REJECT', 'APPROVE_FOR_STAGING'
+            )),
+            rationale TEXT NOT NULL,
+            decided_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (candidate_id) REFERENCES brain_strategy_candidates(candidate_id),
+            FOREIGN KEY (decided_by) REFERENCES users(user_id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_strategy_decision_update
+        BEFORE UPDATE ON brain_strategy_candidate_decisions
+        BEGIN
+            SELECT RAISE(ABORT, 'Strategy decision history is append-only.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_strategy_decision_delete
+        BEFORE DELETE ON brain_strategy_candidate_decisions
+        BEGIN
+            SELECT RAISE(ABORT, 'Strategy decision history is append-only.');
+        END;
+
+        CREATE TABLE IF NOT EXISTS brain_strategy_lab_audit (
+            event_id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            actor_user_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (candidate_id) REFERENCES brain_strategy_candidates(candidate_id),
+            FOREIGN KEY (actor_user_id) REFERENCES users(user_id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_strategy_lab_audit_update
+        BEFORE UPDATE ON brain_strategy_lab_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Strategy lab audit history is append-only.');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_brain_strategy_lab_audit_delete
+        BEFORE DELETE ON brain_strategy_lab_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Strategy lab audit history is append-only.');
+        END;
+        """
+    )
+
+
+
+_SESSION_CALENDAR_SCHEMA_GUARD = threading.RLock()
+
+
+def ensure_session_calendar_schema(connection):
+    """Create immutable, versioned calendar records and append-only review history."""
+    with _SESSION_CALENDAR_SCHEMA_GUARD:
+        lock_path = DB_PATH.with_name(DB_PATH.name + ".schema.lock")
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS brain_session_calendars (
+                    calendar_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK (version > 0),
+                    status TEXT NOT NULL CHECK (status IN (
+                        'PENDING_SOURCE_VERIFICATION',
+                        'SOURCE_VERIFIED_PENDING_APPROVAL',
+                        'APPROVED', 'REJECTED'
+                    )),
+                    record_json TEXT NOT NULL,
+                    submitted_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(provider, symbol, version),
+                    FOREIGN KEY (submitted_by) REFERENCES users(user_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_brain_session_calendars_symbol
+                    ON brain_session_calendars(symbol, provider, version DESC);
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_record_mutation
+                BEFORE UPDATE OF provider, symbol, version, record_json, submitted_by, created_at
+                ON brain_session_calendars
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar versions are immutable.');
+                END;
+
+                DROP TRIGGER IF EXISTS validate_brain_session_calendar_status_transition;
+                CREATE TRIGGER validate_brain_session_calendar_status_transition
+                BEFORE UPDATE OF status ON brain_session_calendars
+                WHEN NOT (
+                    (
+                        OLD.status = 'PENDING_SOURCE_VERIFICATION'
+                        AND NEW.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'VERIFY_SOURCE'
+                        )
+                    ) OR (
+                        OLD.status = 'PENDING_SOURCE_VERIFICATION'
+                        AND NEW.status = 'REJECTED'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'REJECT'
+                        )
+                    ) OR (
+                        OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                        AND NEW.status = 'APPROVED'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'APPROVE_CALENDAR'
+                        )
+                    ) OR (
+                        OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                        AND NEW.status = 'PENDING_SOURCE_VERIFICATION'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'REQUEST_CHANGES'
+                        )
+                    ) OR (
+                        OLD.status = 'SOURCE_VERIFIED_PENDING_APPROVAL'
+                        AND NEW.status = 'REJECTED'
+                        AND EXISTS (
+                            SELECT 1 FROM brain_session_calendar_decisions
+                            WHERE calendar_id = NEW.calendar_id AND decision = 'REJECT'
+                        )
+                    )
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar status changes require a matching recorded decision.');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_delete
+                BEFORE DELETE ON brain_session_calendars
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar versions cannot be deleted.');
+                END;
+
+                CREATE TABLE IF NOT EXISTS brain_session_calendar_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    calendar_id TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK (decision IN (
+                        'VERIFY_SOURCE', 'APPROVE_CALENDAR', 'REQUEST_CHANGES', 'REJECT'
+                    )),
+                    rationale TEXT NOT NULL,
+                    evidence_url TEXT,
+                    decided_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (calendar_id) REFERENCES brain_session_calendars(calendar_id),
+                    FOREIGN KEY (decided_by) REFERENCES users(user_id)
+                );
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_decision_update
+                BEFORE UPDATE ON brain_session_calendar_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar decision history is append-only.');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_decision_delete
+                BEFORE DELETE ON brain_session_calendar_decisions
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar decision history is append-only.');
+                END;
+
+                CREATE TABLE IF NOT EXISTS brain_session_calendar_audit (
+                    event_id TEXT PRIMARY KEY,
+                    calendar_id TEXT NOT NULL,
+                    actor_user_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    details_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (calendar_id) REFERENCES brain_session_calendars(calendar_id),
+                    FOREIGN KEY (actor_user_id) REFERENCES users(user_id)
+                );
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_audit_update
+                BEFORE UPDATE ON brain_session_calendar_audit
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar audit history is append-only.');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS prevent_brain_session_calendar_audit_delete
+                BEFORE DELETE ON brain_session_calendar_audit
+                BEGIN
+                    SELECT RAISE(ABORT, 'Session calendar audit history is append-only.');
+                END;
+                """
+            )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+
+def migrate_subscription_entitlements(connection):
+    """Create participant subscription entitlements and append-only admin audit."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS participant_subscription_entitlements (
+            user_id TEXT PRIMARY KEY,
+            tier TEXT NOT NULL DEFAULT 'STANDARD'
+                CHECK (tier IN ('STANDARD', 'ADVANCED', 'PREMIUM', 'EXCLUSIVE')),
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO participant_subscription_entitlements (user_id, tier)
+        SELECT user_id, 'STANDARD' FROM users
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscription_entitlement_audit (
+            audit_id TEXT PRIMARY KEY,
+            actor_user_id TEXT NOT NULL,
+            participant_user_id TEXT NOT NULL,
+            previous_tier TEXT NOT NULL,
+            new_tier TEXT NOT NULL
+                CHECK (new_tier IN ('STANDARD', 'ADVANCED', 'PREMIUM', 'EXCLUSIVE')),
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (actor_user_id) REFERENCES users(user_id) ON DELETE RESTRICT,
+            FOREIGN KEY (participant_user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS subscription_entitlement_audit_no_update
+        BEFORE UPDATE ON subscription_entitlement_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Subscription entitlement audit is append-only.');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS subscription_entitlement_audit_no_delete
+        BEFORE DELETE ON subscription_entitlement_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'Subscription entitlement audit is append-only.');
+        END
+        """
+    )
+
+
+def migrate_user_security_roles(connection):
+    """Add fail-closed account roles and email-verification state."""
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "role" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'PARTICIPANT' "
+            "CHECK (role IN ('PARTICIPANT', 'ADMIN'))"
+        )
+    if "email_verified" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (email_verified IN (0, 1))"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_role_verified ON users(role, email_verified)"
+    )
+
+
 def init_db():
     """Create tables and safely migrate existing paper-trading data."""
 
@@ -353,6 +787,26 @@ def init_db():
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS participant_display_currency_preferences (
+                user_id TEXT PRIMARY KEY,
+                currency TEXT NOT NULL CHECK (currency IN ('ZAR', 'USD', 'EUR', 'GBP', 'KWD')),
+                selected_at TEXT NOT NULL,
+                confirmed INTEGER NOT NULL CHECK (confirmed = 1),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+            );
+
+            CREATE TRIGGER IF NOT EXISTS prevent_display_currency_preference_update
+            BEFORE UPDATE ON participant_display_currency_preferences
+            BEGIN
+                SELECT RAISE(ABORT, 'Display currency preference is immutable.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS prevent_display_currency_preference_delete
+            BEFORE DELETE ON participant_display_currency_preferences
+            BEGIN
+                SELECT RAISE(ABORT, 'Display currency preference cannot be deleted.');
+            END;
 
             CREATE TABLE IF NOT EXISTS participant_milestones (
                 user_id TEXT PRIMARY KEY,
@@ -388,6 +842,7 @@ def init_db():
                 balance REAL NOT NULL
                     CHECK (balance >= 0),
                 risk_profile TEXT,
+                settlement_currency TEXT,
                 created_at TEXT NOT NULL
                     DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (owner_user_id) REFERENCES users(user_id)
@@ -540,13 +995,21 @@ def init_db():
 
 
         seed_strategy_knowledge(connection)
+        ensure_market_observation_schema(connection)
+        ensure_strategy_lab_schema(connection)
+        ensure_session_calendar_schema(connection)
+        from .tssi import ensure_tssi_schema
+        ensure_tssi_schema(connection)
 
         migrate_trade_columns(connection)
         migrate_trade_cost_ledger(connection)
         migrate_account_ownership(connection)
         migrate_participant_milestones(connection)
         migrate_account_risk_profiles(connection)
+        migrate_account_settlement_currency(connection)
+        migrate_subscription_entitlements(connection)
         migrate_copy_execution_leases(connection)
+        migrate_user_security_roles(connection)
 
         connection.execute(
             """

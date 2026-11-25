@@ -23,11 +23,6 @@ class PositionGroupTests(unittest.TestCase):
         # The maintenance-window block itself is tested with an explicit clock override.
         self.maintenance_clock = patch("app.safety.is_maintenance_window", return_value=False)
         self.maintenance_clock.start()
-        self.admin_env = patch.dict(
-            "os.environ",
-            {"TAIMOBOT_ADMIN_EMAILS": "position-groups-tests@taimobot.local"}
-        )
-        self.admin_env.start()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "groups.db"
@@ -36,8 +31,26 @@ class PositionGroupTests(unittest.TestCase):
         deactivate_emergency_stop()
         user = register_user("position-groups-tests@taimobot.local", "TestPassphrase-2026-Secure!")
         self.user_id = user["user_id"]
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE user_id = ?",
+                (self.user_id,),
+            )
         session = create_session(self.user_id)
         create_paper_account("GROUP-001", 10000, owner_user_id=self.user_id)
+
+        # Account creation initializes a new participant's entitlement row
+        # as STANDARD. Promote this isolated test fixture afterwards because
+        # this class deliberately exercises multiple owned accounts.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE participant_subscription_entitlements
+                SET tier = 'ADVANCED'
+                WHERE user_id = ?
+                """,
+                (self.user_id,),
+            )
 
         self.client = TestClient(app)
         self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
@@ -45,7 +58,6 @@ class PositionGroupTests(unittest.TestCase):
     def tearDown(self):
         self.maintenance_clock.stop()
         self.client.close()
-        self.admin_env.stop()
         deactivate_emergency_stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
@@ -312,6 +324,16 @@ class PositionGroupTests(unittest.TestCase):
 
 
     def create_follower_relationship(self):
+        # This fixture intentionally uses two owned accounts for copy-trading tests.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE participant_subscription_entitlements
+                SET tier = 'ADVANCED'
+                WHERE user_id = ?
+                """,
+                (self.user_id,),
+            )
         create_paper_account("GROUP-FOLLOWER-001", 10000, owner_user_id=self.user_id)
         response = self.client.post(
             "/accounts/GROUP-FOLLOWER-001/copy-relationships",
@@ -319,6 +341,26 @@ class PositionGroupTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return response.json()["relationship_id"]
+
+    def test_group_profit_preview_discloses_excluded_follower_copies(self):
+        group_id = self.create_group()
+        self.create_follower_relationship()
+        opened = self.open_group_trade(group_id, "GROUP-PREVIEW-COPY-001")
+        self.assertEqual(opened.status_code, 200)
+        self.assertEqual(opened.json()["copy_summary"]["successful_copies"], 1)
+
+        response = self.client.post(
+            f"/groups/{group_id}/profit-preview",
+            json={"current_price": 4010},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["preview_scope"], "SOURCE_GROUP_POSITIONS_ONLY")
+        self.assertEqual(result["copy_positions_excluded"], 1)
+        self.assertEqual(result["position_count"], 1)
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["execution_triggered"])
 
     def test_group_close_closes_source_and_follower_copies(self):
         group_id = self.create_group()

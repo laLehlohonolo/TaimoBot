@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, Field, StrictFloat
+from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt
 
 from .database import init_db, get_connection
 from .maintenance_scheduler import (
@@ -26,6 +26,7 @@ from .maintenance import (
 from .cors import configure_cors
 from .risk import (
     calculate_position_size,
+    get_risk_profile,
     RiskError,
     MAX_RISK_PERCENT
 )
@@ -50,6 +51,7 @@ from .history import (
     get_account_history,
     get_trade_history
 )
+from .currency_preference_routes import router as currency_preference_router
 from .auth_routes import (
     router as auth_router,
     current_user,
@@ -60,12 +62,21 @@ from .auth_routes import (
     require_admin,
 )
 from .strategy_knowledge import list_strategies, create_strategy, get_strategy
+from .strategy_lab_routes import router as strategy_lab_router
+from .session_calendar_routes import router as session_calendar_router
 from .profit_taking import evaluate_position_profit, evaluate_group_profit
+from .tssi import activate_security_lock, get_security_status
 from .safety import (
     activate_emergency_stop,
     deactivate_emergency_stop,
     is_emergency_stop_active
 )
+from .instruments import list_instruments, EXECUTION_ENABLED_SYMBOLS
+from .market_observation_store import list_market_observations, inspect_market_observation_quality
+from .market_backfill import run_backfill_batch_with_connection_factory
+from .deriv_public_client import DerivPublicMarketDataClient
+from .market_observations import SUPPORTED_TIMEFRAMES
+from .instruments import get_instrument
 
 
 @asynccontextmanager
@@ -90,6 +101,9 @@ app = FastAPI(
 )
 
 app.include_router(auth_router)
+app.include_router(currency_preference_router)
+app.include_router(strategy_lab_router)
+app.include_router(session_calendar_router)
 
 # Cross-origin browser access is disabled unless exact trusted origins are configured.
 configure_cors(app, os.getenv("TAIMOBOT_CORS_ORIGINS", ""))
@@ -103,9 +117,16 @@ class RiskPreviewRequest(BaseModel):
     side: Literal["BUY", "SELL"]
 
 
+class AccountRiskPreviewRequest(BaseModel):
+    entry_price: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    side: Literal["BUY", "SELL"]
+
+
 class AccountRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=100)
     starting_balance: float = Field(gt=0)
+    settlement_currency: Literal["ZAR", "USD", "EUR", "GBP", "KWD"]
 
 
 class PositionGroupRequest(BaseModel):
@@ -141,18 +162,32 @@ class TradeRequest(BaseModel):
 
 class CloseTradeRequest(BaseModel):
     exit_price: StrictFloat = Field(gt=0)
-    spread_cost: StrictFloat = Field(default=0, ge=0)
-    commission_cost: StrictFloat = Field(default=0, ge=0)
-    swap_cost: StrictFloat = Field(default=0, ge=0)
-    other_costs: StrictFloat = Field(default=0, ge=0)
+    spread_cost: StrictFloat | None = Field(default=None, ge=0)
+    commission_cost: StrictFloat | None = Field(default=None, ge=0)
+    swap_cost: StrictFloat | None = Field(default=None, ge=0)
+    other_costs: StrictFloat | None = Field(default=None, ge=0)
 
 
 class CloseGroupRequest(BaseModel):
     exit_price: StrictFloat = Field(gt=0)
-    spread_cost: StrictFloat = Field(default=0, ge=0)
-    commission_cost: StrictFloat = Field(default=0, ge=0)
-    swap_cost: StrictFloat = Field(default=0, ge=0)
-    other_costs: StrictFloat = Field(default=0, ge=0)
+    spread_cost: StrictFloat | None = Field(default=None, ge=0)
+    commission_cost: StrictFloat | None = Field(default=None, ge=0)
+    swap_cost: StrictFloat | None = Field(default=None, ge=0)
+    other_costs: StrictFloat | None = Field(default=None, ge=0)
+
+
+def _close_cost_inputs(request):
+    """Separate omitted costs from explicitly supplied, unverified estimates."""
+    fields = (
+        "spread_cost", "commission_cost", "swap_cost", "other_costs"
+    )
+    complete = all(field in request.model_fields_set for field in fields)
+    status = "MANUAL_UNVERIFIED" if complete else "UNKNOWN"
+    values = {
+        field: getattr(request, field) if getattr(request, field) is not None else 0
+        for field in fields
+    }
+    return {**values, "cost_provenance_status": status}
 
 
 class ProfitPreviewRequest(BaseModel):
@@ -166,6 +201,10 @@ class ProfitPreviewRequest(BaseModel):
 
 class CopyRelationshipRequest(BaseModel):
     source_account_id: str = Field(min_length=1, max_length=100)
+
+
+class TSSILockRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class MaintenanceRetryRequest(BaseModel):
@@ -194,6 +233,48 @@ class StrategyKnowledgeRequest(BaseModel):
     entry_logic: str = Field(min_length=10, max_length=2000)
     exit_logic: str = Field(min_length=10, max_length=2000)
     risk_notes: str = Field(min_length=10, max_length=2000)
+
+
+class BackfillRunRequest(BaseModel):
+    confirm_collection: StrictBool
+    batch_size: StrictInt = Field(default=100, ge=2, le=500)
+
+
+class BackfillReviewRequest(BaseModel):
+    decision: Literal["RETRY_SAME_RANGE"]
+    confirm_retry: StrictBool
+    rationale: str = Field(min_length=10, max_length=1000)
+
+
+class DerivMarketSyncRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9._/-]+$")
+    timeframe: str = Field(min_length=2, max_length=3)
+    count: StrictInt = Field(default=100, ge=1, le=100)
+    confirm_collection: bool
+
+
+@app.get("/instruments")
+def instrument_readiness(user=Depends(current_user)):
+    """Read-only catalogue and paper-execution readiness; no market feed is implied."""
+    instruments = []
+    for instrument in list_instruments():
+        symbol = instrument["symbol"]
+        execution_enabled = symbol in EXECUTION_ENABLED_SYMBOLS
+        instruments.append({
+            **instrument,
+            "paper_execution_status": (
+                "PAPER_EXECUTION_ENABLED" if execution_enabled else "OBSERVATION_ONLY"
+            ),
+            "market_data_status": "NOT_CONNECTED",
+            "broker_specifications_status": "NOT_CONFIGURED",
+            "sizing_mode": "ABSTRACT_PAPER_UNITS" if execution_enabled else "DISABLED",
+        })
+    return {
+        "mode": "paper_trading",
+        "read_only": True,
+        "execution_triggered": False,
+        "instruments": instruments,
+    }
 
 
 @app.get("/")
@@ -567,14 +648,35 @@ def preflight_maintenance_restore(request: MaintenanceRestorePreflightRequest, u
         raise HTTPException(status_code=409, detail="Restore preflight blocked: " + str(error)[:180]) from error
 
 
+@app.post("/tssi/lock")
+def activate_tssi_lock(request: TSSILockRequest, user=Depends(current_user)):
+    """Admin-only, one-way activation of the independent TSSI security lock."""
+    require_admin(user)
+    try:
+        return activate_security_lock(
+            request.reason.strip(),
+            uuid4().hex,
+            actor=user["user_id"],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 @app.get("/safety/status")
 def safety_status():
     emergency_stop = is_emergency_stop_active()
     maintenance_active = is_maintenance_window()
     maintenance = get_maintenance_status()
-    new_orders_allowed = not emergency_stop and not maintenance_active
+    tssi = get_security_status()
+    new_orders_allowed = (
+        not emergency_stop
+        and not maintenance_active
+        and not tssi["tssi_lock_active"]
+    )
 
-    if emergency_stop:
+    if tssi["tssi_lock_active"]:
+        block_reason = "TSSI_SECURITY_LOCK"
+    elif emergency_stop:
         block_reason = "EMERGENCY_STOP"
     elif maintenance_active:
         block_reason = "DAILY_MAINTENANCE"
@@ -583,6 +685,7 @@ def safety_status():
 
     return {
         "emergency_stop": emergency_stop,
+        **tssi,
         "maintenance_window_active": maintenance_active,
         "maintenance": maintenance,
         "new_orders_allowed": new_orders_allowed,
@@ -621,6 +724,60 @@ def risk_preview(request: RiskPreviewRequest):
         )
 
 
+@app.post("/accounts/{account_id}/risk/preview")
+def account_risk_preview(
+    account_id: str,
+    request: AccountRiskPreviewRequest,
+    user=Depends(current_user),
+):
+    """Preview an order using only the authenticated account's persisted risk state."""
+    require_account_access(account_id, user)
+    connection = get_connection()
+    try:
+        account = connection.execute(
+            """
+            SELECT starting_balance, balance, risk_profile, settlement_currency
+            FROM paper_accounts
+            WHERE account_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        if account is None:
+            raise HTTPException(status_code=404, detail="Paper account not found.")
+
+        assigned_profile = get_risk_profile(account["starting_balance"])
+        if account["risk_profile"] != assigned_profile["profile"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Persisted account risk profile does not match original funding; order preview is blocked.",
+            )
+
+        open_risk = get_open_risk(connection, account_id)
+        try:
+            calculation = calculate_position_size(
+                account_balance=account["balance"],
+                entry_price=request.entry_price,
+                stop_loss=request.stop_loss,
+                risk_percent=assigned_profile["risk_percent"],
+                side=request.side,
+                current_open_risk=open_risk,
+            )
+        except RiskError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        return {
+            **calculation,
+            "account_id": account_id,
+            "settlement_currency": account["settlement_currency"],
+            "risk_profile": assigned_profile["profile"],
+            "starting_balance": assigned_profile["starting_balance"],
+            "assigned_risk_percent": assigned_profile["risk_percent"],
+            "preview_authority": "PERSISTED_ACCOUNT_STATE",
+        }
+    finally:
+        connection.close()
+
+
 @app.get("/accounts/{account_id}/risk")
 def account_risk_status(account_id: str, user=Depends(current_user)):
     require_account_access(account_id, user)
@@ -629,7 +786,7 @@ def account_risk_status(account_id: str, user=Depends(current_user)):
     try:
         account = connection.execute(
             """
-            SELECT balance
+            SELECT balance, settlement_currency
             FROM paper_accounts
             WHERE account_id = ?
             """,
@@ -660,6 +817,7 @@ def account_risk_status(account_id: str, user=Depends(current_user)):
 
         return {
             "account_id": account_id,
+            "settlement_currency": account["settlement_currency"],
             "account_balance": round(balance, 2),
             "open_positions": open_positions["position_count"],
             "current_open_risk": round(open_risk, 2),
@@ -679,7 +837,7 @@ def list_accounts(user=Depends(current_user)):
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT account_id, starting_balance, balance, risk_profile, created_at
+            SELECT account_id, starting_balance, balance, risk_profile, settlement_currency, created_at
             FROM paper_accounts
             WHERE owner_user_id = ?
             ORDER BY created_at DESC, account_id
@@ -695,6 +853,7 @@ def list_accounts(user=Depends(current_user)):
                 "starting_balance": float(row["starting_balance"]),
                 "balance": float(row["balance"]),
                 "risk_profile": row["risk_profile"],
+                "settlement_currency": row["settlement_currency"],
                 "created_at": row["created_at"],
                 "mode": "paper_trading"
             }
@@ -709,7 +868,8 @@ def create_account(request: AccountRequest, user=Depends(current_user)):
         return create_paper_account(
             request.account_id,
             request.starting_balance,
-            owner_user_id=user["user_id"]
+            owner_user_id=user["user_id"],
+            settlement_currency=request.settlement_currency
         )
     except ValueError as error:
         raise HTTPException(
@@ -803,6 +963,19 @@ def group_profit_preview(
             """,
             (group_id,)
         ).fetchall()
+        source_trade_ids = [trade["trade_id"] for trade in trades]
+        copy_count = 0
+        if source_trade_ids:
+            placeholders = ",".join("?" for _ in source_trade_ids)
+            copy_count = connection.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE copied_from_trade_id IN ({placeholders})
+                  AND status = 'OPEN'
+                """,
+                source_trade_ids,
+            ).fetchone()["total"]
 
     if group is None:
         raise HTTPException(status_code=404, detail="Position group not found.")
@@ -866,6 +1039,8 @@ def group_profit_preview(
         "read_only": True,
         "execution_triggered": False,
         "cost_allocation": "proportional_to_position_quantity",
+        "preview_scope": "SOURCE_GROUP_POSITIONS_ONLY",
+        "copy_positions_excluded": copy_count,
     }
 
 
@@ -876,14 +1051,16 @@ def close_group(
     user=Depends(current_user)
 ):
     require_group_access(group_id, user)
+    cost_inputs = _close_cost_inputs(request)
     try:
         return close_position_group_with_copies(
             group_id=group_id,
             exit_price=request.exit_price,
-            spread_cost=request.spread_cost,
-            commission_cost=request.commission_cost,
-            swap_cost=request.swap_cost,
-            other_costs=request.other_costs,
+            spread_cost=cost_inputs["spread_cost"],
+            commission_cost=cost_inputs["commission_cost"],
+            swap_cost=cost_inputs["swap_cost"],
+            other_costs=cost_inputs["other_costs"],
+            cost_provenance_status=cost_inputs["cost_provenance_status"],
         )
     except ValueError as error:
         status_code = (
@@ -942,12 +1119,24 @@ def trade_profit_preview(
     with get_connection() as connection:
         trade = connection.execute(
             """
-            SELECT trade_id, account_id, symbol, side, quantity, entry_price, status
+            SELECT trade_id, account_id, symbol, side, quantity, entry_price,
+                   status, copied_from_trade_id
             FROM trades
             WHERE trade_id = ?
             """,
             (trade_id,)
         ).fetchone()
+        open_copy_positions_excluded = 0
+        if trade is not None and trade["copied_from_trade_id"] is None:
+            open_copy_positions_excluded = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE copied_from_trade_id = ?
+                  AND status = 'OPEN'
+                """,
+                (trade_id,),
+            ).fetchone()["total"]
 
     if trade is None:
         raise HTTPException(status_code=404, detail="Trade not found.")
@@ -981,6 +1170,13 @@ def trade_profit_preview(
         **result,
         "read_only": True,
         "execution_triggered": False,
+        "preview_scope": "REQUESTED_POSITION_ONLY",
+        "close_scope": (
+            "FOLLOWER_ONLY"
+            if trade["copied_from_trade_id"] is not None
+            else "SOURCE_AND_OPEN_COPIES"
+        ),
+        "open_copy_positions_excluded": open_copy_positions_excluded,
     }
 
 
@@ -991,14 +1187,16 @@ def close_trade(
     user=Depends(current_user)
 ):
     require_trade_access(trade_id, user)
+    cost_inputs = _close_cost_inputs(request)
     try:
         return close_trade_with_copies(
             trade_id,
             request.exit_price,
-            spread_cost=request.spread_cost,
-            commission_cost=request.commission_cost,
-            swap_cost=request.swap_cost,
-            other_costs=request.other_costs,
+            spread_cost=cost_inputs["spread_cost"],
+            commission_cost=cost_inputs["commission_cost"],
+            swap_cost=cost_inputs["swap_cost"],
+            other_costs=cost_inputs["other_costs"],
+            cost_provenance_status=cost_inputs["cost_provenance_status"],
         )
     except ValueError as error:
         raise HTTPException(
@@ -1106,3 +1304,281 @@ def strategy_details(strategy_id: str, user=Depends(current_user)):
     if strategy is None:
         raise HTTPException(status_code=404, detail="Strategy not found.")
     return strategy
+
+
+@app.post("/admin/market-backfills/{symbol}/{timeframe}/run")
+async def run_admin_market_backfill(
+    symbol: str,
+    timeframe: str,
+    request: BackfillRunRequest,
+    user=Depends(current_user),
+):
+    """Collect and persist one bounded historical batch for admin research only."""
+    require_admin(user)
+    if request.confirm_collection is not True:
+        raise HTTPException(status_code=400, detail="Explicit collection confirmation is required.")
+    try:
+        instrument = get_instrument(symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices support historical backfill.")
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported backfill timeframe.")
+        result = await run_backfill_batch_with_connection_factory(
+            get_connection,
+            DerivPublicMarketDataClient(),
+            instrument["symbol"],
+            timeframe,
+            batch_size=request.batch_size,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except TimeoutError as error:
+        raise HTTPException(status_code=504, detail="Deriv historical data request timed out.") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail="Backfill batch failed safely; inspect checkpoint before retrying.") from error
+    except sqlite3.OperationalError as error:
+        raise HTTPException(status_code=503, detail="Market database is temporarily unavailable.") from error
+    except Exception as error:
+        # Provider socket failures must not leave an invisible HTTP 500; the
+        # worker has already held the unchanged checkpoint for operator review.
+        raise HTTPException(
+            status_code=502,
+            detail="Historical provider request failed safely; inspect the backfill checkpoint.",
+        ) from error
+    return {
+        **result,
+        "provider": "Deriv",
+        "operator_triggered": True,
+        "read_only": True,
+        "backtest_eligible": False,
+        "signals_generated": False,
+        "execution_triggered": False,
+    }
+
+
+@app.get("/admin/market-backfills")
+def list_market_backfill_checkpoints(user=Depends(current_user)):
+    """Admin-only read access to durable historical backfill checkpoints."""
+    require_admin(user)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT symbol, timeframe, next_end_epoch, status,
+                   earliest_observed_at, latest_observed_at,
+                   batches_completed, last_error, updated_at
+            FROM market_backfill_checkpoints
+            ORDER BY symbol, timeframe
+            """
+        ).fetchall()
+    return {
+        "checkpoints": [dict(row) for row in rows],
+        "read_only": True,
+        "backtest_eligible": False,
+        "execution_triggered": False,
+    }
+
+
+@app.get("/admin/market-backfills/{symbol}/{timeframe}/reviews")
+def list_market_backfill_reviews(
+    symbol: str,
+    timeframe: str,
+    user=Depends(current_user),
+):
+    """Admin-only immutable history of operator decisions for a backfill."""
+    require_admin(user)
+    try:
+        instrument = get_instrument(symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices support historical backfill.")
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported backfill timeframe.")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT review_id, symbol, timeframe, decision, rationale,
+                   decided_by, created_at
+            FROM market_backfill_review_audit
+            WHERE symbol = ? AND timeframe = ?
+            ORDER BY created_at DESC, review_id DESC
+            """,
+            (instrument["symbol"], timeframe),
+        ).fetchall()
+    return {
+        "reviews": [dict(row) for row in rows],
+        "count": len(rows),
+        "read_only": True,
+        "backtest_eligible": False,
+        "execution_triggered": False,
+    }
+
+
+@app.post("/admin/market-backfills/{symbol}/{timeframe}/review")
+def review_market_backfill(
+    symbol: str,
+    timeframe: str,
+    request: BackfillReviewRequest,
+    user=Depends(current_user),
+):
+    """Authorize one audited retry of the same held range; never skip a gap."""
+    require_admin(user)
+    if request.confirm_retry is not True:
+        raise HTTPException(status_code=400, detail="Explicit retry confirmation is required.")
+    if len(request.rationale.strip()) < 10:
+        raise HTTPException(status_code=422, detail="Rationale must contain at least 10 non-whitespace characters.")
+    try:
+        instrument = get_instrument(symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices support historical backfill.")
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported backfill timeframe.")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        checkpoint = connection.execute(
+            """
+            SELECT next_end_epoch, status
+            FROM market_backfill_checkpoints
+            WHERE symbol = ? AND timeframe = ?
+            """,
+            (instrument["symbol"], timeframe),
+        ).fetchone()
+        if checkpoint is None:
+            raise HTTPException(status_code=404, detail="Backfill checkpoint not found.")
+        if checkpoint["status"] != "GAP_REVIEW" or checkpoint["next_end_epoch"] is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Only a held gap-review checkpoint can be authorized for retry.",
+            )
+        connection.execute(
+            """
+            INSERT INTO market_backfill_review_audit (
+                review_id, symbol, timeframe, decision, rationale, decided_by
+            ) VALUES (?, ?, ?, 'RETRY_SAME_RANGE', ?, ?)
+            """,
+            (str(uuid4()), instrument["symbol"], timeframe,
+             request.rationale.strip(), user["user_id"]),
+        )
+        updated = connection.execute(
+            """
+            UPDATE market_backfill_checkpoints
+            SET status = 'RUNNING', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE symbol = ? AND timeframe = ? AND status = 'GAP_REVIEW'
+              AND next_end_epoch = ?
+            """,
+            (instrument["symbol"], timeframe, checkpoint["next_end_epoch"]),
+        )
+        if updated.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Checkpoint changed during review.")
+        return {
+            "symbol": instrument["symbol"],
+            "timeframe": timeframe,
+            "status": "RUNNING",
+            "next_end_epoch": checkpoint["next_end_epoch"],
+            "decision": "RETRY_SAME_RANGE",
+            "cursor_advanced": False,
+            "read_only": True,
+            "backtest_eligible": False,
+            "execution_triggered": False,
+            "signals_generated": False,
+        }
+
+
+@app.post("/market-observations/deriv-sync")
+async def trigger_deriv_market_sync(request: DerivMarketSyncRequest, user=Depends(current_user)):
+    """Admin-triggered, bounded Deriv candle collection; never generates signals or orders."""
+    require_admin(user)
+    if not request.confirm_collection:
+        raise HTTPException(status_code=400, detail="Explicit collection confirmation is required.")
+    try:
+        instrument = get_instrument(request.symbol)
+        if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+            raise ValueError("Only catalogued Deriv synthetic indices can be collected.")
+        if request.timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError("Unsupported observation timeframe.")
+        client = DerivPublicMarketDataClient()
+        candles = await client.collect_candles(
+            instrument["symbol"], request.timeframe, count=request.count
+        )
+        # Do not hold a SQLite connection while waiting on the external WebSocket.
+        with get_connection() as connection:
+            observations = client.persist_candles(connection, candles)
+        result = {
+            "provider": "Deriv",
+            "symbol": instrument["symbol"],
+            "timeframe": request.timeframe,
+            "received_count": len(candles),
+            "inserted_count": sum(1 for item in observations if item["inserted"]),
+            "duplicate_count": sum(1 for item in observations if not item["inserted"]),
+            "read_only": True,
+            "execution_triggered": False,
+            "signals_generated": False,
+            "observations": observations,
+        }
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except TimeoutError as error:
+        raise HTTPException(status_code=504, detail="Deriv market-data request timed out.") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail="Deriv market-data provider rejected the request.") from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="Deriv market-data collection failed safely.") from error
+    return {
+        **result,
+        "operator_triggered": True,
+        "read_only": True,
+        "execution_triggered": False,
+        "signals_generated": False,
+    }
+
+
+@app.get("/market-observations")
+def market_observations_route(
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    limit: int = 100,
+    user=Depends(current_user),
+):
+    """List stored, validated market candles without creating signals or orders."""
+    del user  # Authentication is required; observations are currently shared research data.
+    try:
+        with get_connection() as connection:
+            observations = list_market_observations(
+                connection, symbol=symbol, timeframe=timeframe, limit=limit
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        "observations": observations,
+        "count": len(observations),
+        "read_only": True,
+        "execution_triggered": False,
+        "signals_generated": False,
+    }
+
+
+
+@app.get("/market-observations/quality")
+def market_observation_quality_route(
+    symbol: str,
+    timeframe: str,
+    user=Depends(current_user),
+):
+    """Authenticated read-only freshness and continuity diagnostics for Deriv synthetics."""
+    del user
+    try:
+        with get_connection() as connection:
+            quality = inspect_market_observation_quality(
+                connection, symbol=symbol, timeframe=timeframe
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {
+        **quality,
+        "read_only": True,
+        "signals_generated": False,
+        "execution_triggered": False,
+    }

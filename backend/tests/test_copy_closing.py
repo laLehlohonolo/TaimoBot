@@ -29,6 +29,16 @@ class CopyTradeClosingTests(unittest.TestCase):
         self.user_id = user["user_id"]
         session = create_session(self.user_id)
         create_paper_account("SOURCE", 10000, owner_user_id=self.user_id)
+        # These copy-trading fixtures intentionally require two owned accounts.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE participant_subscription_entitlements
+                SET tier = 'ADVANCED'
+                WHERE user_id = ?
+                """,
+                (self.user_id,),
+            )
         create_paper_account("FOLLOWER", 5000, owner_user_id=self.user_id)
         self.client = TestClient(app)
         self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
@@ -117,7 +127,8 @@ class CopyTradeClosingTests(unittest.TestCase):
             rows = connection.execute(
                 """
                 SELECT trade_id, realized_pnl, gross_realized_pnl,
-                       spread_cost, commission_cost, swap_cost, other_costs
+                       spread_cost, commission_cost, swap_cost, other_costs,
+                       cost_provenance_status
                 FROM trades
                 WHERE trade_id IN (?, ?)
                 ORDER BY trade_id
@@ -128,6 +139,8 @@ class CopyTradeClosingTests(unittest.TestCase):
         source_row = by_id[source["trade_id"]]
         copy_row = by_id[copied_id]
 
+        self.assertEqual(source_row["cost_provenance_status"], "MANUAL_UNVERIFIED")
+        self.assertEqual(copy_row["cost_provenance_status"], "UNKNOWN")
         self.assertAlmostEqual(source_row["spread_cost"], 0.12)
         self.assertAlmostEqual(source_row["commission_cost"], 0.23)
         self.assertAlmostEqual(source_row["swap_cost"], 0.34)
@@ -158,6 +171,25 @@ class CopyTradeClosingTests(unittest.TestCase):
             5000 + copy_row["realized_pnl"],
         )
 
+
+    def test_omitted_or_partial_cost_inputs_remain_unknown(self):
+        source, copied_id = self.create_copied_trade()
+        response = self.client.post(
+            f"/trades/{source['trade_id']}/close",
+            json={"exit_price": 4010, "commission_cost": 0.15},
+        )
+        self.assertEqual(response.status_code, 200)
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_id, cost_provenance_status
+                FROM trades WHERE trade_id IN (?, ?)
+                """,
+                (source["trade_id"], copied_id),
+            ).fetchall()
+        statuses = {row["trade_id"]: row["cost_provenance_status"] for row in rows}
+        self.assertEqual(statuses[source["trade_id"]], "UNKNOWN")
+        self.assertEqual(statuses[copied_id], "UNKNOWN")
 
     def test_manually_closing_copy_does_not_close_source(self):
         source, copied_id = self.create_copied_trade()
@@ -265,7 +297,14 @@ class CopyTradeClosingTests(unittest.TestCase):
         # The source balance write happens first. The later follower failure
         # must roll back the source balance and both trade-ledger updates.
         with self.assertRaises(sqlite3.IntegrityError):
-            close_trade_with_copies(source["trade_id"], 4010)
+            close_trade_with_copies(
+                source["trade_id"],
+                4010,
+                spread_cost=0.12,
+                commission_cost=0.23,
+                swap_cost=0.34,
+                other_costs=0.45,
+            )
 
         with database.get_connection() as connection:
             rows = connection.execute(

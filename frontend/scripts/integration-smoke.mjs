@@ -1,4 +1,29 @@
+import { execFileSync } from "node:child_process";
+
 const API = "http://127.0.0.1:4173/api";
+
+function getSastClockParts() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Africa/Johannesburg",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date());
+  return Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, Number(part.value)]));
+}
+
+async function waitUntilMaintenanceEnds() {
+  const now = getSastClockParts();
+  if (now.hour !== 23) return;
+  const waitMs = ((60 - now.minute) * 60 - now.second) * 1000 - (Date.now() % 1000) + 1000;
+  console.log("MAINTENANCE: SAST 23:00-00:00 is active; waiting until 00:00 before paper-order integration checks.");
+  await new Promise(resolve => setTimeout(resolve, waitMs));
+  if (getSastClockParts().hour === 23) {
+    throw new Error("Maintenance window did not end when expected; refusing to bypass the trading safeguard.");
+  }
+  console.log("PASS: Maintenance window ended; continuing paper-order integration checks.");
+}
 
 async function waitForApi() {
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -42,7 +67,7 @@ assert(anonymous.response.status === 401, "Private account list was not protecte
 console.log("PASS: Anonymous account access is rejected.");
 
 const unique = Date.now().toString(36);
-const email = "integration-" + unique + "@taimobot.test";
+const email = "integration@taimobot.test";
 const password = "TaimoBot-Integration-2026";
 
 const registration = await request("/auth/register", {
@@ -63,6 +88,31 @@ console.log("PASS: Login returns a bearer session.");
 const me = await request("/auth/me", { token });
 assert(me.response.status === 200 && me.payload.email === email, "Authenticated identity check failed.");
 console.log("PASS: Bearer token authenticates the current user.");
+
+// This smoke test owns an isolated, disposable SQLite database. Promote only
+// its known CI fixture directly in that database; never expose an HTTP
+// endpoint that can grant administrator privileges.
+execFileSync("python", [
+  "-c",
+  "import sqlite3; db=sqlite3.connect('/tmp/taimobot-integration.db'); db.execute(\"UPDATE users SET role='ADMIN', email_verified=1 WHERE email=?\", ('integration@taimobot.test',)); db.commit(); db.close()"
+]);
+
+const testEntitlement = await request(
+  "/auth/admin/participants/" + encodeURIComponent(me.payload.user_id) + "/subscription",
+  {
+    method: "PUT",
+    token,
+    body: {
+      tier: "ADVANCED",
+      reason: "Isolated CI integration fixture for source and follower paper accounts"
+    }
+  }
+);
+assert(
+  testEntitlement.response.status === 200 && testEntitlement.payload.new_tier === "ADVANCED",
+  "CI admin could not assign the Advanced test entitlement: " + JSON.stringify(testEntitlement.payload)
+);
+console.log("PASS: Isolated CI identity receives the explicitly authorised Advanced test entitlement.");
 
 const strategyLibrary = await request("/strategies", { token });
 assert(strategyLibrary.response.status === 200, "Strategy knowledge library could not be loaded.");
@@ -90,7 +140,7 @@ const accountId = "INT-" + unique;
 const created = await request("/accounts", {
   method: "POST",
   token,
-  body: { account_id: accountId, starting_balance: 10000 }
+  body: { account_id: accountId, starting_balance: 10000, settlement_currency: "ZAR" }
 });
 assert(created.response.status === 200, "Paper account creation failed: " + JSON.stringify(created.payload));
 console.log("PASS: Authenticated user can create a paper account.");
@@ -98,15 +148,20 @@ console.log("PASS: Authenticated user can create a paper account.");
 const accounts = await request("/accounts", { token });
 assert(accounts.response.status === 200 && accounts.payload.count === 1, "Account list did not return the user's account.");
 assert(accounts.payload.accounts[0].account_id === accountId, "Account ownership/list response mismatch.");
+assert(accounts.payload.accounts[0].settlement_currency === "ZAR", "Account list did not return persisted settlement currency.");
 console.log("PASS: Account list returns the signed-in user's account.");
 
 const account = await request("/accounts/" + encodeURIComponent(accountId), { token });
 assert(account.response.status === 200 && account.payload.account_id === accountId, "Account detail retrieval failed.");
+assert(account.payload.settlement_currency === "ZAR", "Account detail did not return persisted settlement currency.");
 console.log("PASS: Account overview endpoint works.");
 
 const risk = await request("/accounts/" + encodeURIComponent(accountId) + "/risk", { token });
 assert(risk.response.status === 200 && risk.payload.maximum_risk_percent === 1, "Risk endpoint did not report the enforced 1% cap.");
+assert(risk.payload.settlement_currency === "ZAR", "Risk endpoint did not return persisted settlement currency.");
 console.log("PASS: Account risk endpoint reports the 1% maximum.");
+
+await waitUntilMaintenanceEnds();
 
 const firstOrderId = "INT-ORDER-1-" + unique;
 const secondOrderId = "INT-ORDER-2-" + unique;
@@ -218,7 +273,7 @@ const sequentialCopyChecks = [
     const createdFollower = await request("/accounts", {
       method: "POST",
       token,
-      body: { account_id: followerAccountId, starting_balance: 5000 }
+      body: { account_id: followerAccountId, starting_balance: 5000, settlement_currency: "ZAR" }
     });
     assert(createdFollower.response.status === 200, "Follower paper account creation failed: " + JSON.stringify(createdFollower.payload));
   }],

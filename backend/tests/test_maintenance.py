@@ -86,6 +86,19 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "maintenance-tests.sqlite3"
         init_db()
+        # Explicit isolated identities for endpoint authorization tests.
+        with database.get_connection() as connection:
+            connection.executemany(
+                """
+                INSERT INTO users (user_id, email, password_hash, role, email_verified)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    ("admin-1", "ops@example.com", "test-only-hash", "ADMIN", 1),
+                    ("inventory-admin", "inventory-admin@example.com", "test-only-hash", "ADMIN", 1),
+                    ("user-1", "trader@example.com", "test-only-hash", "PARTICIPANT", 0),
+                ],
+            )
         deactivate_emergency_stop()
 
     def tearDown(self):
@@ -444,12 +457,12 @@ class DailyMaintenanceTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
 
-    def test_recovery_inventory_api_requires_explicit_admin_allowlist(self):
+    def test_recovery_inventory_api_uses_verified_database_role_not_email_allowlist(self):
         response = self._call_recovery_inventory_api(
             {"user_id": "admin-1", "email": "ops@example.com"},
             admin_emails="",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
     def test_recovery_inventory_api_normalizes_admin_email_case(self):
         with patch("app.main.inspect_recovery_artifact_inventory", return_value={
@@ -6737,8 +6750,13 @@ class DailyMaintenanceTests(unittest.TestCase):
 
     def _call_real_inventory_api(self, root, user=None):
         from fastapi.testclient import TestClient
-        from app.main import app
+        from app import main as main_module
         from app.auth_routes import current_user
+        app = main_module.app
+
+        async def no_maintenance_scheduler():
+            return None
+
         previous = dict(app.dependency_overrides)
         app.dependency_overrides[current_user] = lambda: user or {
             "user_id": "inventory-admin", "email": "ops@example.com"
@@ -6746,8 +6764,9 @@ class DailyMaintenanceTests(unittest.TestCase):
         try:
             with patch.dict(os.environ, {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
                 with patch.object(maintenance_module, "BACKUP_DIR", Path(root)):
-                    with TestClient(app) as client:
-                        return client.get("/maintenance/recovery-artifact-inventory")
+                    with patch.object(main_module, "maintenance_scheduler", new=no_maintenance_scheduler):
+                        with TestClient(app) as client:
+                            return client.get("/maintenance/recovery-artifact-inventory")
         finally:
             app.dependency_overrides.clear()
             app.dependency_overrides.update(previous)
@@ -6907,6 +6926,17 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertEqual(item["status"], "INCOMPLETE")
         self.assertEqual(item["artifact_type"], "INCOMPLETE_TEMPORARY")
 
+    def test_real_inventory_api_blocks_backup_with_sqlite_sidecar_without_mutating_it(self):
+        root = Path(self.temp_dir.name) / "api-sidecar"
+        backup = self._make_inventory_backup(root, "taimobot-sidecar.sqlite3")
+        sidecar = Path(str(backup) + "-wal")
+        sidecar.write_bytes(b"pending-wal-data")
+        payload = self._call_real_inventory_api(root).json()
+        item = next(x for x in payload["artifacts"] if x["file_name"] == backup.name)
+        self.assertEqual(item["status"], "REVIEW_REQUIRED")
+        self.assertIn("SQLITE_SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING", item["issues"])
+        self.assertEqual(sidecar.read_bytes(), b"pending-wal-data")
+
     def test_real_inventory_api_blocks_invalid_restore_journal(self):
         root = Path(self.temp_dir.name) / "api-invalid-journal"
         root.mkdir()
@@ -6939,16 +6969,48 @@ class DailyMaintenanceTests(unittest.TestCase):
         self.assertFalse(payload["live_database_replaced"])
 
     def test_real_inventory_api_repeated_requests_preserve_database_backup_and_journal(self):
+        from fastapi.testclient import TestClient
+        from app import main as main_module
+        from app.auth_routes import current_user
+
+        app = main_module.app
+
+        async def no_maintenance_scheduler():
+            return None
+
         root = Path(self.temp_dir.name) / "api-readonly-repeat"
         backup = self._make_inventory_backup(root, "taimobot-readonly.sqlite3")
         journal = database.DB_PATH.with_name("restore-execution.audit.jsonl")
         journal.write_text("", encoding="utf-8")
-        before = (database.DB_PATH.read_bytes(), backup.read_bytes(), journal.read_bytes())
-        first = self._call_real_inventory_api(root)
-        second = self._call_real_inventory_api(root)
+        previous = dict(app.dependency_overrides)
+        app.dependency_overrides[current_user] = lambda: {
+            "user_id": "inventory-admin", "email": "ops@example.com"
+        }
+        try:
+            with patch.dict(os.environ, {"TAIMOBOT_ADMIN_EMAILS": "ops@example.com"}):
+                with patch.object(maintenance_module, "BACKUP_DIR", Path(root)):
+                    with patch.object(main_module, "maintenance_scheduler", new=no_maintenance_scheduler):
+                        with TestClient(app) as client:
+                            # Application startup performs schema initialization. Take
+                            # the baseline after startup so this assertion isolates the
+                            # read-only GET endpoint rather than startup migrations.
+                            before = (
+                                database.DB_PATH.read_bytes(),
+                                backup.read_bytes(),
+                                journal.read_bytes(),
+                            )
+                            first = client.get("/maintenance/recovery-artifact-inventory")
+                            second = client.get("/maintenance/recovery-artifact-inventory")
+        finally:
+            app.dependency_overrides.clear()
+            app.dependency_overrides.update(previous)
+
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
-        self.assertEqual((database.DB_PATH.read_bytes(), backup.read_bytes(), journal.read_bytes()), before)
+        self.assertEqual(
+            (database.DB_PATH.read_bytes(), backup.read_bytes(), journal.read_bytes()),
+            before,
+        )
 
     def test_real_inventory_api_flags_reference_outside_managed_root(self):
         root = Path(self.temp_dir.name) / "api-outside-root"
@@ -7895,10 +7957,10 @@ def _make_real_inventory_terminal_fence_race_test(scenario):
             calls["connections"] += 1
             with original_get_connection(*args, **kwargs) as connection:
                 yield connection
-            # The third connection is the last metadata read before the
-            # terminal filesystem fence. Mutating here models a writer landing
-            # immediately after that snapshot.
-            if scenario.startswith("fs_") and calls["connections"] == 3 and not calls["changed"]:
+            # The admin-role authorization adds one database read before
+            # inventory begins. The fourth connection is now the last metadata
+            # read before the terminal filesystem fence.
+            if scenario.startswith("fs_") and calls["connections"] == 4 and not calls["changed"]:
                 if scenario == "fs_append":
                     with backup.open("ab") as handle: handle.write(b"late append")
                 elif scenario == "fs_replace":
@@ -9545,4 +9607,40 @@ for _scenario in _RESTORE_GUARD_DESCRIPTOR_RACE_CASES:
         DailyMaintenanceTests,
         "test_restore_guard_descriptor_race_" + _scenario,
         _make_restore_guard_descriptor_race_test(_scenario),
+    )
+
+
+
+def _make_restore_lock_valid_timestamp_test(value):
+    def test(self):
+        lock_path = maintenance_module.restore_lock_path()
+        marker = {
+            "plan_id": "a" * 32,
+            "pid": os.getpid(),
+            "created_at": value,
+            "lock_token": "b" * 32,
+        }
+        expected_bytes = json.dumps(marker, sort_keys=True).encode("utf-8")
+        lock_path.write_bytes(expected_bytes)
+
+        result = inspect_restore_lock()
+
+        self.assertEqual(
+            result["status"], "ABANDONED_RESTORE_MARKER_REQUIRES_OPERATOR_REVIEW"
+        )
+        self.assertTrue(result["marker_present"])
+        self.assertEqual(result["created_at"], value)
+        self.assertFalse(result["automatic_recovery_performed"])
+        self.assertFalse(result["marker_removed"])
+        self.assertTrue(lock_path.exists())
+        self.assertEqual(lock_path.read_bytes(), expected_bytes)
+    return test
+
+
+_RESTORE_LOCK_VALID_TIMESTAMP_CASES = [["utc_z","2026-11-21T10:00:00Z"],["utc_positive_zero","2026-11-21T10:00:00+00:00"],["utc_negative_zero","2026-11-21T10:00:00-00:00"],["positive_two_hours","2026-11-21T10:00:00+02:00"],["negative_five_hours","2026-11-21T10:00:00-05:00"],["positive_fourteen_hours","2026-11-21T10:00:00+14:00"],["negative_fourteen_hours","2026-11-21T10:00:00-14:00"],["positive_max_minute_offset","2026-11-21T10:00:00+23:59"],["negative_max_minute_offset","2026-11-21T10:00:00-23:59"],["positive_offset_seconds","2026-11-21T10:00:00+23:59:59"],["negative_offset_seconds","2026-11-21T10:00:00-23:59:59"],["fraction_one_digit","2026-11-21T10:00:00.1+02:00"],["fraction_three_digits","2026-11-21T10:00:00.123+02:00"],["fraction_six_digits","2026-11-21T10:00:00.123456+02:00"],["leap_day_valid","2024-02-29T10:00:00+02:00"],["leap_day_utc","2024-02-29T23:59:59Z"],["month_end","2026-04-30T23:59:59.999999-03:30"],["minimum_year","0001-01-01T00:00:00Z"],["maximum_year","9999-12-31T23:59:59Z"],["fractional_offset_seconds","2026-11-21T10:00:00.123456+05:30:15.5"]]
+for _scenario, _value in _RESTORE_LOCK_VALID_TIMESTAMP_CASES:
+    setattr(
+        DailyMaintenanceTests,
+        "test_restore_lock_valid_timestamp_" + _scenario,
+        _make_restore_lock_valid_timestamp_test(_value),
     )

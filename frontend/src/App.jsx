@@ -73,8 +73,135 @@ function AuthPanel({ onAuthenticated }) {
   );
 }
 
+
+function PasswordChangePanel({ token }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    if (newPassword !== confirmPassword) {
+      setError("The new passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await apiRequest("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword
+        })
+      }, token);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setNotice(
+        result.security_notification === "NOT_CONFIGURED"
+          ? "Password updated. Other active sessions were signed out. Email security notifications are not configured yet."
+          : "Password updated. Other active sessions were signed out."
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update your password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel password-panel">
+      <p className="eyebrow">ACCOUNT SECURITY</p>
+      <h2>Change password</h2>
+      <p className="muted">Confirm your current password. Your other active sessions will be signed out after the change.</p>
+      <form className="auth-form" onSubmit={submit}>
+        <label>Current password<input type="password" autoComplete="current-password" required maxLength={1024} value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} /></label>
+        <label>New password<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} value={newPassword} onChange={event => setNewPassword(event.target.value)} /></label>
+        <label>Confirm new password<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} /></label>
+        {error && <div className="notice error" role="alert">{error}</div>}
+        {notice && <div className="notice success" role="status">{notice}</div>}
+        <button className="primary-button" type="submit" disabled={busy}>{busy ? "Updating…" : "Update password"}</button>
+      </form>
+    </section>
+  );
+}
+
 function MetricCard({ label, value, note }) {
   return <article className="panel metric-card"><span className="card-label">{label}</span><div className="metric">{value}</div><p>{note}</p></article>;
+}
+
+
+function AdminSecurityPanel({ token, safety, onRefresh }) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const lockActive = safety?.tssi_lock_active !== false;
+  const stateLabel = !safety
+    ? "Unknown"
+    : safety.tssi_lock_active
+      ? (String(safety.tssi_status || "").includes("FAIL_CLOSED") ? "Fail-closed" : "Locked")
+      : "Clear";
+
+  async function activateLock(event) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    if (!reason.trim()) {
+      setError("Enter a reason for activating the TSSI security lock.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await apiRequest("/tssi/lock", {
+        method: "POST",
+        body: JSON.stringify({ reason: reason.trim() })
+      }, token);
+      setReason("");
+      setNotice("TSSI security lock activated. New entries are blocked. Existing paper positions are not automatically closed.");
+      await onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "TSSI lock activation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel integrity" aria-label="TSSI administrator controls">
+      <div>
+        <p className="eyebrow">TAIMO SECURITY &amp; SYSTEM INTEGRITY</p>
+        <h2>Security interlock</h2>
+        <p className="integrity-copy">This control activates the independent trading-entry veto. It is intentionally one-way through ordinary application controls; emergency-stop resume cannot clear it.</p>
+        <p className="muted">Current TSSI state: <strong>{stateLabel}</strong></p>
+        {safety?.lock_reason && <p className="muted">Recorded reason: {safety.lock_reason}</p>}
+      </div>
+      <div>
+        {lockActive ? (
+          <div className="notice error" role="status">
+            <strong>{stateLabel === "Unknown" ? "Security state unavailable" : "TSSI lock active"}</strong>
+            <span>New trading entries remain blocked. Do not attempt to bypass this control; recovery requires a separately authorised procedure that is not yet implemented.</span>
+          </div>
+        ) : (
+          <form className="auth-form" onSubmit={activateLock}>
+            <label>Reason for security lock<input required minLength={3} maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="Describe the confirmed security concern" /></label>
+            {error && <div className="notice error" role="alert">{error}</div>}
+            {notice && <div className="notice success" role="status">{notice}</div>}
+            <button className="primary-button" type="submit" disabled={busy || !safety || safety.tssi_lock_active !== false}>{busy ? "Activating…" : "Activate TSSI security lock"}</button>
+            <p className="muted">This action blocks new entries and has no ordinary in-app unlock path.</p>
+          </form>
+        )}
+        {error && lockActive && <div className="notice error" role="alert">{error}</div>}
+        {notice && lockActive && <div className="notice success" role="status">{notice}</div>}
+      </div>
+    </section>
+  );
 }
 
 
@@ -198,6 +325,79 @@ function WelcomeCelebration({ onClose }) {
   );
 }
 
+function CurrencyPreferencePanel({ token }) {
+  const [preference, setPreference] = useState(null);
+  const [currency, setCurrency] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    apiRequest("/participant/currency-preference", {}, token)
+      .then(result => { if (active) setPreference(result); })
+      .catch(err => { if (active) setError(err instanceof Error ? err.message : "Could not load your currency preference."); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [token]);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!currency || !confirmed || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await apiRequest("/participant/currency-preference", {
+        method: "POST",
+        body: JSON.stringify({ currency, confirmed: true })
+      }, token);
+      setPreference(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Currency preference could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="panel currency-preference-panel">
+      <p className="eyebrow">PARTICIPANT DISPLAY PREFERENCE</p>
+      <h2>Choose your currency once</h2>
+      {loading ? <p className="muted">Checking your saved preference…</p> : preference?.selected ? (
+        <div role="status">
+          <p>Your permanent display preference is <strong>{preference.currency}</strong>.</p>
+          <p className="muted">Selected {new Date(preference.selected_at).toLocaleString("en-ZA")}. This choice is locked and cannot be changed.</p>
+        </div>
+      ) : (
+        <form onSubmit={submit} className="auth-form">
+          <p className="muted">Select one currency: South African Rand, US Dollar, Euro, Pound Sterling or Kuwaiti Dinar.</p>
+          <label>Preferred currency
+            <select required value={currency} onChange={event => setCurrency(event.target.value)}>
+              <option value="">Choose a currency</option>
+              <option value="ZAR">ZAR — South African Rand</option>
+              <option value="USD">USD — US Dollar</option>
+              <option value="EUR">EUR — Euro</option>
+              <option value="GBP">GBP — Pound Sterling</option>
+              <option value="KWD">KWD — Kuwaiti Dinar</option>
+            </select>
+          </label>
+          <label className="currency-confirmation">
+            <input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />
+            I understand this is a once-off choice and cannot be changed later.
+          </label>
+          {error && <div className="notice error" role="alert">{error}</div>}
+          <button className="primary-button" type="submit" disabled={!currency || !confirmed || saving}>
+            {saving ? "Saving preference…" : "Confirm permanent choice"}
+          </button>
+        </form>
+      )}
+      {error && preference?.selected && <div className="notice error" role="alert">{error}</div>}
+      <p className="muted">Currency selection changes display preference only; it does not move, convert, or relabel funds. Each paper account is labelled using its own persisted settlement currency. Legacy accounts without a verified denomination remain marked currency unverified.</p>
+    </section>
+  );
+}
+
 function ParticipantJourney({ timeline }) {
   const formatDate = value => value ? new Date(value.replace(" ", "T") + (value.endsWith("Z") ? "" : "Z")).toLocaleDateString("en-ZA", { day: "numeric", month: "long", year: "numeric" }) : "Not yet recorded";
   return (
@@ -228,6 +428,7 @@ export default function App() {
   const [lastChecked, setLastChecked] = useState(null);
   const [newAccountId, setNewAccountId] = useState("");
   const [startingBalance, setStartingBalance] = useState("10000");
+  const [newAccountCurrency, setNewAccountCurrency] = useState("ZAR");
   const [creating, setCreating] = useState(false);
   const [orderSymbol, setOrderSymbol] = useState("XAUUSD");
   const [orderSide, setOrderSide] = useState("BUY");
@@ -341,7 +542,8 @@ export default function App() {
         method: "POST",
         body: JSON.stringify({
           account_id: newAccountId.trim(),
-          starting_balance: Number(startingBalance)
+          starting_balance: Number(startingBalance),
+          settlement_currency: newAccountCurrency
         })
       }, session.access_token);
       setNewAccountId("");
@@ -360,23 +562,19 @@ export default function App() {
     setOrderPreview(null);
     setOrderBusy(true);
     try {
-      const funding = Number(account.starting_balance);
-      const assignedRisk = funding < 5000 ? 0.25 : funding < 25000 ? 0.5 : 1.0;
-      const result = await apiRequest("/risk/preview", {
+      const result = await apiRequest("/accounts/" + encodeURIComponent(account.account_id) + "/risk/preview", {
         method: "POST",
         body: JSON.stringify({
-          account_balance: Number(account.current_balance),
           entry_price: Number(entryPrice),
           stop_loss: Number(stopLoss),
-          risk_percent: assignedRisk,
           side: orderSide
         })
+      }, session.access_token);
+      setOrderPreview({
+        ...result,
+        assignedRisk: Number(result.assigned_risk_percent),
+        projectedRisk: Number(result.projected_total_open_risk)
       });
-      const projectedRisk = Number(risk.current_open_risk) + Number(result.risk_amount);
-      if (projectedRisk > Number(risk.maximum_risk_amount) + 1e-9) {
-        throw new Error("This position would exceed the remaining combined account risk budget. Reduce the position risk or close an existing position first.");
-      }
-      setOrderPreview({ ...result, assignedRisk, projectedRisk });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Risk preview failed.");
     } finally {
@@ -450,6 +648,8 @@ export default function App() {
 
   const connected = Boolean(health?.status === "healthy");
   const emergencyActive = Boolean(safety?.emergency_stop);
+  const tssiState = !safety ? "Unknown" : safety.tssi_lock_active ? (String(safety.tssi_status || "").includes("FAIL_CLOSED") ? "Fail-closed" : "Locked") : "Clear";
+  const verifiedAdmin = session?.user?.role === "ADMIN" && session?.user?.email_verified === true;
 
   return (
     <main className="shell">
@@ -480,9 +680,12 @@ export default function App() {
         <MetricCard label="API HEALTH" value={connected ? "Online" : "Offline"} note={health?.api || "Waiting for backend response"} />
         <MetricCard label="TRADING MODE" value="Paper" note="Simulated execution only · no live orders" />
         <MetricCard label="EMERGENCY STOP" value={safety ? (emergencyActive ? "Active" : "Inactive") : "Unknown"} note={safety ? (emergencyActive ? "New orders are blocked by the backend." : "Backend reports new orders are permitted.") : "Safety state not verified"} />
+        <MetricCard label="TSSI SECURITY" value={tssiState} note={safety?.tssi_lock_active ? "The security interlock blocks new entries." : safety ? "No TSSI lock is currently reported." : "Security state could not be verified."} />
       </section>
 
       {error && <div className="notice error" role="alert"><strong>Workspace notice</strong><span>{error}</span></div>}
+
+      {verifiedAdmin && <AdminSecurityPanel token={session.access_token} safety={safety} onRefresh={refreshPublicStatus} />}
 
       {!session ? (
         <AuthPanel onAuthenticated={(nextSession, justRegistered) => { setSession(nextSession); setShowWelcome(Boolean(justRegistered)); }} />
@@ -494,18 +697,21 @@ export default function App() {
           </div>
 
           {participantTimeline && <ParticipantJourney timeline={participantTimeline} />}
+          <CurrencyPreferencePanel token={session.access_token} />
+          <PasswordChangePanel token={session.access_token} />
           <div className="account-layout">
             <aside className="panel account-sidebar">
               <h3>Your accounts</h3>
               {accounts.length === 0 ? <p className="muted">No paper accounts yet. Create one below.</p> : accounts.map(item => (
                 <button key={item.account_id} className={"account-choice " + (selectedId === item.account_id ? "selected" : "")} onClick={() => setSelectedId(item.account_id)}>
-                  <span>{item.account_id}</span><strong>R {Number(item.balance).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                  <span>{item.account_id}</span><strong>{item.settlement_currency ? item.settlement_currency + " " : "Unverified · "}{Number(item.balance).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
                 </button>
               ))}
               <form className="create-account-form" onSubmit={createAccount}>
                 <h3>Create paper account</h3>
                 <label>Account ID<input required minLength={1} maxLength={100} value={newAccountId} onChange={event => setNewAccountId(event.target.value)} placeholder="e.g. TAIMO-001" /></label>
-                <label>Starting balance (ZAR)<input required type="number" min="1" step="0.01" value={startingBalance} onChange={event => setStartingBalance(event.target.value)} /></label>
+                <label>Settlement currency<select value={newAccountCurrency} onChange={event => setNewAccountCurrency(event.target.value)}><option value="ZAR">ZAR — South African Rand</option><option value="USD">USD — US Dollar</option><option value="EUR">EUR — Euro</option><option value="GBP">GBP — Pound Sterling</option><option value="KWD">KWD — Kuwaiti Dinar</option></select></label>
+                <label>Starting balance ({newAccountCurrency})<input required type="number" min="1" step="0.01" value={startingBalance} onChange={event => setStartingBalance(event.target.value)} /></label>
                 <button className="primary-button" disabled={creating}>{creating ? "Creating…" : "Create account"}</button>
               </form>
             </aside>
@@ -515,9 +721,9 @@ export default function App() {
                 <>
                   <div className="workspace-heading"><div><p className="eyebrow">ACCOUNT / {account.account_id}</p><h2>Account overview</h2></div><StatusPill good={true}>Paper trading</StatusPill></div>
                   <div className="status-grid account-metrics">
-                    <MetricCard label="CURRENT BALANCE" value={"R " + Number(account.current_balance).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} note={"Starting balance R " + Number(account.starting_balance).toLocaleString("en-ZA")} />
+                    <MetricCard label="CURRENT BALANCE" value={(account.settlement_currency || "Unverified") + " " + Number(account.current_balance).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} note={"Starting balance " + (account.settlement_currency || "currency unverified") + " " + Number(account.starting_balance).toLocaleString("en-ZA")} />
                     <MetricCard label="OPEN POSITIONS" value={account.open_trades} note={account.total_trades + " total trades"} />
-                    <MetricCard label="REALIZED P&L" value={"R " + Number(account.realized_pnl).toFixed(2)} note={account.closed_trades + " closed trades"} />
+                    <MetricCard label="NET P&L CONFIDENCE" value={account.net_realized_pnl === null || account.net_realized_pnl === undefined ? "Unverified" : (account.settlement_currency || "Unverified") + " " + Number(account.net_realized_pnl).toFixed(2)} note={account.net_pnl_status === "VERIFIED_ACTUAL_COSTS" ? account.closed_trades + " closed trades · actual costs verified" : account.net_pnl_status === "NO_CLOSED_TRADES" ? "No closed trades yet" : "Unverified costs · gross " + (account.settlement_currency || "") + " " + Number(account.gross_realized_pnl || 0).toFixed(2) + " · recorded costs " + Number(account.recorded_costs_total || 0).toFixed(2)} />
                   </div>
                   <div className="panel order-panel">
                     <div className="table-heading"><div><p className="eyebrow">SIMULATED EXECUTION</p><h3>Open paper position</h3></div><StatusPill good={!emergencyActive && safety?.new_orders_allowed !== false}>{emergencyActive || safety?.new_orders_allowed === false ? "Entries blocked" : "Paper only"}</StatusPill></div>
@@ -529,12 +735,12 @@ export default function App() {
                       <label>Take profit (optional)<input type="number" min="0.00000001" step="any" value={takeProfit} onChange={event => setTakeProfit(event.target.value)} /></label>
                       <div className="order-actions"><button className="secondary-button" type="button" disabled={orderBusy || !entryPrice || !stopLoss} onClick={previewPaperOrder}>{orderBusy ? "Checking…" : "Preview risk"}</button><button className="primary-button" type="submit" disabled={orderBusy || !entryPrice || !stopLoss || !risk || emergencyActive || safety?.new_orders_allowed === false}>{orderBusy ? "Submitting…" : "Open paper position"}</button></div>
                     </form>
-                    {orderPreview && <div className="preview-result" role="status"><strong>Estimated position size: {orderPreview.position_size}</strong><span>Risk amount: R {Number(orderPreview.risk_amount).toFixed(2)} · Assigned profile: {orderPreview.assignedRisk}%</span><small>Preview is indicative. The backend recalculates assigned risk and checks combined account exposure before accepting the order.</small></div>}
+                    {orderPreview && <div className="preview-result" role="status"><strong>Estimated position size: {orderPreview.position_size}</strong><span>Risk amount: {account.settlement_currency || "Unverified"} {Number(orderPreview.risk_amount).toFixed(2)} · Assigned profile: {orderPreview.assignedRisk}%</span><small>Preview is indicative. The backend recalculates assigned risk and checks combined account exposure before accepting the order.</small></div>}
                     <p className="muted">Paper execution only. The backend enforces your assigned risk profile and the combined 1% account ceiling. Existing positions are never closed automatically by this form.</p>
                   </div>
-                  {risk && <div className="panel risk-panel"><div><span className="card-label">OPEN RISK</span><strong>R {Number(risk.current_open_risk).toFixed(2)} / R {Number(risk.maximum_risk_amount).toFixed(2)}</strong></div><div className="risk-track"><span style={{ width: Math.min(100, risk.maximum_risk_amount ? (risk.current_open_risk / risk.maximum_risk_amount) * 100 : 0) + "%" }} /></div><p className="muted">Maximum combined account risk: {risk.maximum_risk_percent}% · remaining budget R {Number(risk.remaining_risk_budget).toFixed(2)}</p></div>}
-                  <div className="panel trades-panel"><div className="table-heading"><h3>Recent trades</h3><span className="muted">{trades.length} records</span></div>
-                    {trades.length === 0 ? <p className="muted">No trades recorded for this account.</p> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop loss</th><th>Risk</th><th>Status</th><th>Realized P&L</th><th>Actions</th></tr></thead><tbody>{trades.map(trade => <tr key={trade.trade_id}><td>{trade.symbol}</td><td>{trade.side}</td><td>{Number(trade.entry_price).toFixed(2)}</td><td>{Number(trade.stop_loss).toFixed(2)}</td><td>R {Number(trade.risk_amount).toFixed(2)}</td><td><span className={"trade-status " + trade.status.toLowerCase()}>{trade.status}</span></td><td>R {Number(trade.realized_pnl).toFixed(2)}</td><td>{trade.status === "OPEN" && <button className="text-button" disabled={closeBusy === trade.trade_id} onClick={() => closePaperTrade(trade)}>{closeBusy === trade.trade_id ? "Closing…" : "Close paper"}</button>}</td></tr>)}</tbody></table></div>}
+                  {risk && <div className="panel risk-panel"><div><span className="card-label">OPEN RISK</span><strong>{account.settlement_currency || "Unverified"} {Number(risk.current_open_risk).toFixed(2)} / {account.settlement_currency || "Unverified"} {Number(risk.maximum_risk_amount).toFixed(2)}</strong></div><div className="risk-track"><span style={{ width: Math.min(100, risk.maximum_risk_amount ? (risk.current_open_risk / risk.maximum_risk_amount) * 100 : 0) + "%" }} /></div><p className="muted">Maximum combined account risk: {risk.maximum_risk_percent}% · remaining budget {account.settlement_currency || "Unverified"} {Number(risk.remaining_risk_budget).toFixed(2)}</p></div>}
+                  <div className="panel trades-panel"><div className="table-heading"><h3>Recent trades</h3><span className="muted">{trades.length} records</span></div><p className="muted">Ledger P&amp;L is not verified net profit unless cost confidence says “Actual costs verified”.</p>
+                    {trades.length === 0 ? <p className="muted">No trades recorded for this account.</p> : <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop loss</th><th>Risk</th><th>Status</th><th>Ledger P&L</th><th>Cost confidence</th><th>Actions</th></tr></thead><tbody>{trades.map(trade => <tr key={trade.trade_id}><td>{trade.symbol}</td><td>{trade.side}</td><td>{Number(trade.entry_price).toFixed(2)}</td><td>{Number(trade.stop_loss).toFixed(2)}</td><td>{account.settlement_currency || "Unverified"} {Number(trade.risk_amount).toFixed(2)}</td><td><span className={"trade-status " + trade.status.toLowerCase()}>{trade.status}</span></td><td>{account.settlement_currency || "Unverified"} {Number(trade.realized_pnl).toFixed(2)}<small>{trade.gross_realized_pnl === null || trade.gross_realized_pnl === undefined ? "Gross unavailable" : "Gross " + Number(trade.gross_realized_pnl).toFixed(2)}</small></td><td>{trade.status !== "CLOSED" ? "Not closed" : trade.cost_provenance_status === "ACTUAL" ? "Actual costs verified" : trade.cost_provenance_status === "MANUAL_UNVERIFIED" ? "Manual · unverified" : trade.cost_provenance_status === "ESTIMATED" ? "Estimated · unverified" : "Unknown · unverified"}</td><td>{trade.status === "OPEN" && <button className="text-button" disabled={closeBusy === trade.trade_id} onClick={() => closePaperTrade(trade)}>{closeBusy === trade.trade_id ? "Closing…" : "Close paper"}</button>}</td></tr>)}</tbody></table></div>}
                   </div>
                 </>
               ) : <div className="panel empty-state"><h2>{accounts.length ? "Select an account" : "Your paper workspace is ready"}</h2><p className="muted">{accounts.length ? "Choose an account to inspect its balance, risk and trade history." : "Create your first paper account to begin tracking simulated activity."}</p></div>}
@@ -545,7 +751,7 @@ export default function App() {
       )}
 
       <section className="panel integrity">
-        <div><p className="eyebrow">SAFETY FIRST</p><h2>Backend-enforced controls</h2><p className="integrity-copy">Authentication, account ownership, risk validation and order acceptance are enforced by the API. This browser dashboard is a display layer and does not place orders.</p></div>
+        <div><p className="eyebrow">SAFETY FIRST</p><h2>Backend-enforced controls</h2><p className="integrity-copy">Authentication, account ownership, risk validation and order acceptance are enforced by the API. This browser dashboard sends paper-trade requests to the backend; it does not place live broker orders.</p></div>
         <div className="guard-list">
           <div><span className="check">✓</span><span>Paper trading only</span></div>
           <div><span className="check">✓</span><span>Private accounts require authentication</span></div>

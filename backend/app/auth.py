@@ -168,7 +168,7 @@ def authenticate_user(email, password):
 
     with get_connection() as connection:
         user = connection.execute(
-            "SELECT user_id, email, password_hash FROM users WHERE email = ?",
+            "SELECT user_id, email, password_hash, role, email_verified FROM users WHERE email = ?",
             (normalized_email,)
         ).fetchone()
 
@@ -180,7 +180,12 @@ def authenticate_user(email, password):
         raise AuthenticationError("Invalid email or password.")
 
     _clear_login_failures(normalized_email)
-    return {"user_id": user["user_id"], "email": user["email"]}
+    return {
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "role": user["role"],
+        "email_verified": bool(user["email_verified"]),
+    }
 
 
 def create_session(user_id):
@@ -216,7 +221,7 @@ def get_session_user(token):
     with get_connection() as connection:
         row = connection.execute(
             """
-            SELECT users.user_id, users.email
+            SELECT users.user_id, users.email, users.role, users.email_verified
             FROM auth_sessions
             JOIN users ON users.user_id = auth_sessions.user_id
             WHERE auth_sessions.token_hash = ?
@@ -228,8 +233,55 @@ def get_session_user(token):
     if row is None:
         raise AuthenticationError("Invalid or expired session.")
 
-    return {"user_id": row["user_id"], "email": row["email"]}
+    return {
+        "user_id": row["user_id"],
+        "email": row["email"],
+        "role": row["role"],
+        "email_verified": bool(row["email_verified"]),
+    }
 
+
+
+def change_password(user_id, current_password, new_password, current_token):
+    """Change a user's password and revoke every other active session."""
+    if not isinstance(current_token, str) or not current_token:
+        raise AuthenticationError("An active session is required.")
+
+    new_password_hash = _hash_password(new_password)
+    current_token_hash = hashlib.sha256(
+        current_token.encode("utf-8")
+    ).hexdigest()
+    now = _utc_now().isoformat()
+
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        account = connection.execute(
+            "SELECT password_hash FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if account is None or not _verify_password(current_password, account["password_hash"]):
+            raise AuthenticationError("Current password is incorrect.")
+
+        active_session = connection.execute(
+            """
+            SELECT 1 FROM auth_sessions
+            WHERE user_id = ? AND token_hash = ? AND expires_at > ?
+            """,
+            (user_id, current_token_hash, now),
+        ).fetchone()
+        if active_session is None:
+            raise AuthenticationError("An active session is required.")
+
+        connection.execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            (new_password_hash, user_id),
+        )
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE user_id = ? AND token_hash != ?",
+            (user_id, current_token_hash),
+        )
+
+    return True
 
 def revoke_session(token):
     if not isinstance(token, str) or not token:

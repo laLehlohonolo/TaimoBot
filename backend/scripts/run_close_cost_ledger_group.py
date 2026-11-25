@@ -26,7 +26,7 @@ CASES = [
     (CLOSE.CloseAccountingTests, "test_zero_cost_defaults_preserve_gross_pnl"),
     (CLOSE.CloseAccountingTests, "test_rejects_boolean_and_non_finite_costs_or_gross"),
     (CLOSE.CloseAccountingTests, "test_rejects_negative_costs"),
-    (MIGRATION.TradeCostLedgerMigrationTests, "test_migration_preserves_legacy_closed_pnl_and_zero_costs"),
+    (MIGRATION.TradeCostLedgerMigrationTests, "test_migration_preserves_legacy_pnl_and_marks_costs_unknown"),
     (MIGRATION.TradeCostLedgerMigrationTests, "test_open_legacy_trade_is_not_misrepresented_as_closed_pnl"),
     (MIGRATION.TradeCostLedgerMigrationTests, "test_migration_is_idempotent"),
     (PAPER.PaperTradingTests, "test_single_profit_preview_matches_actual_close_ledger_and_balance"),

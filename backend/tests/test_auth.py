@@ -26,11 +26,16 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "auth-test.db"
+        self.maintenance_window_patch = patch(
+            "app.safety.is_maintenance_window", return_value=False
+        )
+        self.maintenance_window_patch.start()
         init_db()
         self.client = TestClient(app)
 
     def tearDown(self):
         self.client.close()
+        self.maintenance_window_patch.stop()
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
@@ -187,6 +192,75 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         )
         self.assertEqual(expired.status_code, 401)
 
+
+    def test_password_change_keeps_current_session_and_revokes_other_sessions(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "password-change@example.com", "password": "OriginalPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        user_id = registered.json()["user_id"]
+        first = create_session(user_id)
+        second = create_session(user_id)
+        first_headers = {"Authorization": "Bearer " + first["access_token"]}
+        second_headers = {"Authorization": "Bearer " + second["access_token"]}
+
+        changed = self.client.post(
+            "/auth/change-password",
+            json={
+                "current_password": "OriginalPassphrase-2026!",
+                "new_password": "UpdatedPassphrase-2026!",
+            },
+            headers=first_headers,
+        )
+        self.assertEqual(changed.status_code, 200)
+        self.assertTrue(changed.json()["password_changed"])
+        self.assertTrue(changed.json()["other_sessions_revoked"])
+        self.assertEqual(changed.json()["security_notification"], "NOT_CONFIGURED")
+        self.assertEqual(self.client.get("/auth/me", headers=first_headers).status_code, 200)
+        self.assertEqual(self.client.get("/auth/me", headers=second_headers).status_code, 401)
+        self.assertEqual(
+            self.client.post(
+                "/auth/login",
+                json={"email": "password-change@example.com", "password": "OriginalPassphrase-2026!"},
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/auth/login",
+                json={"email": "password-change@example.com", "password": "UpdatedPassphrase-2026!"},
+            ).status_code,
+            200,
+        )
+
+    def test_password_change_rejects_wrong_current_password_without_mutation(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "password-wrong@example.com", "password": "OriginalPassphrase-2026!"}
+        )
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "password-wrong@example.com", "password": "OriginalPassphrase-2026!"},
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        response = self.client.post(
+            "/auth/change-password",
+            json={
+                "current_password": "IncorrectPassphrase-2026!",
+                "new_password": "UpdatedPassphrase-2026!",
+            },
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            self.client.post(
+                "/auth/login",
+                json={"email": "password-wrong@example.com", "password": "OriginalPassphrase-2026!"},
+            ).status_code,
+            200,
+        )
+
     def test_auth_me_rejects_missing_or_invalid_bearer_token(self):
         missing = self.client.get("/auth/me")
         invalid = self.client.get(
@@ -221,7 +295,7 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         owner_headers = {"Authorization": "Bearer " + owner_login.json()["access_token"]}
         created = self.client.post(
             "/accounts",
-            json={"account_id": "OWNER-ACCOUNT", "starting_balance": 10000},
+            json={"account_id": "OWNER-ACCOUNT", "starting_balance": 10000, "settlement_currency": "ZAR"},
             headers=owner_headers
         )
         self.assertEqual(created.status_code, 200)
@@ -272,7 +346,7 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         }
         account = self.client.post(
             "/accounts",
-            json={"account_id": "ISOLATED-OWNER", "starting_balance": 10000},
+            json={"account_id": "ISOLATED-OWNER", "starting_balance": 10000, "settlement_currency": "ZAR"},
             headers=owner_headers,
         )
         self.assertEqual(account.status_code, 200)
@@ -395,6 +469,66 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
         self.assertEqual(activate.status_code, 403)
         self.assertEqual(resume.status_code, 403)
 
+    def test_email_allowlist_cannot_grant_admin_privileges(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "allowlisted@example.com", "password": "AllowlistedPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "allowlisted@example.com", "password": "AllowlistedPassphrase-2026!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        with patch.dict("os.environ", {"TAIMOBOT_ADMIN_EMAILS": "allowlisted@example.com"}):
+            response = self.client.post("/safety/emergency-stop", headers=headers)
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_role_without_verified_email_cannot_control_emergency_stop(self):
+        deactivate_emergency_stop()
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "unverified-admin@example.com", "password": "UnverifiedAdminPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 0 WHERE email = ?",
+                ("unverified-admin@example.com",),
+            )
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "unverified-admin@example.com", "password": "UnverifiedAdminPassphrase-2026!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        response = self.client.post("/safety/emergency-stop", headers=headers)
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_role_revocation_takes_effect_for_existing_session(self):
+        deactivate_emergency_stop()
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "revoked-admin@example.com", "password": "RevokedAdminPassphrase-2026!"}
+        )
+        self.assertEqual(registered.status_code, 200)
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE email = ?",
+                ("revoked-admin@example.com",),
+            )
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "revoked-admin@example.com", "password": "RevokedAdminPassphrase-2026!"}
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'PARTICIPANT' WHERE email = ?",
+                ("revoked-admin@example.com",),
+            )
+        response = self.client.post("/safety/emergency-stop", headers=headers)
+        self.assertEqual(response.status_code, 403)
+
     def test_configured_admin_can_activate_and_resume_emergency_stop(self):
         deactivate_emergency_stop()
         registered = self.client.post(
@@ -402,23 +536,75 @@ class AuthenticationPrimitiveTests(unittest.TestCase):
             json={"email": "admin@example.com", "password": "AdminPassphrase-2026!"}
         )
         self.assertEqual(registered.status_code, 200)
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE email = ?",
+                ("admin@example.com",),
+            )
         login = self.client.post(
             "/auth/login",
             json={"email": "admin@example.com", "password": "AdminPassphrase-2026!"}
         )
         headers = {"Authorization": "Bearer " + login.json()["access_token"]}
 
-        with __import__("unittest").mock.patch.dict(
-            "os.environ",
-            {"TAIMOBOT_ADMIN_EMAILS": " admin@example.com,other@example.com "},
-            clear=True
-        ):
-            activate = self.client.post("/safety/emergency-stop", headers=headers)
-            self.assertEqual(activate.status_code, 200)
-            self.assertTrue(activate.json()["emergency_stop"])
-            resume = self.client.post("/safety/resume", headers=headers)
-            self.assertEqual(resume.status_code, 200)
-            self.assertFalse(resume.json()["emergency_stop"])
+        activate = self.client.post("/safety/emergency-stop", headers=headers)
+        self.assertEqual(activate.status_code, 200)
+        self.assertTrue(activate.json()["emergency_stop"])
+        resume = self.client.post("/safety/resume", headers=headers)
+        self.assertEqual(resume.status_code, 200)
+        self.assertFalse(resume.json()["emergency_stop"])
+
+
+    def test_tssi_lock_activation_is_admin_only_and_cannot_be_cleared_by_resume(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "tssi-admin@example.com", "password": "TSSILockAdminPassphrase-2026!"},
+        )
+        self.assertEqual(registered.status_code, 200)
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE email = ?",
+                ("tssi-admin@example.com",),
+            )
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "tssi-admin@example.com", "password": "TSSILockAdminPassphrase-2026!"},
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+
+        activated = self.client.post(
+            "/tssi/lock",
+            json={"reason": "Administrator confirmed a security integrity concern"},
+            headers=headers,
+        )
+        self.assertEqual(activated.status_code, 200)
+        self.assertTrue(activated.json()["tssi_lock_active"])
+        self.assertFalse(activated.json()["new_orders_allowed"])
+
+        resumed = self.client.post("/safety/resume", headers=headers)
+        self.assertEqual(resumed.status_code, 200)
+        status = self.client.get("/safety/status", headers=headers)
+        self.assertTrue(status.json()["tssi_lock_active"])
+        self.assertFalse(status.json()["new_orders_allowed"])
+        self.assertEqual(status.json()["block_reason"], "TSSI_SECURITY_LOCK")
+
+    def test_participant_cannot_activate_tssi_security_lock(self):
+        registered = self.client.post(
+            "/auth/register",
+            json={"email": "tssi-participant@example.com", "password": "TSSIParticipantPassphrase-2026!"},
+        )
+        self.assertEqual(registered.status_code, 200)
+        login = self.client.post(
+            "/auth/login",
+            json={"email": "tssi-participant@example.com", "password": "TSSIParticipantPassphrase-2026!"},
+        )
+        headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+        response = self.client.post(
+            "/tssi/lock",
+            json={"reason": "Participant attempted to activate the security lock"},
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 403)
 
 
 if __name__ == "__main__":

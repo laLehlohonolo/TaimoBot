@@ -22,6 +22,16 @@ class CopyRelationshipApiTests(unittest.TestCase):
         self.user_id = user["user_id"]
         session = create_session(self.user_id)
         create_paper_account("SOURCE-001", 10000, owner_user_id=self.user_id)
+        # These copy-trading fixtures intentionally require two owned accounts.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE participant_subscription_entitlements
+                SET tier = 'ADVANCED'
+                WHERE user_id = ?
+                """,
+                (self.user_id,),
+            )
         create_paper_account("FOLLOWER-001", 5000, owner_user_id=self.user_id)
         self.client = TestClient(app)
         self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
@@ -46,6 +56,21 @@ class CopyRelationshipApiTests(unittest.TestCase):
         self.assertEqual(result["follower_account_id"], "FOLLOWER-001")
         self.assertEqual(result["status"], "ACTIVE")
         self.assertEqual(result["mode"], "paper_trading")
+
+    def test_cross_currency_copy_relationship_is_rejected(self):
+        create_paper_account(
+            "SOURCE-USD-001",
+            10000,
+            owner_user_id=self.user_id,
+            settlement_currency="USD",
+        )
+        response = self.client.post(
+            "/accounts/FOLLOWER-001/copy-relationships",
+            json={"source_account_id": "SOURCE-USD-001"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Cross-currency copy is disabled", response.json()["detail"])
 
     def test_list_copy_relationships(self):
         created = self.create_relationship()

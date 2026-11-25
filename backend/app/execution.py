@@ -9,6 +9,7 @@ from .risk import (
     get_risk_profile
 )
 from .safety import require_trading_enabled
+from .instruments import require_execution_approval
 
 
 DEFAULT_SYMBOL = "XAUUSD"
@@ -48,7 +49,7 @@ def validate_symbol(symbol):
     return value
 
 
-def create_paper_account(account_id, starting_balance, owner_user_id=None):
+def create_paper_account(account_id, starting_balance, owner_user_id=None, settlement_currency="ZAR"):
     account_id = str(account_id).strip()
 
     balance = validate_positive_number(
@@ -57,6 +58,10 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None):
 
     if not account_id:
         raise ValueError("Account ID is required.")
+
+    currency = str(settlement_currency).strip().upper()
+    if currency not in {"ZAR", "USD", "EUR", "GBP", "KWD"}:
+        raise ValueError("Unsupported account settlement currency.")
 
     profile = get_risk_profile(balance)
 
@@ -73,6 +78,45 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None):
         if existing:
             raise ValueError("Account already exists.")
 
+        entitlement = None
+        account_count = None
+        if owner_user_id is not None:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO participant_subscription_entitlements
+                    (user_id, tier)
+                VALUES (?, 'STANDARD')
+                """,
+                (owner_user_id,),
+            )
+            entitlement = connection.execute(
+                """
+                SELECT tier FROM participant_subscription_entitlements
+                WHERE user_id = ?
+                """,
+                (owner_user_id,),
+            ).fetchone()
+            tier_limits = {
+                "STANDARD": 1,
+                "ADVANCED": 3,
+                "PREMIUM": 5,
+                "EXCLUSIVE": 10,
+            }
+            tier = entitlement["tier"]
+            account_count = connection.execute(
+                """
+                SELECT COUNT(*) AS account_count
+                FROM paper_accounts WHERE owner_user_id = ?
+                """,
+                (owner_user_id,),
+            ).fetchone()["account_count"]
+            limit = tier_limits[tier]
+            if account_count >= limit:
+                raise ValueError(
+                    f"{tier.title()} subscription allows up to {limit} paper account(s); "
+                    f"this participant already owns {account_count}."
+                )
+
         connection.execute(
             """
             INSERT INTO paper_accounts
@@ -81,16 +125,18 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None):
                 owner_user_id,
                 starting_balance,
                 balance,
-                risk_profile
+                risk_profile,
+                settlement_currency
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 account_id,
                 owner_user_id,
                 balance,
                 balance,
-                profile["profile"]
+                profile["profile"],
+                currency
             )
         )
 
@@ -98,9 +144,12 @@ def create_paper_account(account_id, starting_balance, owner_user_id=None):
         "account_id": account_id,
         "starting_balance": balance,
         "balance": balance,
+        "settlement_currency": currency,
         "risk_profile": profile["profile"],
         "per_trade_risk_percent": profile["risk_percent"],
         "maximum_combined_risk_percent": 1.0,
+        "subscription_tier": entitlement["tier"] if entitlement else None,
+        "account_count": account_count + 1 if account_count is not None else None,
         "mode": "paper_trading"
     }
 
@@ -124,6 +173,7 @@ def create_position_group(account_id, symbol, side):
     """Create a group for related positions in one instrument."""
     account_id = str(account_id).strip()
     symbol = validate_symbol(symbol)
+    require_execution_approval(symbol)
     side = str(side).strip().upper()
 
     if not account_id:
@@ -217,7 +267,7 @@ def get_position_group(group_id):
                         THEN risk_amount ELSE 0 END
                     ), 0
                 ) AS combined_open_risk,
-                COALESCE(SUM(realized_pnl), 0) AS realized_pnl
+                COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN realized_pnl ELSE 0 END), 0) AS realized_pnl
             FROM trades
             WHERE position_group_id = ?
             """,
@@ -277,6 +327,7 @@ def open_paper_trade(
     client_order_id = str(client_order_id).strip()
     side = str(side).upper().strip()
     symbol = validate_symbol(symbol)
+    require_execution_approval(symbol)
 
     if not account_id or not client_order_id:
         raise ValueError("Account ID and order ID are required.")
@@ -390,6 +441,42 @@ def open_paper_trade(
 
         if account is None:
             raise ValueError("Paper account not found.")
+
+        tier = "STANDARD"
+        if account["owner_user_id"]:
+            entitlement = connection.execute(
+                """
+                SELECT tier FROM participant_subscription_entitlements
+                WHERE user_id = ?
+                """,
+                (account["owner_user_id"],)
+            ).fetchone()
+            if entitlement is not None:
+                tier = entitlement["tier"]
+
+        position_limits = {
+            "STANDARD": 4,
+            "ADVANCED": 8,
+            "PREMIUM": 13,
+            "EXCLUSIVE": 20,
+        }
+        maximum_positions = position_limits.get(tier)
+        if maximum_positions is None:
+            raise ValueError("Account subscription entitlement requires administrator review.")
+
+        open_positions = connection.execute(
+            """
+            SELECT COUNT(*) AS position_count
+            FROM trades
+            WHERE account_id = ? AND status = 'OPEN'
+            """,
+            (account_id,)
+        ).fetchone()["position_count"]
+        if open_positions >= maximum_positions:
+            raise ValueError(
+                f"{tier.title()} account position limit reached "
+                f"({maximum_positions} open positions)."
+            )
 
         assigned_profile = get_risk_profile(
             account["starting_balance"]
@@ -516,6 +603,7 @@ def open_paper_trade(
         "total_open_risk": risk["projected_total_open_risk"],
         "remaining_risk": risk["remaining_risk_after_trade"],
         "maximum_risk_percent": risk["maximum_risk_percent"],
+        "maximum_open_positions": maximum_positions,
         "status": "OPEN",
         "mode": "paper_trading"
     }
@@ -585,11 +673,17 @@ def close_paper_trade(trade_id, exit_price):
             UPDATE trades
             SET status = 'CLOSED',
                 realized_pnl = ?,
+                gross_realized_pnl = ?,
+                spread_cost = 0,
+                commission_cost = 0,
+                swap_cost = 0,
+                other_costs = 0,
+                cost_provenance_status = 'UNKNOWN',
                 closed_at = CURRENT_TIMESTAMP
             WHERE trade_id = ?
               AND status = 'OPEN'
             """,
-            (pnl, trade_id)
+            (pnl, pnl, trade_id)
         )
 
         if update_result.rowcount != 1:
@@ -724,11 +818,17 @@ def close_position_group(group_id, exit_price):
                 UPDATE trades
                 SET status = 'CLOSED',
                     realized_pnl = ?,
+                    gross_realized_pnl = ?,
+                    spread_cost = 0,
+                    commission_cost = 0,
+                    swap_cost = 0,
+                    other_costs = 0,
+                    cost_provenance_status = 'UNKNOWN',
                     closed_at = CURRENT_TIMESTAMP
                 WHERE trade_id = ?
                   AND status = 'OPEN'
                 """,
-                (pnl, trade["trade_id"])
+                (pnl, pnl, trade["trade_id"])
             )
 
             if result.rowcount != 1:
@@ -794,7 +894,7 @@ def create_copy_relationship(follower_account_id, source_account_id):
     with transaction() as connection:
         accounts = connection.execute(
             """
-            SELECT account_id
+            SELECT account_id, settlement_currency
             FROM paper_accounts
             WHERE account_id IN (?, ?)
             """,
@@ -803,6 +903,24 @@ def create_copy_relationship(follower_account_id, source_account_id):
 
         if len(accounts) != 2:
             raise ValueError("Source or follower paper account not found.")
+
+        currencies = {
+            row["account_id"]: row["settlement_currency"]
+            for row in accounts
+        }
+        source_currency = currencies.get(source_id)
+        follower_currency = currencies.get(follower_id)
+
+        if not source_currency or not follower_currency:
+            raise ValueError(
+                "Copy rejected: both accounts must have a verified settlement currency."
+            )
+
+        if source_currency != follower_currency:
+            raise ValueError(
+                "Cross-currency copy is disabled until a fresh, independently "
+                "validated FX quote is available."
+            )
 
         existing = connection.execute(
             """

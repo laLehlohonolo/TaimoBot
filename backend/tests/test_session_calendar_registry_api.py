@@ -1,4 +1,3 @@
-import os
 import tempfile
 import unittest
 import sqlite3
@@ -18,13 +17,14 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
         self.original_db_path = database.DB_PATH
         database.DB_PATH = Path(self.temp_dir.name) / "session-calendars.db"
         init_db()
-        self.original_admin_emails = os.environ.get("TAIMOBOT_ADMIN_EMAILS")
-        os.environ["TAIMOBOT_ADMIN_EMAILS"] = (
-            "calendar-admin@taimobot.local,calendar-reviewer@taimobot.local"
-        )
         admin = register_user("calendar-admin@taimobot.local", "CalendarAdminPass-2026!")
         reviewer = register_user("calendar-reviewer@taimobot.local", "CalendarReviewerPass-2026!")
         participant = register_user("calendar-user@taimobot.local", "CalendarParticipantPass-2026!")
+        with database.get_connection() as connection:
+            connection.executemany(
+                "UPDATE users SET role = 'ADMIN', email_verified = 1 WHERE user_id = ?",
+                [(admin["user_id"],), (reviewer["user_id"],)],
+            )
         self.admin = TestClient(app)
         self.reviewer = TestClient(app)
         self.participant = TestClient(app)
@@ -37,10 +37,6 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
         self.admin.close()
         self.reviewer.close()
         self.participant.close()
-        if self.original_admin_emails is None:
-            os.environ.pop("TAIMOBOT_ADMIN_EMAILS", None)
-        else:
-            os.environ["TAIMOBOT_ADMIN_EMAILS"] = self.original_admin_emails
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
@@ -67,6 +63,8 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["version"], 1)
         self.assertEqual(body["status"], "PENDING_SOURCE_VERIFICATION")
+        self.assertTrue(body["record"]["submitted_by"])
+        self.assertEqual(body["record"]["submitted_by"], body["submitted_by"])
         self.assertFalse(body["source_verified"])
         self.assertFalse(body["admin_reviewed"])
         self.assertFalse(body["session_calendar_applied"])
@@ -113,7 +111,7 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
             self.participant.get(f"{path}/{first['calendar_id']}").status_code, 403
         )
 
-    def test_calendar_decisions_and_audit_are_append_only(self):
+    def test_calendar_records_decisions_and_audit_are_immutable(self):
         body = self.admin.post("/admin/brain/session-calendars", json=self.payload()).json()
         decision_path = f"/admin/brain/session-calendars/{body['calendar_id']}/decisions"
         verified = self.admin.post(decision_path, json={
@@ -142,9 +140,61 @@ class SessionCalendarRegistryApiTests(unittest.TestCase):
                 )
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
+                    "UPDATE brain_session_calendars SET status = 'APPROVED' WHERE calendar_id = ?",
+                    (body["calendar_id"],),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
                     "DELETE FROM brain_session_calendars WHERE calendar_id = ?",
                     (body["calendar_id"],),
                 )
+
+    def test_source_verification_rejects_malformed_or_non_https_evidence_urls(self):
+        path = "/admin/brain/session-calendars"
+        body = self.admin.post(path, json=self.payload()).json()
+        decision_path = f"{path}/{body['calendar_id']}/decisions"
+        for evidence_url in (
+            "http://broker.example.test/source",
+            "https://",
+            "https:///missing-host",
+            "https://[",
+        ):
+            response = self.admin.post(decision_path, json={
+                "decision": "VERIFY_SOURCE",
+                "rationale": "The evidence URL must be a valid HTTPS location.",
+                "evidence_url": evidence_url,
+            })
+            self.assertEqual(response.status_code, 400)
+        detail = self.admin.get(f"{path}/{body['calendar_id']}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["status"], "PENDING_SOURCE_VERIFICATION")
+        self.assertEqual(detail.json()["decisions"], [])
+
+    def test_change_request_requires_source_verified_state_and_restarts_review(self):
+        path = "/admin/brain/session-calendars"
+        body = self.admin.post(path, json=self.payload()).json()
+        decision_path = f"{path}/{body['calendar_id']}/decisions"
+        invalid = self.admin.post(decision_path, json={
+            "decision": "REQUEST_CHANGES",
+            "rationale": "This request must not be accepted before source verification.",
+        })
+        self.assertEqual(invalid.status_code, 409)
+        verified = self.admin.post(decision_path, json={
+            "decision": "VERIFY_SOURCE",
+            "rationale": "The source publication was checked and requires a correction.",
+            "evidence_url": "https://broker.example.test/trading-hours",
+        })
+        self.assertEqual(verified.status_code, 201)
+        changed = self.admin.post(decision_path, json={
+            "decision": "REQUEST_CHANGES",
+            "rationale": "The provider's maintenance schedule requires clarification.",
+        })
+        self.assertEqual(changed.status_code, 201)
+        self.assertEqual(changed.json()["status"], "PENDING_SOURCE_VERIFICATION")
+        self.assertFalse(changed.json()["source_verified"])
+        self.assertFalse(changed.json()["admin_reviewed"])
+        self.assertFalse(changed.json()["backtest_eligible"])
+        self.assertFalse(changed.json()["execution_eligible"])
 
 
 if __name__ == "__main__":

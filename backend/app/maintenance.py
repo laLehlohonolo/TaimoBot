@@ -1416,28 +1416,37 @@ def inspect_recovery_artifact_inventory(
                     artifacts.append(item)
                     continue
                 try:
-                    file_before = path.stat(follow_symlinks=False)
-                    item["sha256"] = sha256_file(path)
-                    assert_managed_directories_unchanged()
-                    with sqlite3.connect(
-                        f"file:{path.resolve()}?mode=ro", uri=True, timeout=10
-                    ) as check:
-                        row = check.execute("PRAGMA integrity_check").fetchone()
-                    item["integrity_check"] = row[0] if row else "no_result"
-                    file_after = path.stat(follow_symlinks=False)
-                    if (
-                        path.is_symlink()
-                        or not stat.S_ISREG(file_after.st_mode)
-                        or file_after.st_dev != file_before.st_dev
-                        or file_after.st_ino != file_before.st_ino
-                        or file_after.st_size != file_before.st_size
-                        or file_after.st_mtime_ns != file_before.st_mtime_ns
-                    ):
-                        item["issues"].append("ARTIFACT_CHANGED_DURING_INVENTORY")
-                        issues.append("ARTIFACT_CHANGED_DURING_INVENTORY")
-                    assert_managed_directories_unchanged()
-                    if item["integrity_check"] != "ok":
-                        item["issues"].append("SQLITE_INTEGRITY_FAILED")
+                    sidecars_before = inspect_sqlite_sidecars(path)
+                    if sidecars_before["status"] != "SIDECARS_CLEAR":
+                        item["issues"].append("SQLITE_SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING")
+                        issues.append("SQLITE_SIDECARS_PRESENT_REQUIRES_LOCKED_HANDLING")
+                    else:
+                        file_before = path.stat(follow_symlinks=False)
+                        item["sha256"] = sha256_file(path)
+                        assert_managed_directories_unchanged()
+                        with sqlite3.connect(
+                            f"file:{path.resolve()}?mode=ro&immutable=1", uri=True, timeout=10
+                        ) as check:
+                            row = check.execute("PRAGMA integrity_check").fetchone()
+                        item["integrity_check"] = row[0] if row else "no_result"
+                        file_after = path.stat(follow_symlinks=False)
+                        sidecars_after = inspect_sqlite_sidecars(path)
+                        if sidecars_after != sidecars_before:
+                            item["issues"].append("SQLITE_SIDECARS_CHANGED_DURING_INVENTORY")
+                            issues.append("SQLITE_SIDECARS_CHANGED_DURING_INVENTORY")
+                        if (
+                            path.is_symlink()
+                            or not stat.S_ISREG(file_after.st_mode)
+                            or file_after.st_dev != file_before.st_dev
+                            or file_after.st_ino != file_before.st_ino
+                            or file_after.st_size != file_before.st_size
+                            or file_after.st_mtime_ns != file_before.st_mtime_ns
+                        ):
+                            item["issues"].append("ARTIFACT_CHANGED_DURING_INVENTORY")
+                            issues.append("ARTIFACT_CHANGED_DURING_INVENTORY")
+                        assert_managed_directories_unchanged()
+                        if item["integrity_check"] != "ok":
+                            item["issues"].append("SQLITE_INTEGRITY_FAILED")
                 except (sqlite3.Error, OSError, ValueError):
                     item["issues"].append("ARTIFACT_UNREADABLE")
 

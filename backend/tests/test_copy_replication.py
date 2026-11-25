@@ -34,6 +34,16 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.user_id = user["user_id"]
         session = create_session(self.user_id)
         create_paper_account("SOURCE", 10000, owner_user_id=self.user_id)
+        # These copy-trading fixtures intentionally require two owned accounts.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE participant_subscription_entitlements
+                SET tier = 'EXCLUSIVE'
+                WHERE user_id = ?
+                """,
+                (self.user_id,),
+            )
         create_paper_account("FOLLOWER", 5000, owner_user_id=self.user_id)
         self.client = TestClient(app)
         self.client.headers.update({"Authorization": "Bearer " + session["access_token"]})
@@ -61,21 +71,91 @@ class CopyTradeReplicationTests(unittest.TestCase):
             symbol="XAUUSD"
         )
 
+    def test_runtime_rejects_cross_currency_copy_even_for_legacy_relationship(self):
+        create_paper_account(
+            "SOURCE-USD",
+            10000,
+            owner_user_id=self.user_id,
+            settlement_currency="USD",
+        )
+        source = open_paper_trade(
+            account_id="SOURCE-USD",
+            client_order_id="SOURCE-USD-ORDER-001",
+            side="BUY",
+            entry_price=4000,
+            stop_loss=3990,
+            risk_percent=0.5,
+            symbol="XAUUSD",
+        )
+
+        # Simulate an old or manually inserted relationship that bypassed
+        # the relationship-creation guard. Runtime must still reject it.
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO copy_relationships (
+                    relationship_id, source_account_id, follower_account_id
+                )
+                VALUES ('REL-CROSS-CURRENCY', 'SOURCE-USD', 'FOLLOWER')
+                """
+            )
+
+        result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn(
+            "Cross-currency copy is disabled",
+            result["copies"][0]["failure_reason"],
+        )
+
+        with database.get_connection() as connection:
+            copied_count = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM trades
+                WHERE account_id = 'FOLLOWER'
+                  AND copied_from_trade_id = ?
+                """,
+                (source["trade_id"],),
+            ).fetchone()["total"]
+
+        self.assertEqual(copied_count, 0)
+
     def test_api_trade_creation_triggers_copy(self):
         response = self.client.post(
             "/trades",
             json={
                 "account_id": "SOURCE",
                 "client_order_id": "API-SOURCE-001",
-                "symbol": "EURUSD",
+                "symbol": "XAUUSD",
                 "side": "BUY",
-                "entry_price": 1.1,
-                "stop_loss": 1.09,
+                "entry_price": 4000,
+                "stop_loss": 3990,
                 "risk_percent": 0.5
             }
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["copy_summary"]["successful_copies"], 1)
+
+    def test_source_profit_preview_discloses_open_copies_excluded_from_preview(self):
+        source = self.create_source_trade(order_id="SOURCE-PREVIEW-SCOPE")
+        result = replicate_open_trade(source["trade_id"])
+        self.assertEqual(result["successful_copies"], 1)
+
+        response = self.client.post(
+            f"/trades/{source['trade_id']}/profit-preview",
+            json={"current_price": 4001},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()
+        self.assertEqual(preview["preview_scope"], "REQUESTED_POSITION_ONLY")
+        self.assertEqual(preview["close_scope"], "SOURCE_AND_OPEN_COPIES")
+        self.assertEqual(preview["open_copy_positions_excluded"], 1)
+        self.assertTrue(preview["read_only"])
+        self.assertFalse(preview["execution_triggered"])
 
     def test_follower_position_size_is_calculated_from_own_funding(self):
         source = self.create_source_trade()
@@ -94,6 +174,48 @@ class CopyTradeReplicationTests(unittest.TestCase):
         self.assertEqual(copied["quantity"], 2.5)
         self.assertEqual(copied["risk_amount"], 25)
         self.assertEqual(copied["copied_from_trade_id"], source["trade_id"])
+
+    def test_copied_entry_respects_follower_subscription_position_limit(self):
+        source = self.create_source_trade(order_id="SOURCE-FOLLOWER-CAP")
+        with database.get_connection() as connection:
+            connection.executemany(
+                """
+                INSERT INTO trades (
+                    trade_id, account_id, client_order_id, symbol,
+                    side, quantity, entry_price, stop_loss,
+                    status, risk_amount
+                )
+                VALUES (?, 'FOLLOWER', ?, 'XAUUSD', 'BUY',
+                        0.001, 4000, 3990, 'OPEN', 0.01)
+                """,
+                [
+                    (f"FOLLOWER-CAP-{i}", f"FOLLOWER-CAP-ORDER-{i}")
+                    for i in range(20)
+                ],
+            )
+
+        result = replicate_open_trade(source["trade_id"])
+
+        self.assertEqual(result["successful_copies"], 0)
+        self.assertEqual(result["failed_copies"], 1)
+        self.assertEqual(result["copies"][0]["status"], "FAILED")
+        self.assertIn(
+            "Exclusive account position limit reached (20 open positions)",
+            result["copies"][0]["failure_reason"],
+        )
+        with database.get_connection() as connection:
+            follower_state = connection.execute(
+                """
+                SELECT COUNT(*) AS open_positions,
+                       SUM(CASE WHEN copied_from_trade_id = ? THEN 1 ELSE 0 END)
+                           AS copied_entries
+                FROM trades
+                WHERE account_id = 'FOLLOWER' AND status = 'OPEN'
+                """,
+                (source["trade_id"],),
+            ).fetchone()
+        self.assertEqual(follower_state["open_positions"], 20)
+        self.assertEqual(follower_state["copied_entries"], 0)
 
     def test_repeated_replication_does_not_create_duplicate(self):
         source = self.create_source_trade()
@@ -214,7 +336,7 @@ class CopyTradeReplicationTests(unittest.TestCase):
 
     def test_follower_risk_rejection_is_recorded_without_affecting_source(self):
         # Consume the follower's full combined risk budget first.
-        for number, symbol in enumerate(("EURUSD", "GBPUSD"), start=1):
+        for number, symbol in enumerate(("XAUUSD", "XAUUSD"), start=1):
             open_paper_trade(
                 account_id="FOLLOWER",
                 client_order_id=f"FOLLOWER-EXISTING-{number}",
@@ -874,7 +996,7 @@ class CopyTradeReplicationTests(unittest.TestCase):
             entry_price=4000,
             stop_loss=3990,
             risk_percent=0.5,
-            symbol="EURUSD"
+            symbol="XAUUSD"
         )
 
         first_source = self.create_source_trade(

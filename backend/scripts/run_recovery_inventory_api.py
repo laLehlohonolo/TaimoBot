@@ -16,7 +16,7 @@ CASES = [
     "test_recovery_inventory_api_requires_authentication",
     "test_recovery_inventory_api_rejects_invalid_bearer_token",
     "test_recovery_inventory_api_rejects_non_admin_user",
-    "test_recovery_inventory_api_requires_explicit_admin_allowlist",
+    "test_recovery_inventory_api_uses_verified_database_role_not_email_allowlist",
     "test_recovery_inventory_api_normalizes_admin_email_case",
     "test_recovery_inventory_api_calls_inventory_once_for_admin",
     "test_recovery_inventory_api_does_not_call_inventory_for_non_admin",

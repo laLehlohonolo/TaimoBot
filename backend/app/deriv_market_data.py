@@ -1,0 +1,137 @@
+"""Read-only Deriv market-data response adapters.
+
+These helpers validate provider responses. They do not open a socket, subscribe,
+persist data, generate signals, or submit any trade/order request.
+"""
+from datetime import datetime, timezone
+import math
+
+from .instruments import get_instrument
+from .market_observations import normalize_market_observation
+
+
+DERIV_SYNTHETIC_SYMBOLS = frozenset({
+    "R_10", "R_25", "R_50", "R_75", "R_100",
+    "1HZ10V", "1HZ15V", "1HZ25V", "1HZ30V", "1HZ50V", "1HZ75V", "1HZ90V", "1HZ100V",
+})
+
+
+def _finite_positive(value, field):
+    if isinstance(value, bool):
+        raise ValueError(field + " must be a finite positive number.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(field + " must be a finite positive number.")
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(field + " must be a finite positive number.")
+    return number
+
+
+def normalize_active_symbols_response(payload):
+    """Return known Deriv synthetic symbols present in an active_symbols reply."""
+    if not isinstance(payload, dict) or payload.get("msg_type") != "active_symbols":
+        raise ValueError("Expected a Deriv active_symbols response.")
+    records = payload.get("active_symbols")
+    if not isinstance(records, list):
+        raise ValueError("Deriv active_symbols response must contain a list.")
+
+    discovered = []
+    seen = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        symbol = record.get("underlying_symbol")
+        if not isinstance(symbol, str):
+            continue
+        symbol = symbol.strip().upper()
+        if symbol not in DERIV_SYNTHETIC_SYMBOLS:
+            continue
+        if symbol in seen:
+            raise ValueError("Deriv active_symbols response contains a duplicate synthetic symbol.")
+        instrument = get_instrument(symbol)
+        pip_size = _finite_positive(record.get("pip_size"), "pip_size")
+        market = record.get("market")
+        subgroup = record.get("subgroup")
+        submarket = record.get("submarket")
+        display_name = record.get("underlying_symbol_name")
+        symbol_type = record.get("underlying_symbol_type")
+        trade_count = record.get("trade_count")
+        required_text_metadata = {
+            "market": market,
+            "subgroup": subgroup,
+            "submarket": submarket,
+            "underlying_symbol_name": display_name,
+        }
+        missing_metadata = [
+            field for field, value in required_text_metadata.items()
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing_metadata:
+            raise ValueError(
+                f"Deriv symbol metadata is incomplete for {symbol}: "
+                f"missing or blank fields: {', '.join(missing_metadata)}."
+            )
+        # Deriv's live active_symbols payload may omit this descriptive field.
+        # Preserve the observation-only symbol without fabricating its value.
+        if not isinstance(symbol_type, str) or not symbol_type.strip():
+            symbol_type = None
+            missing_metadata.append("underlying_symbol_type")
+        else:
+            symbol_type = symbol_type.strip()
+        if market.strip().lower() != instrument["asset_class"]:
+            raise ValueError("Deriv symbol market metadata does not match the instrument catalogue.")
+        if isinstance(trade_count, bool) or not isinstance(trade_count, int) or trade_count < 0:
+            raise ValueError("trade_count must be a non-negative integer.")
+        for flag in ("exchange_is_open", "is_trading_suspended"):
+            if record.get(flag) not in (0, 1) or isinstance(record.get(flag), bool):
+                raise ValueError(flag + " must be 0 or 1.")
+        discovered.append({
+            **instrument,
+            "display_name": display_name.strip(),
+            "underlying_symbol_type": symbol_type,
+            "trade_count": trade_count,
+            "market": market.strip(),
+            "subgroup": subgroup.strip(),
+            "submarket": submarket.strip(),
+            "pip_size": pip_size,
+            "exchange_is_open": bool(record["exchange_is_open"]),
+            "is_trading_suspended": bool(record["is_trading_suspended"]),
+            "provider_metadata_status": (
+                "INCOMPLETE_PROVIDER_RESPONSE" if missing_metadata
+                else "UNVERIFIED_PROVIDER_RESPONSE"
+            ),
+            "missing_provider_metadata": missing_metadata,
+            "execution_eligible": False,
+        })
+        seen.add(symbol)
+    return discovered
+
+
+def normalize_deriv_candle(symbol, candle, timeframe, source="deriv"):
+    """Convert one Deriv candle response object into the common OHLCV format."""
+    instrument = get_instrument(symbol)
+    if instrument.get("provider") != "Deriv" or instrument.get("asset_class") != "synthetic_index":
+        raise ValueError("Only catalogued Deriv synthetic indices are supported.")
+    if not isinstance(candle, dict):
+        raise ValueError("Deriv candle must be an object.")
+    epoch = candle.get("epoch")
+    if isinstance(epoch, bool) or not isinstance(epoch, (int, float)):
+        raise ValueError("Deriv candle epoch must be numeric.")
+    if not math.isfinite(float(epoch)) or epoch < 0:
+        raise ValueError("Deriv candle epoch must be a finite non-negative number.")
+    try:
+        timestamp = datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError("Deriv candle epoch is outside the supported timestamp range.") from exc
+    return normalize_market_observation({
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "timestamp": timestamp,
+        "open": candle.get("open"),
+        "high": candle.get("high"),
+        "low": candle.get("low"),
+        "close": candle.get("close"),
+        "volume": 0,
+        "source": source,
+    })
