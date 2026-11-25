@@ -751,7 +751,7 @@ export default function App() {
       )}
 
       <section className="panel integrity">
-        <div><p className="eyebrow">SAFETY FIRST</p><h2>Backend-enforced controls</h2><p className="integrity-copy">Authentication, account ownership, risk validation and order acceptance are enforced by the API. This browser dashboard is a display layer and does not place orders.</p></div>
+        <div><p className="eyebrow">SAFETY FIRST</p><h2>Backend-enforced controls</h2><p className="integrity-copy">Authentication, account ownership, risk validation and order acceptance are enforced by the API. This browser dashboard sends paper-trade requests to the backend; it does not place live broker orders.</p></div>
         <div className="guard-list">
           <div><span className="check">✓</span><span>Paper trading only</span></div>
           <div><span className="check">✓</span><span>Private accounts require authentication</span></div>
