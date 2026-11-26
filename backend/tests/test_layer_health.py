@@ -73,6 +73,11 @@ class LayerHealthContractTests(unittest.TestCase):
         self.assertEqual(len(body["layers"]), 7)
         self.assertEqual(body["overall_status"], "NOT_IMPLEMENTED")
         self.assertTrue(all(item["status"] == "NOT_IMPLEMENTED" for item in body["layers"]))
+        market = next(item for item in body["layers"] if item["layer_id"] == "MARKET")
+        self.assertEqual(market["limitations"], ["No Market provider is registered."])
+        self.assertFalse(market["execution_eligible"])
+        self.assertFalse(market["signals_generated"])
+        self.assertFalse(market["orders_submitted"])
 
 
 if __name__ == "__main__":
