@@ -413,10 +413,19 @@ def run_maintenance_for_date(
                 connection.execute(
                     """
                     UPDATE maintenance_run_attempts
-                    SET status = 'SUPERSEDED', completed_at = ?, error_summary = ?
+                    SET status = 'SUPERSEDED', completed_at = ?, backup_file = ?,
+                        error_summary = ?
                     WHERE attempt_token = ? AND status = 'RUNNING'
                     """,
-                    (completed_at, "A newer maintenance claim replaced this worker.", claim_token),
+                    (
+                        completed_at,
+                        backup_result.get("backup_file")
+                        if isinstance(backup_result, dict)
+                        and backup_result.get("status") == "BACKUP_VERIFIED"
+                        else None,
+                        "A newer maintenance claim replaced this worker.",
+                        claim_token,
+                    ),
                 )
                 connection.commit()
                 return {
