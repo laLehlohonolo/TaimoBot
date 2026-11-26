@@ -79,6 +79,7 @@ from .market_observations import SUPPORTED_TIMEFRAMES
 from .instruments import get_instrument
 from .layer_health import build_layer_health_snapshot
 from .market_health import evaluate_market_health
+from .market_provider_registry import load_market_provider_configuration
 
 
 @asynccontextmanager
@@ -304,7 +305,11 @@ def health_check():
 def brain_layer_health(user=Depends(current_user)):
     """Admin-only inventory of seven-layer health telemetry readiness."""
     require_admin(user)
-    market_health = evaluate_market_health()  # No provider is registered; fail closed.
+    provider_configuration = load_market_provider_configuration()
+    market_health = evaluate_market_health(
+        trusted_provider_id=provider_configuration["provider_id"],
+        trusted_configuration=provider_configuration["trusted_configuration"],
+    )  # No evidence adapter is registered; fail closed.
     return build_layer_health_snapshot(market_health=market_health)
 
 
