@@ -250,3 +250,25 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
 @media(prefers-reduced-motion:reduce){
   *,*:before,*:after{scroll-behavior:auto!important;transition:none!important}
 }
+
+
+/* Administrator-only seven-layer readiness inventory */
+.layer-health-panel{margin-top:16px;padding:22px}
+.layer-health-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:17px}
+.layer-health-heading h2{margin:0 0 6px}
+.layer-health-heading .muted{margin:0;max-width:660px}
+.layer-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.layer-health-card{min-width:0;padding:15px;border:1px solid rgba(137,198,154,.17);border-radius:10px;background:linear-gradient(145deg,rgba(20,58,36,.72),rgba(6,23,14,.9))}
+.layer-card-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.layer-card-name{font-family:"DM Mono",monospace;font-size:12px;font-weight:500;letter-spacing:.12em;color:#dcebe1}
+.layer-status{display:inline-flex;align-items:center;border:1px solid transparent;border-radius:30px;padding:5px 8px;font-family:"DM Mono",monospace;font-size:8px;letter-spacing:.06em;white-space:nowrap}
+.layer-status.pending{color:#b9c9bf;border-color:rgba(185,201,191,.2);background:rgba(120,140,126,.1)}
+.layer-status.attention{color:#e8c48e;border-color:rgba(232,196,142,.28);background:rgba(143,99,40,.12)}
+.layer-status.offline{color:#e5a49a;border-color:rgba(229,164,154,.25);background:rgba(130,57,42,.12)}
+.layer-status.healthy{color:#9de4b3;border-color:rgba(117,214,154,.3);background:rgba(54,130,83,.14)}
+.layer-health-card p{min-height:34px;margin:12px 0 8px;color:#9bb3a3;font-size:10px;line-height:1.65}
+.layer-health-card small{display:block;color:#6f927b;font-size:9px;line-height:1.5}
+.layer-health-foot{display:flex;flex-wrap:wrap;gap:10px 20px;margin-top:15px;padding-top:13px;border-top:1px solid rgba(137,198,154,.14);color:#8fa998;font-family:"DM Mono",monospace;font-size:9px}
+.layer-health-foot strong{color:#d4e9db}
+.layer-health-disclaimer{margin:13px 0 0;color:#7e9a88;font-size:9px;line-height:1.65}
+@media(max-width:650px){.layer-health-panel{padding:17px}.layer-health-heading{flex-direction:column}.layer-health-heading .refresh{width:100%}.layer-health-grid{grid-template-columns:1fr}.layer-health-card p{min-height:0}}
