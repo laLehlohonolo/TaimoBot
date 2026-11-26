@@ -9,6 +9,10 @@ class MarketHealthEvaluationTests(unittest.TestCase):
         self.now = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)
         self.trusted_configuration = {
             "provider_id": "trusted-xau-feed",
+            "source_verified": True,
+            "symbol_mapping_verified": True,
+            "provenance_verified": True,
+            "broker_specification_verified": True,
         }
         self.evidence = {
             "provider_id": "trusted-xau-feed",
