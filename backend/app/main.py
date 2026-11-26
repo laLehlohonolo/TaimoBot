@@ -77,6 +77,7 @@ from .market_backfill import run_backfill_batch_with_connection_factory
 from .deriv_public_client import DerivPublicMarketDataClient
 from .market_observations import SUPPORTED_TIMEFRAMES
 from .instruments import get_instrument
+from .layer_health import build_layer_health_snapshot
 
 
 @asynccontextmanager
@@ -296,6 +297,13 @@ def health_check():
         "api": "TaimoBot",
         "trading_mode": "paper"
     }
+
+
+@app.get("/admin/brain/layer-health")
+def brain_layer_health(user=Depends(current_user)):
+    """Admin-only inventory of seven-layer health telemetry readiness."""
+    require_admin(user)
+    return build_layer_health_snapshot()
 
 
 @app.post("/maintenance/retry")
