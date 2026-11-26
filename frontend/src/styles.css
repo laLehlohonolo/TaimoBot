@@ -172,3 +172,81 @@ td{color:#c6d8cc}
 .order-panel>p{font-size:10px;line-height:1.6;margin:13px 0 0}
 .trades-panel table th:last-child,.trades-panel table td:last-child{white-space:nowrap}
 @media(max-width:520px){.order-form{grid-template-columns:1fr}.order-actions{display:grid;grid-template-columns:1fr}.order-actions button{width:100%}}
+
+
+/* TaimoBot richer forest-green visual refinement — presentation only */
+:root{
+  --taimo-forest:#04110b;
+  --taimo-canopy:#0b2417;
+  --taimo-emerald:#17613a;
+  --taimo-leaf:#75d69a;
+  --taimo-mist:rgba(151,210,170,.12);
+}
+body{
+  background:
+    radial-gradient(ellipse at 12% 8%,rgba(35,116,69,.20),transparent 34%),
+    radial-gradient(ellipse at 88% 18%,rgba(27,91,59,.18),transparent 38%),
+    radial-gradient(ellipse at 52% 105%,rgba(21,75,46,.18),transparent 42%),
+    linear-gradient(145deg,#030d08 0%,#06170e 48%,#04110b 100%);
+}
+.shell{position:relative}
+.shell:before{
+  content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.22;
+  background-image:radial-gradient(rgba(133,194,151,.16) .7px,transparent .7px);
+  background-size:24px 24px;
+  mask-image:linear-gradient(to bottom,black,transparent 78%);
+}
+.topbar{border-bottom-color:rgba(151,210,170,.17)}
+.brand-mark{
+  background:linear-gradient(145deg,rgba(51,139,83,.25),rgba(8,35,21,.65));
+  box-shadow:inset 0 1px rgba(214,255,225,.12),0 0 24px rgba(69,177,108,.12);
+}
+.panel{
+  position:relative;overflow:hidden;
+  background:
+    linear-gradient(145deg,rgba(22,61,39,.88),rgba(8,27,17,.96) 62%),
+    #0b2115;
+  border-color:rgba(137,198,154,.19);
+  box-shadow:inset 0 1px rgba(221,255,228,.045),0 14px 38px rgba(0,0,0,.13);
+}
+.panel:after{
+  content:"";position:absolute;top:0;left:18px;right:18px;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(151,226,170,.28),transparent);
+  pointer-events:none;
+}
+.status-card,.metric-card,.strategy-item,.journey-grid article{
+  background:linear-gradient(150deg,rgba(20,58,36,.76),rgba(7,25,15,.92));
+  border-color:rgba(137,198,154,.17);
+}
+.status-card:hover,.strategy-item:hover,.journey-grid article:hover{
+  border-color:rgba(117,214,154,.34);
+  box-shadow:0 10px 28px rgba(0,0,0,.18),0 0 22px rgba(49,133,77,.08);
+}
+h1 em{color:#8be3a9;text-shadow:0 0 28px rgba(117,214,154,.14)}
+.eyebrow{color:#83d9a0}
+.primary-button,.refresh{
+  background:linear-gradient(135deg,#236b43,#174d30);
+  border-color:rgba(117,214,154,.48);
+  box-shadow:inset 0 1px rgba(235,255,239,.12);
+}
+.primary-button:hover:not(:disabled),.refresh:hover:not(:disabled){
+  background:linear-gradient(135deg,#2c8050,#1b5b38);
+  box-shadow:0 0 22px rgba(72,177,111,.16);
+}
+.account-choice.selected{
+  background:linear-gradient(110deg,rgba(36,112,65,.27),rgba(10,39,22,.68));
+  box-shadow:inset 3px 0 #6ed493;
+}
+.risk-track{background:#041009}
+.risk-track span{background:linear-gradient(90deg,#27784a,#79dfa0);box-shadow:0 0 12px rgba(99,218,145,.2)}
+input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,summary:focus-visible{
+  outline:2px solid #83dfa3;outline-offset:3px;
+}
+@media(prefers-reduced-motion:no-preference){
+  .panel,.status-card,.strategy-item,.journey-grid article,.primary-button,.refresh{
+    transition:border-color .2s ease,box-shadow .2s ease,background .2s ease;
+  }
+}
+@media(prefers-reduced-motion:reduce){
+  *,*:before,*:after{scroll-behavior:auto!important;transition:none!important}
+}
