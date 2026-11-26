@@ -14,6 +14,7 @@ from app.maintenance import SAST
 from app import maintenance_scheduler
 from app.maintenance_scheduler import (
     _assert_claim_owned,
+    _claim_owned_deletion_guard,
     _heartbeat_claim,
     run_maintenance_for_date,
 )
@@ -42,6 +43,20 @@ class MaintenanceSchedulerTests(unittest.TestCase):
                 """,
                 (run_date, started_at, token),
             )
+
+    def test_deletion_guard_holds_only_for_current_claim(self):
+        day = "2026-11-26"
+        started = datetime.now(SAST).isoformat()
+        self._create_claim(day, "current-token", started)
+        lost_event = Event()
+
+        with _claim_owned_deletion_guard(day, "current-token", lost_event):
+            self.assertFalse(lost_event.is_set())
+
+        with self.assertRaises(RuntimeError):
+            with _claim_owned_deletion_guard(day, "superseded-token", lost_event):
+                self.fail("A superseded worker must never enter the deletion section")
+        self.assertTrue(lost_event.is_set())
 
     def test_heartbeat_renews_active_claim(self):
         day = "2026-11-26"
