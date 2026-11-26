@@ -114,3 +114,21 @@ A healthy MARKET status means only that the configured market-data monitoring ch
 ## Current status
 
 This document records the acceptance contract and implementation sequence. It does not mark MARKET or any other layer healthy, and it does not claim a verified XAUUSD feed.
+
+## Server-controlled provider configuration boundary
+
+The backend now has a fail-closed environment-backed configuration registry in `backend/app/market_provider_registry.py`. It reads only process environment values; participant requests cannot set or override trust flags.
+
+The optional configuration keys are:
+
+- `TAIMOBOT_MARKET_PROVIDER_ID`
+- `TAIMOBOT_MARKET_SOURCE_VERIFIED`
+- `TAIMOBOT_MARKET_SYMBOL_MAPPING_VERIFIED`
+- `TAIMOBOT_MARKET_PROVENANCE_VERIFIED`
+- `TAIMOBOT_MARKET_BROKER_SPECIFICATION_VERIFIED`
+
+Verification flags are true only when the corresponding server value is explicitly `true` (case-insensitive, surrounding whitespace ignored). Missing, malformed, or any other value is false. A provider ID by itself does not verify any source or broker property.
+
+This configuration registry is not a live provider adapter: no heartbeat or market evidence is ingested by it. The admin health endpoint therefore remains `NOT_IMPLEMENTED` when no evidence is supplied, even if an operator has prepared environment configuration. Do not populate the verification flags until independent evidence and operator review support each claim. Never place provider secrets in these identifiers or expose environment values through API responses.
+
+The registry tests cover absent configuration, provider identity without verification, explicit true values, malformed flags, and blank provider IDs.
