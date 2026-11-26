@@ -70,7 +70,7 @@ class MarketHealthEvaluationTests(unittest.TestCase):
         self.assertEqual(self.evaluate(empty)["status"], "OFFLINE")
 
     def test_expired_heartbeat_is_offline(self):
-        evidence = dict(self.evidence, checked_at="2026-11-26T11:58:00+00:00")
+        evidence = dict(self.evidence, checked_at="2026-11-26T11:58:00+00:00", latest_observation_at="2026-11-26T11:57:00+00:00")
         self.assertEqual(self.evaluate(evidence)["status"], "OFFLINE")
 
     def test_stale_gaps_malformed_and_future_candles_are_degraded(self):
