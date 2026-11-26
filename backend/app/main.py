@@ -78,6 +78,7 @@ from .deriv_public_client import DerivPublicMarketDataClient
 from .market_observations import SUPPORTED_TIMEFRAMES
 from .instruments import get_instrument
 from .layer_health import build_layer_health_snapshot
+from .market_health import evaluate_market_health
 
 
 @asynccontextmanager
@@ -303,7 +304,8 @@ def health_check():
 def brain_layer_health(user=Depends(current_user)):
     """Admin-only inventory of seven-layer health telemetry readiness."""
     require_admin(user)
-    return build_layer_health_snapshot()
+    market_health = evaluate_market_health()  # No provider is registered; fail closed.
+    return build_layer_health_snapshot(market_health=market_health)
 
 
 @app.post("/maintenance/retry")
