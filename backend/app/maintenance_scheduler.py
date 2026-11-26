@@ -6,6 +6,7 @@ a fencing token so a stale worker cannot complete or fail a newer worker's run.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import sqlite3
@@ -67,6 +68,36 @@ def _assert_claim_owned(run_date: str, claim_token: str, lost_event: Event) -> N
     if row is None:
         lost_event.set()
         raise RuntimeError("Maintenance worker claim was superseded; stopping safely.")
+
+
+@contextmanager
+def _claim_owned_deletion_guard(run_date: str, claim_token: str, lost_event: Event):
+    """Fence one destructive filesystem operation with a SQLite write lock.
+
+    BEGIN IMMEDIATE prevents another process from reclaiming or replacing the
+    maintenance claim until the guarded unlink has completed and committed.
+    """
+    if lost_event.is_set():
+        raise RuntimeError("Maintenance worker lease was lost; stopping safely.")
+    with database.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT 1 FROM maintenance_runs
+            WHERE run_date = ? AND status = 'RUNNING' AND run_token = ?
+            """,
+            (run_date, claim_token),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            lost_event.set()
+            raise RuntimeError("Maintenance worker claim was superseded; stopping safely.")
+        try:
+            yield
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
 
 def _running_claim_is_stale(started_at: str, now: datetime) -> bool:
@@ -234,6 +265,9 @@ def run_maintenance_for_date(
             backup_dir=BACKUP_DIR,
             retention_days=365,
             dry_run=False,
+            deletion_guard=lambda _path: _claim_owned_deletion_guard(
+                day_key, claim_token, heartbeat_lost
+            ),
         )
         _assert_claim_owned(day_key, claim_token, heartbeat_lost)
         if retention_result.get("status") != "BACKUP_RETENTION_COMPLETE":
