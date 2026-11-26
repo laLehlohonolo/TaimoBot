@@ -23,7 +23,7 @@ HEALTH_STATUSES = (
 CONTRACT_VERSION = "layer-health-v1"
 
 
-def build_layer_health_snapshot():
+def build_layer_health_snapshot(market_health=None):
     """Return the current telemetry inventory without inventing layer heartbeats.
 
     Until a layer registers an authenticated health provider, its status remains
@@ -46,6 +46,20 @@ def build_layer_health_snapshot():
         }
         for layer_id in LAYER_IDS
     ]
+    if market_health is not None:
+        market_layer = next(item for item in layers if item["layer_id"] == "MARKET")
+        market_layer.update({
+            "status": market_health.get("status", "NOT_IMPLEMENTED"),
+            "observed_at": market_health.get("observed_at"),
+            "last_success_at": market_health.get("last_success_at"),
+            "source_version": market_health.get("contract_version", CONTRACT_VERSION),
+            "capabilities": ["provider_evidence_evaluation"],
+            "limitations": [market_health.get("reason", "No Market provider is registered.")],
+            "evidence_ref": market_health.get("evidence_id"),
+            "execution_eligible": False,
+            "signals_generated": False,
+            "orders_submitted": False,
+        })
     return {
         "generated_at": generated_at,
         "overall_status": "NOT_IMPLEMENTED",
