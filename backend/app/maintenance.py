@@ -15,7 +15,7 @@ import stat
 import time
 import tempfile
 import fcntl
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -924,6 +924,7 @@ def cleanup_expired_backups(
     retention_days: int = 365,
     dry_run: bool = True,
     live_database_path: Path | None = None,
+    deletion_guard=None,
 ) -> dict:
     """Safely plan or remove expired managed backups after validating recovery points.
 
@@ -1048,7 +1049,13 @@ def cleanup_expired_backups(
                     or after.st_mtime >= cutoff
                 ):
                     continue
-                candidate.unlink()
+                # The scheduler supplies a transaction-backed guard. It
+                # holds SQLite's write reservation from the final ownership
+                # check through unlink, preventing a concurrent worker from
+                # reclaiming the claim in that critical section.
+                guard = deletion_guard(candidate) if deletion_guard else nullcontext()
+                with guard:
+                    candidate.unlink()
                 deleted.append(candidate.name)
             except (sqlite3.Error, OSError, ValueError):
                 invalid.append(candidate.name)
