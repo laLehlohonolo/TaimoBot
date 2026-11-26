@@ -64,7 +64,7 @@ class MarketHealthEvaluationTests(unittest.TestCase):
     def test_provider_cannot_self_assert_source_mapping_or_broker_verification(self):
         forged = dict(self.evidence, source_verified=True, symbol_mapping_verified=True,
                       provenance_verified=True, broker_specification_verified=True)
-        self.assertEqual(self.evaluate(forged, configuration=None)["status"], "HEALTHY")
+        self.assertEqual(evaluate_market_health(forged, trusted_provider_id="trusted-xau-feed", trusted_configuration=None, now=self.now)["status"], "BLOCKED")
         for field in ("source_verified", "symbol_mapping_verified", "provenance_verified", "broker_specification_verified"):
             with self.subTest(field=field):
                 configuration = dict(self.trusted_configuration, **{field: False})
