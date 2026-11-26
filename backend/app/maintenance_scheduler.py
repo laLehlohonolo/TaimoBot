@@ -9,6 +9,7 @@ import asyncio
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import sqlite3
+from threading import Event, Thread
 from uuid import uuid4
 
 from . import database
@@ -22,6 +23,50 @@ from .maintenance import (
 )
 
 RUNNING_LEASE_MINUTES = 15
+LEASE_HEARTBEAT_SECONDS = 30
+
+
+def _heartbeat_claim(run_date: str, claim_token: str, stop_event: Event, lost_event: Event) -> None:
+    """Renew a claim while its worker is alive; fail closed if ownership is lost."""
+    while not stop_event.wait(LEASE_HEARTBEAT_SECONDS):
+        try:
+            renewed_at = datetime.now(SAST).isoformat()
+            with database.get_connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                updated = connection.execute(
+                    """
+                    UPDATE maintenance_runs
+                    SET started_at = ?
+                    WHERE run_date = ? AND status = 'RUNNING' AND run_token = ?
+                    """,
+                    (renewed_at, run_date, claim_token),
+                )
+                connection.commit()
+            if updated.rowcount != 1:
+                lost_event.set()
+                return
+        except Exception:
+            # A missed heartbeat is treated as lease loss. Never assume ownership
+            # when the database cannot confirm it.
+            lost_event.set()
+            return
+
+
+def _assert_claim_owned(run_date: str, claim_token: str, lost_event: Event) -> None:
+    """Raise unless this process still owns the current RUNNING claim."""
+    if lost_event.is_set():
+        raise RuntimeError("Maintenance worker lease was lost; stopping safely.")
+    with database.get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT 1 FROM maintenance_runs
+            WHERE run_date = ? AND status = 'RUNNING' AND run_token = ?
+            """,
+            (run_date, claim_token),
+        ).fetchone()
+    if row is None:
+        lost_event.set()
+        raise RuntimeError("Maintenance worker claim was superseded; stopping safely.")
 
 
 def _running_claim_is_stale(started_at: str, now: datetime) -> bool:
@@ -163,13 +208,25 @@ def run_maintenance_for_date(
         / f"candidate-{day_key}-{claim_token}.sqlite3"
     )
     backup_result = None
+    heartbeat_stop = Event()
+    heartbeat_lost = Event()
+    heartbeat_thread = Thread(
+        target=_heartbeat_claim,
+        args=(day_key, claim_token, heartbeat_stop, heartbeat_lost),
+        name=f"taimobot-maintenance-heartbeat-{day_key}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
     try:
+        _assert_claim_owned(day_key, claim_token, heartbeat_lost)
         backup_result = create_verified_backup()
+        _assert_claim_owned(day_key, claim_token, heartbeat_lost)
         restore_result = verify_restore_candidate(
             Path(backup_result["backup_file"]),
             staging_path,
         )
         staging_path.unlink(missing_ok=True)
+        _assert_claim_owned(day_key, claim_token, heartbeat_lost)
 
         # Retention cleanup runs only after a fresh backup and isolated restore
         # candidate have both passed verification. One year is the hard minimum.
@@ -178,6 +235,7 @@ def run_maintenance_for_date(
             retention_days=365,
             dry_run=False,
         )
+        _assert_claim_owned(day_key, claim_token, heartbeat_lost)
         if retention_result.get("status") != "BACKUP_RETENTION_COMPLETE":
             retention_status = str(retention_result.get("status", "UNKNOWN"))
             raise RuntimeError(
@@ -185,6 +243,9 @@ def run_maintenance_for_date(
                 f"(status: {retention_status})."
             )
 
+        _assert_claim_owned(day_key, claim_token, heartbeat_lost)
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=5)
         completed_at = datetime.now(SAST).isoformat()
         with database.get_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -250,6 +311,8 @@ def run_maintenance_for_date(
             "live_database_replaced": False,
         }
     except Exception as error:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=5)
         # A staging-file cleanup failure must not prevent the maintenance
         # failure and audit records from being committed. Preserve both errors
         # so operators can identify the leftover recovery artifact.
