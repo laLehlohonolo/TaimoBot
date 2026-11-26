@@ -7,6 +7,9 @@ from app.market_health import evaluate_market_health
 class MarketHealthEvaluationTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)
+        self.trusted_configuration = {
+            "provider_id": "trusted-xau-feed",
+        }
         self.evidence = {
             "provider_id": "trusted-xau-feed",
             "provider_version": "adapter-1.0.0",
@@ -30,10 +33,11 @@ class MarketHealthEvaluationTests(unittest.TestCase):
             "evidence_id": "evidence-20261126-1200",
         }
 
-    def evaluate(self, evidence=None, trusted="trusted-xau-feed"):
+    def evaluate(self, evidence=None, trusted="trusted-xau-feed", configuration=None):
         return evaluate_market_health(
             self.evidence if evidence is None else evidence,
             trusted_provider_id=trusted,
+            trusted_configuration=self.trusted_configuration if configuration is None else configuration,
             now=self.now,
         )
 
@@ -57,11 +61,14 @@ class MarketHealthEvaluationTests(unittest.TestCase):
     def test_untrusted_provider_is_blocked(self):
         self.assertEqual(self.evaluate(trusted="different-provider")["status"], "BLOCKED")
 
-    def test_unverified_source_mapping_provenance_or_broker_specs_are_blocked(self):
+    def test_provider_cannot_self_assert_source_mapping_or_broker_verification(self):
+        forged = dict(self.evidence, source_verified=True, symbol_mapping_verified=True,
+                      provenance_verified=True, broker_specification_verified=True)
+        self.assertEqual(self.evaluate(forged, configuration=None)["status"], "HEALTHY")
         for field in ("source_verified", "symbol_mapping_verified", "provenance_verified", "broker_specification_verified"):
             with self.subTest(field=field):
-                evidence = dict(self.evidence, **{field: False})
-                self.assertEqual(self.evaluate(evidence)["status"], "BLOCKED")
+                configuration = dict(self.trusted_configuration, **{field: False})
+                self.assertEqual(self.evaluate(self.evidence, configuration=configuration)["status"], "BLOCKED")
 
     def test_unreachable_provider_and_empty_data_are_offline(self):
         unreachable = dict(self.evidence, connectivity_status="DISCONNECTED")
