@@ -56,7 +56,7 @@ def _result(status, reason, checked_at=None, latest_observation_at=None,
 
 
 def evaluate_market_health(evidence=None, trusted_provider_id=None,
-                           expected_instrument="XAUUSD", now=None):
+                           trusted_configuration=None, expected_instrument="XAUUSD", now=None):
     """Map one server-collected provider observation to a conservative status.
 
     trusted_provider_id is server-owned configuration, never request input.
@@ -123,13 +123,22 @@ def evaluate_market_health(evidence=None, trusted_provider_id=None,
                        age_seconds=age_seconds, provider_id=provider_id,
                        provider_version=provider_version, evidence_id=evidence.get("evidence_id"))
 
+    # Verification flags come only from separate server-owned configuration;
+    # the provider payload is never permitted to self-assert its own trust.
+    if (not isinstance(trusted_configuration, dict)
+            or trusted_configuration.get("provider_id") != trusted_provider_id):
+        return _result("BLOCKED", "Trusted provider configuration is missing or mismatched.",
+                       checked_at=checked_at, latest_observation_at=latest,
+                       age_seconds=age_seconds, provider_id=provider_id,
+                       provider_version=provider_version, evidence_id=evidence.get("evidence_id"))
+
     required_verified = (
         "source_verified",
         "symbol_mapping_verified",
         "provenance_verified",
         "broker_specification_verified",
     )
-    if any(evidence.get(field) is not True for field in required_verified):
+    if any(trusted_configuration.get(field) is not True for field in required_verified):
         return _result("BLOCKED", "Source, symbol mapping, provenance, or broker specifications are not verified.",
                        checked_at=checked_at, latest_observation_at=latest,
                        age_seconds=age_seconds, provider_id=provider_id,
