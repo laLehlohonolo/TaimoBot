@@ -755,6 +755,7 @@ export default function App() {
       {error && <div className="notice error" role="alert"><strong>Workspace notice</strong><span>{error}</span></div>}
 
       {verifiedAdmin && <AdminSecurityPanel token={session.access_token} safety={safety} onRefresh={refreshPublicStatus} />}
+      {verifiedAdmin && <AdminLayerHealthPanel token={session.access_token} />}
 
       {!session ? (
         <AuthPanel onAuthenticated={(nextSession, justRegistered) => { setSession(nextSession); setShowWelcome(Boolean(justRegistered)); }} />
