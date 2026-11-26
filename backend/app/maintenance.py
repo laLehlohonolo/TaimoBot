@@ -840,8 +840,33 @@ def create_verified_backup(
             if integrity != "ok":
                 raise RuntimeError(f"Backup integrity check failed: {integrity}")
 
+        # A verified SQLite copy is not durable merely because SQLite closed
+        # it successfully. Flush the file contents before making the final name
+        # visible, then flush the containing directory after the atomic rename.
+        backup_fd = os.open(
+            str(temporary_path),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(backup_fd).st_mode):
+                raise RuntimeError("Temporary backup is not a regular file.")
+            os.fsync(backup_fd)
+        finally:
+            os.close(backup_fd)
+
         temporary_path.replace(final_path)
+
+        directory_fd = os.open(
+            str(destination_dir),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except Exception:
+        # If directory fsync fails after rename, retain the published artifact:
+        # its durability is uncertain and it must be reconciled, not deleted.
         temporary_path.unlink(missing_ok=True)
         raise
     finally:
