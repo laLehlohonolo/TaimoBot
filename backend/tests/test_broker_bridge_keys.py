@@ -386,10 +386,12 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
 
     def test_vault_creation_failure_fails_closed(self):
         manager = FakeSecretManager(fail_create=True)
-        with self.assertRaisesRegex(BridgeKeyProvisioningError, "no key was activated"):
+        with self.assertRaisesRegex(
+            BridgeKeyProvisioningError, "retry with the same operation ID"
+        ):
             provision_bridge_key(
                 "bridge-key-connection", self.admin_id, manager,
-            operation_id="55555555-5555-4555-8555-555555555555",
+                operation_id="99999999-9999-4999-8999-999999999999",
             )
         self.assertEqual(manager.secrets, {})
 
