@@ -156,10 +156,6 @@ def provision_bridge_key(
         result = activate_bridge_key(
             connection_id, secret_ref, created_by=created_by, now=now
         )
-        operation_store.update(
-            operation_id, "ACTIVATED", key_id=result["key_id"]
-        )
-        return result
     except Exception:
         try:
             secret_manager.delete_secret(secret_ref)
@@ -177,6 +173,10 @@ def provision_bridge_key(
         raise BridgeKeyProvisioningError(
             "Bridge key provisioning failed; no key was activated."
         ) from None
-    finally:
-        # Immutable bytes cannot be reliably zeroized in Python; keep scope short.
-        del secret_material
+
+    # If this status write fails after activation, leave the vault secret intact.
+    # A retry finds the committed key by secret_ref and repairs the operation row.
+    operation_store.update(
+        operation_id, "ACTIVATED", key_id=result["key_id"]
+    )
+    return result
