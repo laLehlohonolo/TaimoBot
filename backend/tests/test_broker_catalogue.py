@@ -320,5 +320,158 @@ class BrokerBridgeSecurityTests(unittest.TestCase):
             )
 
 
+
+
+
+class BrokerBridgeEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        from app.broker_bridge_evidence import persist_authenticated_bridge_evidence
+        self.persist = persist_authenticated_bridge_evidence
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_db_path = database.DB_PATH
+        database.DB_PATH = Path(self.temp_dir.name) / "bridge-evidence.db"
+        init_db()
+        first = register_user(
+            "bridge-evidence-one@taimobot.local",
+            "BridgeEvidenceOnePassphrase-2026!",
+        )
+        second = register_user(
+            "bridge-evidence-two@taimobot.local",
+            "BridgeEvidenceTwoPassphrase-2026!",
+        )
+        self.owner_id = first["user_id"]
+        self.other_id = second["user_id"]
+        with database.get_connection() as connection:
+            for connection_id, owner_id in (
+                ("evidence-connection-one", self.owner_id),
+                ("evidence-connection-two", self.other_id),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO participant_broker_connections (
+                        connection_id, participant_user_id, broker_id, platform,
+                        state, created_at, updated_at
+                    ) VALUES (?, ?, 'exness', 'MT5', 'REQUESTED', ?, ?)
+                    """,
+                    (
+                        connection_id, owner_id,
+                        "2026-11-27T10:00:00+00:00",
+                        "2026-11-27T10:00:00+00:00",
+                    ),
+                )
+
+    def tearDown(self):
+        database.DB_PATH = self.original_db_path
+        self.temp_dir.cleanup()
+
+    def test_heartbeat_is_persisted_with_server_bound_owner(self):
+        evidence = {
+            "evidence_id": "heartbeat-00000001",
+            "kind": "HEARTBEAT",
+            "provider_timestamp": "2026-11-27T10:00:00Z",
+        }
+        result = self.persist(
+            "evidence-connection-one", evidence,
+            accepted_at="2026-11-27T10:00:01+00:00",
+        )
+        self.assertEqual(result["status"], "STORED")
+        with database.get_connection() as connection:
+            row = connection.execute(
+                "SELECT participant_user_id, evidence_kind FROM broker_bridge_evidence "
+                "WHERE connection_id = ?",
+                ("evidence-connection-one",),
+            ).fetchone()
+        self.assertEqual(row["participant_user_id"], self.owner_id)
+        self.assertEqual(row["evidence_kind"], "HEARTBEAT")
+
+    def test_quote_is_validated_and_stored_read_only(self):
+        result = self.persist(
+            "evidence-connection-one",
+            {
+                "evidence_id": "quote-0000000001",
+                "kind": "QUOTE",
+                "provider_timestamp": "2026-11-27T10:00:00+00:00",
+                "instrument": "XAUUSD",
+                "server_symbol": "XAUUSD",
+                "bid": 2650.1,
+                "ask": 2650.3,
+            },
+            accepted_at="2026-11-27T10:00:01+00:00",
+        )
+        self.assertEqual(result["status"], "STORED")
+        self.assertFalse(result["live_order_routing"])
+
+    def test_identical_duplicate_is_idempotent_but_conflict_is_rejected(self):
+        evidence = {
+            "evidence_id": "heartbeat-duplicate-01",
+            "kind": "HEARTBEAT",
+            "provider_timestamp": "2026-11-27T10:00:00+00:00",
+        }
+        self.assertEqual(
+            self.persist("evidence-connection-one", evidence)["status"], "STORED"
+        )
+        self.assertEqual(
+            self.persist("evidence-connection-one", evidence)["status"],
+            "DUPLICATE_IGNORED",
+        )
+        changed = {**evidence, "provider_timestamp": "2026-11-27T10:00:02+00:00"}
+        with self.assertRaisesRegex(ValueError, "different content"):
+            self.persist("evidence-connection-one", changed)
+
+    def test_payload_cannot_choose_participant_or_send_credentials(self):
+        evidence = {
+            "evidence_id": "heartbeat-forged-01",
+            "kind": "HEARTBEAT",
+            "provider_timestamp": "2026-11-27T10:00:00+00:00",
+            "participant_user_id": self.other_id,
+        }
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            self.persist("evidence-connection-one", evidence)
+        credential_payload = {
+            "evidence_id": "heartbeat-password-01",
+            "kind": "HEARTBEAT",
+            "provider_timestamp": "2026-11-27T10:00:00+00:00",
+            "password": "not-accepted",
+        }
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            self.persist("evidence-connection-one", credential_payload)
+
+    def test_invalid_quotes_and_naive_timestamps_fail_closed(self):
+        base = {
+            "evidence_id": "quote-invalid-0001",
+            "kind": "QUOTE",
+            "provider_timestamp": "2026-11-27T10:00:00+00:00",
+            "instrument": "XAUUSD",
+            "server_symbol": "XAUUSD",
+            "bid": 2650.3,
+            "ask": 2650.1,
+        }
+        with self.assertRaisesRegex(ValueError, "ask cannot be below bid"):
+            self.persist("evidence-connection-one", base)
+        naive = {
+            "evidence_id": "heartbeat-naive-01",
+            "kind": "HEARTBEAT",
+            "provider_timestamp": "2026-11-27T10:00:00",
+        }
+        with self.assertRaisesRegex(ValueError, "timezone"):
+            self.persist("evidence-connection-one", naive)
+
+    def test_paused_connection_cannot_accept_evidence(self):
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE participant_broker_connections SET state='PAUSED' "
+                "WHERE connection_id='evidence-connection-one'"
+            )
+        with self.assertRaisesRegex(ValueError, "unknown or inactive"):
+            self.persist(
+                "evidence-connection-one",
+                {
+                    "evidence_id": "heartbeat-paused-01",
+                    "kind": "HEARTBEAT",
+                    "provider_timestamp": "2026-11-27T10:00:00+00:00",
+                },
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
