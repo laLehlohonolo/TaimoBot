@@ -9,6 +9,7 @@ import uuid
 from typing import Protocol
 
 from .broker_bridge_keys import activate_bridge_key
+from .database import get_connection
 
 
 class SecretManager(Protocol):
@@ -50,6 +51,26 @@ def provision_bridge_key(
         getattr(secret_manager, "delete_secret", None)
     ):
         raise BridgeKeyProvisioningError("A compatible secret manager is required.")
+
+    # Preflight authorization and connection state before creating vault material.
+    # activate_bridge_key repeats these checks transactionally to close TOCTOU gaps.
+    with get_connection() as connection:
+        actor = connection.execute(
+            "SELECT role, email_verified FROM users WHERE user_id = ?",
+            (created_by,),
+        ).fetchone()
+        broker_connection = connection.execute(
+            "SELECT state FROM participant_broker_connections WHERE connection_id = ?",
+            (connection_id,),
+        ).fetchone()
+    if (
+        actor is None
+        or actor["role"] != "ADMIN"
+        or int(actor["email_verified"]) != 1
+    ):
+        raise BridgeKeyProvisioningError("A verified administrator is required.")
+    if broker_connection is None or broker_connection["state"] != "REQUESTED":
+        raise BridgeKeyProvisioningError("An active broker connection is required.")
 
     secret_material = secrets.token_bytes(32)
     secret_ref = None
