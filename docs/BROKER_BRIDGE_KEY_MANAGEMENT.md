@@ -95,3 +95,12 @@ Provisioning preflights a persisted administrator whose email is verified and a 
 **Not yet implemented:** a production vault adapter, vault access policy, secret retrieval/cache invalidation, provisioning HTTP route, audit event pipeline, or authenticated evidence-ingestion gateway. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
 
 The service does not enable broker connectivity or trading. Broker bridge evidence remains read-only and paper trading remains separate.
+
+
+## Idempotent vault creation and ambiguous timeouts
+
+The provisioning protocol now requires an idempotency key on each secret-creation call. The key is a UUID operation identifier, not secret material. A compliant vault adapter must guarantee that repeated create requests with the same idempotency key resolve to the same secret reference and do not create duplicate secret objects.
+
+The provisioning caller must durably create and persist the operation ID before making the vault request, then reuse that exact ID when retrying after a timeout, lost response, or process restart. The internal orchestration helper accepts this stable `operation_id` and passes it through as the vault idempotency key. If the caller generates a new ID on retry, the vault cannot correlate the attempt and duplicate/orphaned secrets remain possible.
+
+**Current boundary:** the repository defines and tests the idempotency contract, but does not yet implement a durable provisioning-operation table/worker or a production vault adapter. Therefore crash recovery is not yet end-to-end. Do not expose a production provisioning route until durable operation records, adapter-side idempotency/reconciliation, retry policy, and orphan cleanup are implemented and tested.
