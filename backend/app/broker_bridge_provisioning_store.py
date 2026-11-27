@@ -15,7 +15,7 @@ def ensure_schema():
                 connection_id TEXT NOT NULL,
                 created_by TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN (
-                    'PENDING', 'SECRET_CREATED', 'ACTIVATED',
+                    'PENDING', 'SECRET_CREATED', 'ACTIVATING', 'ACTIVATED',
                     'CLEANUP_REQUIRED', 'FAILED'
                 )),
                 secret_ref TEXT UNIQUE,
