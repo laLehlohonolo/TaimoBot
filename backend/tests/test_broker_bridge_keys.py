@@ -12,6 +12,31 @@ from app.broker_bridge_keys import (
     resolve_bridge_key_auth_context,
 )
 from app.database import init_db
+from app.broker_bridge_provisioning import (
+    BridgeKeyProvisioningError,
+    provision_bridge_key,
+)
+
+
+class FakeSecretManager:
+    def __init__(self, *, fail_create=False, fail_delete=False):
+        self.secrets = {}
+        self.deleted = []
+        self.fail_create = fail_create
+        self.fail_delete = fail_delete
+
+    def create_secret(self, *, name, value):
+        if self.fail_create:
+            raise RuntimeError("vault unavailable")
+        ref = "vault://taimobot/test/" + str(len(self.secrets) + 1)
+        self.secrets[ref] = {"name": name, "value": value}
+        return ref
+
+    def delete_secret(self, secret_ref):
+        if self.fail_delete:
+            raise RuntimeError("vault delete unavailable")
+        self.deleted.append(secret_ref)
+        self.secrets.pop(secret_ref, None)
 
 
 class BrokerBridgeKeyMetadataTests(unittest.TestCase):
@@ -189,6 +214,58 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
                 "WHERE connection_id = ?", ("bridge-key-connection",)
             )
         self.assertIsNone(resolve_bridge_key_auth_context(active["key_id"]))
+
+
+    def test_provisioning_generates_256_bit_secret_without_returning_it(self):
+        manager = FakeSecretManager()
+        result = provision_bridge_key(
+            "bridge-key-connection", self.admin_id, manager,
+            now="2026-11-27T12:00:00+00:00",
+        )
+        self.assertEqual(result["status"], "ACTIVE")
+        self.assertNotIn("secret_ref", result)
+        self.assertNotIn("secret_material", result)
+        self.assertEqual(len(manager.secrets), 1)
+        stored = next(iter(manager.secrets.values()))
+        self.assertEqual(len(stored["value"]), 32)
+        self.assertTrue(stored["name"].startswith(
+            "taimobot/broker-bridge/bridge-key-connection/"
+        ))
+
+    def test_provisioning_compensates_when_metadata_activation_fails(self):
+        manager = FakeSecretManager()
+        with self.assertRaisesRegex(BridgeKeyProvisioningError, "no key was activated"):
+            provision_bridge_key(
+                "missing-connection", self.admin_id, manager
+            )
+        self.assertEqual(manager.secrets, {})
+        self.assertEqual(len(manager.deleted), 1)
+
+    def test_provisioning_rejects_participant_and_cleans_created_secret(self):
+        manager = FakeSecretManager()
+        with self.assertRaisesRegex(BridgeKeyProvisioningError, "no key was activated"):
+            provision_bridge_key(
+                "bridge-key-connection", self.participant_id, manager
+            )
+        self.assertEqual(manager.secrets, {})
+        self.assertEqual(len(manager.deleted), 1)
+
+    def test_provisioning_reports_failed_vault_compensation_without_leaking_ref(self):
+        manager = FakeSecretManager(fail_delete=True)
+        with self.assertRaisesRegex(BridgeKeyProvisioningError, "operator cleanup is required") as caught:
+            provision_bridge_key(
+                "missing-connection", self.admin_id, manager
+            )
+        self.assertNotIn("vault://", str(caught.exception))
+        self.assertEqual(len(manager.secrets), 1)
+
+    def test_vault_creation_failure_fails_closed(self):
+        manager = FakeSecretManager(fail_create=True)
+        with self.assertRaisesRegex(BridgeKeyProvisioningError, "no key was activated"):
+            provision_bridge_key(
+                "bridge-key-connection", self.admin_id, manager
+            )
+        self.assertEqual(manager.secrets, {})
 
 
 if __name__ == "__main__":
