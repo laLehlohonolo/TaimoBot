@@ -212,3 +212,18 @@ Added `backend/app/broker_bridge_security.py`:
 The database initializer creates the nonce table after the participant connection table. Added tests for valid HMAC, persistent replay rejection, stale timestamp, wrong signature, raw-body binding, weak key, malformed nonce, and inactive/unknown connection rejection.
 
 This is authentication groundwork only. It does not prove broker provenance, does not connect a terminal, and does not make any broker integration operational. CI for the new head is pending; no pass is claimed.
+
+
+## Read-only evidence persistence boundary (2026-11-27)
+
+Added `backend/app/broker_bridge_evidence.py` and initialized its schema from the normal database setup path.
+
+The persistence boundary accepts only two explicit evidence shapes:
+- `HEARTBEAT`: evidence ID, kind and timezone-aware provider timestamp.
+- `QUOTE`: those fields plus instrument, exact server symbol, bid and ask.
+
+It rejects unknown fields (including participant IDs, passwords, tokens, balances and order instructions), malformed or timezone-naive timestamps, non-finite/non-positive prices, and crossed quotes. Participant ownership is derived from the server-side connection row; it is never accepted from the payload. Only active `REQUESTED` connection intents can persist evidence. The store retains provider time separately from server receive time, scopes records to both participant and connection, and enforces unique evidence IDs per connection. An identical duplicate is ignored idempotently; reuse of an ID with changed content is rejected.
+
+Tests cover owner binding, quote validation, duplicate handling, payload spoofing/credential rejection, malformed timestamps, crossed prices and paused-connection rejection.
+
+This is a persistence primitive, not a public ingestion endpoint. It must only be called after successful bridge authentication. A managed secret vault, per-connection key provisioning/rotation/revocation, HTTP gateway, rate limiting, audit stream, terminal worker and broker session are still outstanding. HMAC authentication does not establish broker provenance. No broker is connected and no instrument is verified by this work.
