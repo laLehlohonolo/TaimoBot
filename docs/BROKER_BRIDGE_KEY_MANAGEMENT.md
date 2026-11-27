@@ -113,10 +113,11 @@ The provisioning caller must durably create and persist the operation ID before 
 Persisted states:
 - `PENDING`: vault result may be unknown; retry only with the same operation ID.
 - `SECRET_CREATED`: opaque vault reference is stored; metadata activation can resume.
+- `ACTIVATING`: one worker holds a five-minute database lease; expired leases can be reclaimed after a crash.
 - `ACTIVATED`: key metadata activation is complete and the key ID is recorded.
 - `CLEANUP_REQUIRED`: vault deletion failed; automatic retry is blocked pending operator reconciliation.
 - `FAILED`: activation failed and the known vault secret was successfully deleted; the operation is terminal.
 
-The service recovers an ambiguous vault timeout by repeating the idempotent create call with the same operation ID. It also detects the crash window where key metadata committed but the operation status update did not, by reconciling the stored vault reference against bridge-key metadata. If the final operation-state write fails after key activation, the vault secret is deliberately not deleted; a retry repairs the operation record.
+An atomic database claim prevents two workers from activating the same operation concurrently. The lease is time-bounded so an interrupted worker does not permanently block recovery. The service recovers an ambiguous vault timeout by repeating the idempotent create call with the same operation ID. It also detects the crash window where key metadata committed but the operation status update did not, by reconciling the stored vault reference against bridge-key metadata. If the final operation-state write fails after key activation, the vault secret is deliberately not deleted; a retry repairs the operation record.
 
 The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no production vault integration, provisioning HTTP endpoint, operator cleanup workflow, or authenticated evidence-ingestion gateway.
