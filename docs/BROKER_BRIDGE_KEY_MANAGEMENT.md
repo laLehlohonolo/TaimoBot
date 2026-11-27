@@ -79,3 +79,19 @@ Enforce at most one ACTIVE key per connection with a database uniqueness constra
 ## Current implementation boundary
 
 The repository currently contains HMAC verification and persistent nonce-consumption primitives, plus participant-scoped heartbeat/quote evidence persistence. It does not yet contain a managed vault adapter, key metadata/provisioning/rotation/revocation service, authenticated HTTP ingestion endpoint, rate limiting, append-only security audit stream, or MT5 bridge client. No broker is connected or verified. Paper trading remains the only trading mode; live order routing remains disabled.
+
+## Vault-neutral provisioning service (implemented)
+
+`backend/app/broker_bridge_provisioning.py` defines a narrow `SecretManager` protocol and an internal orchestration boundary:
+
+1. Generate 256 bits of key material server-side using Python's cryptographic random source.
+2. Ask the injected secret manager to persist the material and return an opaque `vault://` or `secretmanager://` reference.
+3. Activate non-secret database metadata only after secret creation succeeds.
+4. If metadata activation fails, attempt to delete the newly created secret.
+5. If compensation also fails, return a generic operator-cleanup error without disclosing the secret reference or key material.
+
+Provisioning requires a persisted administrator whose email is verified. Ordinary participants, unknown actors and unverified administrators fail closed. The metadata helper independently enforces the same authorization.
+
+**Not yet implemented:** a production vault adapter, vault access policy, secret retrieval/cache invalidation, provisioning HTTP route, audit event pipeline, or authenticated evidence-ingestion gateway. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
+
+The service does not enable broker connectivity or trading. Broker bridge evidence remains read-only and paper trading remains separate.
