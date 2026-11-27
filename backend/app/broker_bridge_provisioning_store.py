@@ -1,8 +1,10 @@
 """Durable state for broker bridge key provisioning operations."""
+from datetime import datetime, timedelta, timezone
+
 from .database import get_connection
 
 
-STATES = ("PENDING", "SECRET_CREATED", "ACTIVATED", "CLEANUP_REQUIRED", "FAILED")
+STATES = ("PENDING", "SECRET_CREATED", "ACTIVATING", "ACTIVATED", "CLEANUP_REQUIRED", "FAILED")
 
 
 def ensure_schema():
@@ -18,6 +20,7 @@ def ensure_schema():
                 )),
                 secret_ref TEXT UNIQUE,
                 key_id TEXT,
+                lease_expires_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_error_code TEXT,
@@ -26,6 +29,15 @@ def ensure_schema():
                 FOREIGN KEY (created_by) REFERENCES users(user_id)
             )
         """)
+        columns = {
+            row["name"] for row in connection.execute(
+                "PRAGMA table_info(broker_bridge_provisioning_operations)"
+            ).fetchall()
+        }
+        if "lease_expires_at" not in columns:
+            connection.execute(
+                "ALTER TABLE broker_bridge_provisioning_operations ADD COLUMN lease_expires_at TEXT"
+            )
 
 
 def load_or_create(operation_id, connection_id, created_by):
@@ -59,11 +71,45 @@ def update(operation_id, status, *, secret_ref=None, key_id=None, error_code=Non
             """UPDATE broker_bridge_provisioning_operations
                SET status = ?, secret_ref = COALESCE(?, secret_ref),
                    key_id = COALESCE(?, key_id), last_error_code = ?,
+                   lease_expires_at = CASE WHEN ? = 'ACTIVATING' THEN lease_expires_at ELSE NULL END,
                    updated_at = CURRENT_TIMESTAMP
                WHERE operation_id = ?""",
-            (status, secret_ref, key_id, error_code, operation_id),
+            (status, secret_ref, key_id, error_code, status, operation_id),
         )
 
+
+
+def claim_activation(operation_id, *, lease_minutes=5):
+    """Atomically claim activation; expired claims can be recovered after crashes."""
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(minutes=lease_minutes)).isoformat()
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """SELECT status, lease_expires_at
+               FROM broker_bridge_provisioning_operations
+               WHERE operation_id = ?""",
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        reclaimable = row["status"] == "SECRET_CREATED"
+        if row["status"] == "ACTIVATING" and row["lease_expires_at"]:
+            try:
+                prior_expiry = datetime.fromisoformat(row["lease_expires_at"])
+                reclaimable = prior_expiry <= now
+            except ValueError:
+                reclaimable = True
+        if not reclaimable:
+            return False
+        connection.execute(
+            """UPDATE broker_bridge_provisioning_operations
+               SET status = 'ACTIVATING', lease_expires_at = ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE operation_id = ?""",
+            (expires, operation_id),
+        )
+    return True
 
 def key_metadata(operation_id, connection_id):
     with get_connection() as connection:
