@@ -25,12 +25,16 @@ class FakeSecretManager:
         self.fail_create = fail_create
         self.fail_delete = fail_delete
         self.on_create = on_create
+        self.idempotency = {}
 
-    def create_secret(self, *, name, value):
+    def create_secret(self, *, name, value, idempotency_key):
         if self.fail_create:
             raise RuntimeError("vault unavailable")
+        if idempotency_key in self.idempotency:
+            return self.idempotency[idempotency_key]
         ref = "vault://taimobot/test/" + str(len(self.secrets) + 1)
         self.secrets[ref] = {"name": name, "value": value}
+        self.idempotency[idempotency_key] = ref
         if self.on_create is not None:
             self.on_create()
         return ref
@@ -86,6 +90,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
             "bridge-key-connection", "vault://taimobot/bridge/key-one",
             created_by=self.admin_id,
             now="2026-11-27T12:00:00+00:00",
+            operation_id="11111111-1111-4111-8111-111111111111",
         )
         self.assertEqual(result["status"], "ACTIVE")
         self.assertFalse(result["secret_material_returned"])
@@ -231,9 +236,33 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
         self.assertEqual(len(manager.secrets), 1)
         stored = next(iter(manager.secrets.values()))
         self.assertEqual(len(stored["value"]), 32)
-        self.assertTrue(stored["name"].startswith(
-            "taimobot/broker-bridge/bridge-key-connection/"
-        ))
+        self.assertEqual(
+            stored["name"],
+            "taimobot/broker-bridge/bridge-key-connection/11111111-1111-4111-8111-111111111111",
+        )
+        self.assertIn("11111111-1111-4111-8111-111111111111", manager.idempotency)
+
+    def test_provisioning_requires_valid_operation_id(self):
+        manager = FakeSecretManager()
+        with self.assertRaisesRegex(BridgeKeyProvisioningError, "operation ID"):
+            provision_bridge_key(
+                "bridge-key-connection", self.admin_id, manager,
+                operation_id="not-a-uuid",
+            )
+        self.assertEqual(manager.secrets, {})
+
+    def test_fake_secret_manager_reuses_reference_for_same_idempotency_key(self):
+        manager = FakeSecretManager()
+        first = manager.create_secret(
+            name="taimobot/test/one", value=b"a" * 32,
+            idempotency_key="22222222-2222-4222-8222-222222222222",
+        )
+        second = manager.create_secret(
+            name="taimobot/test/retry", value=b"a" * 32,
+            idempotency_key="22222222-2222-4222-8222-222222222222",
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(len(manager.secrets), 1)
 
     def test_provisioning_compensates_if_connection_is_paused_during_vault_write(self):
         def pause_connection():
