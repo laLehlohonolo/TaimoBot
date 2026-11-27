@@ -40,8 +40,8 @@ def provision_bridge_key(
     created_by: str,
     secret_manager: SecretManager,
     *,
+    operation_id: str,
     now: str | None = None,
-    operation_id: str | None = None,
 ) -> dict:
     """Create vault material, then activate metadata; compensate on DB failure.
 
@@ -54,7 +54,6 @@ def provision_bridge_key(
         raise BridgeKeyProvisioningError("A valid broker connection is required.")
     if not isinstance(created_by, str) or not created_by:
         raise BridgeKeyProvisioningError("A verified administrator is required.")
-    operation_id = operation_id or str(uuid.uuid4())
     try:
         operation_id = str(uuid.UUID(operation_id))
     except (AttributeError, TypeError, ValueError):
