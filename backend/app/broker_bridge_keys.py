@@ -178,3 +178,34 @@ def get_active_bridge_key_metadata(connection_id):
     if row is None or row["connection_state"] != "REQUESTED":
         return None
     return dict(row)
+
+def resolve_bridge_key_auth_context(key_id):
+    """Resolve an active key to server-owned connection and vault metadata.
+
+    Internal gateway use only. Never expose this result from a participant API:
+    it includes the opaque secret-manager reference, not secret material.
+    """
+    if not isinstance(key_id, str) or not key_id:
+        return None
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT k.key_id, k.connection_id, k.secret_ref, k.status,
+                   c.participant_user_id, c.state AS connection_state
+            FROM broker_bridge_keys k
+            JOIN participant_broker_connections c
+              ON c.connection_id = k.connection_id
+            WHERE k.key_id = ?
+            """,
+            (key_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    if row["status"] != "ACTIVE" or row["connection_state"] != "REQUESTED":
+        return None
+    return {
+        "key_id": row["key_id"],
+        "connection_id": row["connection_id"],
+        "participant_user_id": row["participant_user_id"],
+        "secret_ref": row["secret_ref"],
+    }
