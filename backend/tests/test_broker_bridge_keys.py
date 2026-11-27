@@ -19,17 +19,20 @@ from app.broker_bridge_provisioning import (
 
 
 class FakeSecretManager:
-    def __init__(self, *, fail_create=False, fail_delete=False):
+    def __init__(self, *, fail_create=False, fail_delete=False, on_create=None):
         self.secrets = {}
         self.deleted = []
         self.fail_create = fail_create
         self.fail_delete = fail_delete
+        self.on_create = on_create
 
     def create_secret(self, *, name, value):
         if self.fail_create:
             raise RuntimeError("vault unavailable")
         ref = "vault://taimobot/test/" + str(len(self.secrets) + 1)
         self.secrets[ref] = {"name": name, "value": value}
+        if self.on_create is not None:
+            self.on_create()
         return ref
 
     def delete_secret(self, secret_ref):
@@ -232,29 +235,43 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
             "taimobot/broker-bridge/bridge-key-connection/"
         ))
 
-    def test_provisioning_compensates_when_metadata_activation_fails(self):
-        manager = FakeSecretManager()
+    def test_provisioning_compensates_if_connection_is_paused_during_vault_write(self):
+        def pause_connection():
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE participant_broker_connections SET state='PAUSED' "
+                    "WHERE connection_id = ?", ("bridge-key-connection",)
+                )
+
+        manager = FakeSecretManager(on_create=pause_connection)
         with self.assertRaisesRegex(BridgeKeyProvisioningError, "no key was activated"):
             provision_bridge_key(
-                "missing-connection", self.admin_id, manager
+                "bridge-key-connection", self.admin_id, manager
             )
         self.assertEqual(manager.secrets, {})
         self.assertEqual(len(manager.deleted), 1)
 
-    def test_provisioning_rejects_participant_and_cleans_created_secret(self):
+    def test_provisioning_rejects_participant_before_vault_write(self):
         manager = FakeSecretManager()
-        with self.assertRaisesRegex(BridgeKeyProvisioningError, "no key was activated"):
+        with self.assertRaisesRegex(BridgeKeyProvisioningError, "verified administrator"):
             provision_bridge_key(
                 "bridge-key-connection", self.participant_id, manager
             )
         self.assertEqual(manager.secrets, {})
-        self.assertEqual(len(manager.deleted), 1)
+        self.assertEqual(manager.deleted, [])
 
     def test_provisioning_reports_failed_vault_compensation_without_leaking_ref(self):
-        manager = FakeSecretManager(fail_delete=True)
+        def pause_connection():
+            with database.get_connection() as connection:
+                connection.execute(
+                    "UPDATE participant_broker_connections SET state='PAUSED' "
+                    "WHERE connection_id = ?", ("bridge-key-connection",)
+                )
+
+        manager = FakeSecretManager(fail_delete=True, on_create=pause_connection)
         with self.assertRaisesRegex(BridgeKeyProvisioningError, "operator cleanup is required") as caught:
             provision_bridge_key(
-                "missing-connection", self.admin_id, manager
+                "bridge-key-connection", self.admin_id, manager
             )
         self.assertNotIn("vault://", str(caught.exception))
         self.assertEqual(len(manager.secrets), 1)
