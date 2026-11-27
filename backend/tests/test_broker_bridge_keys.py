@@ -9,6 +9,7 @@ from app.broker_bridge_keys import (
     activate_bridge_key,
     get_active_bridge_key_metadata,
     revoke_bridge_key,
+    resolve_bridge_key_auth_context,
 )
 from app.database import init_db
 
@@ -120,6 +121,37 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
                 "bridge-key-connection", "vault://taimobot/bridge/key-four",
                 created_by="not-a-real-user",
             )
+
+    def test_auth_context_is_server_resolved_and_never_returns_key_bytes(self):
+        key = activate_bridge_key(
+            "bridge-key-connection", "vault://taimobot/bridge/key-auth-context"
+        )
+        context = resolve_bridge_key_auth_context(key["key_id"])
+        self.assertEqual(context["connection_id"], "bridge-key-connection")
+        self.assertEqual(context["participant_user_id"], self.participant_id)
+        self.assertEqual(
+            context["secret_ref"], "vault://taimobot/bridge/key-auth-context"
+        )
+        self.assertNotIn("secret", context)
+        self.assertNotIn("shared_secret", context)
+
+    def test_auth_context_rejects_unknown_revoked_and_paused_keys(self):
+        key = activate_bridge_key(
+            "bridge-key-connection", "vault://taimobot/bridge/key-auth-context-two"
+        )
+        self.assertIsNone(resolve_bridge_key_auth_context("unknown-key-id"))
+        self.assertTrue(revoke_bridge_key("bridge-key-connection", key["key_id"]))
+        self.assertIsNone(resolve_bridge_key_auth_context(key["key_id"]))
+
+        active = activate_bridge_key(
+            "bridge-key-connection", "vault://taimobot/bridge/key-auth-context-three"
+        )
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE participant_broker_connections SET state='PAUSED' "
+                "WHERE connection_id = ?", ("bridge-key-connection",)
+            )
+        self.assertIsNone(resolve_bridge_key_auth_context(active["key_id"]))
 
 
 if __name__ == "__main__":
