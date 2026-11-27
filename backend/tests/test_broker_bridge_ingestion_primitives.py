@@ -36,6 +36,8 @@ class BrokerBridgeIngestionPrimitiveTests(unittest.TestCase):
         self.owner_two = second["user_id"]
         self.connection_one = "bridge-ingestion-connection-one"
         self.connection_two = "bridge-ingestion-connection-two"
+        self.key_one = "bridge-ingestion-key-one"
+        self.key_two = "bridge-ingestion-key-two"
         self.secret = b"test-only-bridge-secret-material-32-bytes-minimum"
         with database.get_connection() as connection:
             for connection_id, owner_id in (
@@ -55,24 +57,49 @@ class BrokerBridgeIngestionPrimitiveTests(unittest.TestCase):
                         "2026-11-27T10:00:00+00:00",
                     ),
                 )
+            for key_id, connection_id, suffix in (
+                (self.key_one, self.connection_one, "one"),
+                (self.key_two, self.connection_two, "two"),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO broker_bridge_keys (
+                        key_id, connection_id, secret_ref, status,
+                        rotation_sequence, created_at, activated_at
+                    ) VALUES (?, ?, ?, 'ACTIVE', 1, ?, ?)
+                    """,
+                    (
+                        key_id, connection_id, f"vault://test/bridge/{suffix}",
+                        "2026-11-27T10:00:00+00:00",
+                        "2026-11-27T10:00:00+00:00",
+                    ),
+                )
 
     def tearDown(self):
         database.DB_PATH = self.original_db_path
         self.temp_dir.cleanup()
 
-    def _authenticate(self, connection_id, nonce, *, timestamp="1800000000", body=b'{"kind":"HEARTBEAT"}'):
+    def _authenticate(
+        self, connection_id, nonce, *,
+        timestamp="1800000000", body=b'{"kind":"HEARTBEAT"}',
+        key_id=None,
+    ):
+        selected_key = key_id or (
+            self.key_two if connection_id == self.connection_two else self.key_one
+        )
         signature = sign_bridge_message(
             connection_id, timestamp, nonce, body, self.secret
         )
         return authenticate_bridge_request(
             connection_id, timestamp, nonce, signature, body, self.secret,
-            now=1_800_000_000,
+            key_id=selected_key, now=1_800_000_000,
         )
 
     def test_valid_signature_is_accepted_without_order_capability(self):
         result = self._authenticate(self.connection_one, "nonce-valid-000001")
         self.assertTrue(result["authenticated"])
         self.assertEqual(result["connection_id"], self.connection_one)
+        self.assertEqual(result["key_id"], self.key_one)
         self.assertEqual(result["replay_protection"], "PERSISTENT")
         self.assertFalse(result["live_order_routing"])
 
@@ -86,16 +113,18 @@ class BrokerBridgeIngestionPrimitiveTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeAuthenticationError, "signature is invalid"):
             authenticate_bridge_request(
                 self.connection_one, timestamp, nonce, signature,
-                b'{"kind":"QUOTE"}', self.secret, now=1_800_000_000,
+                b'{"kind":"QUOTE"}', self.secret,
+                key_id=self.key_one, now=1_800_000_000,
             )
+        wrong_nonce = "nonce-wrong-secret-0001"
         with self.assertRaisesRegex(BridgeAuthenticationError, "signature is invalid"):
             authenticate_bridge_request(
-                self.connection_one, timestamp, "nonce-wrong-secret-0001",
+                self.connection_one, timestamp, wrong_nonce,
                 sign_bridge_message(
-                    self.connection_one, timestamp, "nonce-wrong-secret-0001",
+                    self.connection_one, timestamp, wrong_nonce,
                     body, self.secret,
                 ),
-                body, b"x" * 32, now=1_800_000_000,
+                body, b"x" * 32, key_id=self.key_one, now=1_800_000_000,
             )
 
     def test_stale_timestamp_is_rejected_before_nonce_consumption(self):
@@ -108,7 +137,7 @@ class BrokerBridgeIngestionPrimitiveTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeAuthenticationError, "timestamp"):
             authenticate_bridge_request(
                 self.connection_one, timestamp, nonce, signature, body,
-                self.secret, now=1_800_000_000,
+                self.secret, key_id=self.key_one, now=1_800_000_000,
             )
         with database.get_connection() as connection:
             count = connection.execute(
@@ -125,6 +154,7 @@ class BrokerBridgeIngestionPrimitiveTests(unittest.TestCase):
 
     def test_concurrent_replay_allows_exactly_one_request(self):
         nonce = "nonce-concurrent-000001"
+
         def attempt():
             try:
                 self._authenticate(self.connection_one, nonce)
@@ -147,6 +177,39 @@ class BrokerBridgeIngestionPrimitiveTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(BridgeAuthenticationError, "unknown or inactive"):
             self._authenticate(self.connection_one, "nonce-paused-000001")
+
+    def test_key_must_belong_to_the_connection_being_authenticated(self):
+        with self.assertRaisesRegex(BridgeAuthenticationError, "unknown or inactive"):
+            self._authenticate(
+                self.connection_one, "nonce-cross-key-000001", key_id=self.key_two
+            )
+
+    def test_revoked_or_rotated_key_is_rejected_after_secret_was_loaded(self):
+        # Simulate a request that fetched the old secret immediately before rotation.
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE broker_bridge_keys SET status='REVOKED', revoked_at=? WHERE key_id=?",
+                ("2026-11-27T11:00:00+00:00", self.key_one),
+            )
+            connection.execute(
+                """
+                INSERT INTO broker_bridge_keys (
+                    key_id, connection_id, secret_ref, status,
+                    rotation_sequence, created_at, activated_at
+                ) VALUES (?, ?, ?, 'ACTIVE', 2, ?, ?)
+                """,
+                (
+                    "bridge-ingestion-key-one-rotated", self.connection_one,
+                    "vault://test/bridge/one-rotated",
+                    "2026-11-27T11:00:00+00:00",
+                    "2026-11-27T11:00:00+00:00",
+                ),
+            )
+        with self.assertRaisesRegex(BridgeAuthenticationError, "unknown or inactive"):
+            self._authenticate(
+                self.connection_one, "nonce-old-key-after-rotation",
+                key_id=self.key_one,
+            )
 
     def test_evidence_ownership_is_derived_from_connection_record(self):
         evidence = {
@@ -210,7 +273,7 @@ class BrokerBridgeIngestionPrimitiveTests(unittest.TestCase):
                         self.connection_one, {**base, **changes}
                     )
 
-    def test_paused_connection_cannot_persist_evidence(self):
+    def test_revoked_connection_cannot_persist_evidence(self):
         with database.get_connection() as connection:
             connection.execute(
                 "UPDATE participant_broker_connections SET state='REVOKED' WHERE connection_id = ?",
