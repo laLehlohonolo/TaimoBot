@@ -5,14 +5,14 @@ from pathlib import Path
 from app import database
 from app.auth import register_user
 from app.broker_bridge_keys import (
-    BridgeKeyMetadataError,
+    BridgeKeyMetadataError,\n    BridgeKeyActivationLeaseError,
     activate_bridge_key,
     get_active_bridge_key_metadata,
     revoke_bridge_key,
     resolve_bridge_key_auth_context,
 )
 from app.database import init_db
-from app.broker_bridge_provisioning import (
+from app import broker_bridge_provisioning_store as operation_store\nfrom app.broker_bridge_provisioning import (
     BridgeKeyProvisioningError,
     provision_bridge_key,
 )
