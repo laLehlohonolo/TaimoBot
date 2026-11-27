@@ -1,8 +1,7 @@
 """Non-secret metadata lifecycle for per-connection broker bridge keys.
 
-Secret material is owned by an external secret manager. This module accepts
-only opaque secret references and never generates, stores, or returns key bytes.
-It is not an HTTP provisioning endpoint or a vault adapter.
+Provisioned activations require a live fencing token. Direct metadata activation
+remains available only for the existing internal/manual rotation workflow.
 """
 import re
 import uuid
@@ -16,6 +15,10 @@ _SECRET_REF_PATTERN = re.compile(r"^[A-Za-z0-9._:/-]{8,240}$")
 
 class BridgeKeyMetadataError(ValueError):
     """Raised when key metadata cannot be safely created or changed."""
+
+
+class BridgeKeyActivationLeaseError(BridgeKeyMetadataError):
+    """Raised when an activation worker no longer owns a live lease."""
 
 
 def ensure_bridge_key_schema(connection):
@@ -66,15 +69,16 @@ def _validate_secret_ref(secret_ref):
         raise BridgeKeyMetadataError("Secret material must never be supplied as metadata.")
 
 
-def activate_bridge_key(connection_id, secret_ref, *, created_by=None, now=None):
-    """Activate a new key reference, revoking the prior key atomically.
-
-    The caller must create the secret in the managed vault first. On failure,
-    the caller must delete that unused vault secret as compensation.
-    """
+def activate_bridge_key(
+    connection_id, secret_ref, *, created_by=None, now=None,
+    operation_id=None, activation_token=None,
+):
+    """Activate key metadata and, for provisioning, complete its operation atomically."""
     if not isinstance(connection_id, str) or not connection_id:
         raise BridgeKeyMetadataError("A connection ID is required.")
     _validate_secret_ref(secret_ref)
+    if (operation_id is None) != (activation_token is None):
+        raise BridgeKeyMetadataError("Both provisioning operation ID and activation token are required.")
     timestamp = now or datetime.now(timezone.utc).isoformat()
     try:
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -87,6 +91,32 @@ def activate_bridge_key(connection_id, secret_ref, *, created_by=None, now=None)
 
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if operation_id is not None:
+            lease = connection.execute(
+                """SELECT status, activation_token, lease_expires_at, secret_ref,
+                          connection_id, created_by
+                   FROM broker_bridge_provisioning_operations
+                   WHERE operation_id = ?""",
+                (operation_id,),
+            ).fetchone()
+            try:
+                lease_expiry = datetime.fromisoformat(
+                    lease["lease_expires_at"].replace("Z", "+00:00")
+                ) if lease and lease["lease_expires_at"] else None
+            except ValueError:
+                lease_expiry = None
+            if (
+                lease is None or lease["status"] != "ACTIVATING"
+                or lease["activation_token"] != activation_token
+                or lease["connection_id"] != connection_id
+                or lease["created_by"] != created_by
+                or lease["secret_ref"] != secret_ref
+                or lease_expiry is None or lease_expiry.tzinfo is None
+                or lease_expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc)
+            ):
+                raise BridgeKeyActivationLeaseError(
+                    "Activation lease is no longer owned by this worker."
+                )
         owner = connection.execute(
             "SELECT state FROM participant_broker_connections WHERE connection_id = ?",
             (connection_id,),
@@ -132,6 +162,20 @@ def activate_bridge_key(connection_id, secret_ref, *, created_by=None, now=None)
             """,
             (key_id, connection_id, secret_ref, sequence, timestamp, timestamp, created_by),
         )
+        if operation_id is not None:
+            completed = connection.execute(
+                """UPDATE broker_bridge_provisioning_operations
+                   SET status = 'ACTIVATED', key_id = ?, lease_expires_at = NULL,
+                       activation_token = NULL, last_error_code = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE operation_id = ? AND status = 'ACTIVATING'
+                     AND activation_token = ?""",
+                (key_id, operation_id, activation_token),
+            )
+            if completed.rowcount != 1:
+                raise BridgeKeyActivationLeaseError(
+                    "Activation lease changed before metadata could be committed."
+                )
     return {
         "key_id": key_id,
         "connection_id": connection_id,
@@ -187,12 +231,9 @@ def get_active_bridge_key_metadata(connection_id):
         return None
     return dict(row)
 
-def resolve_bridge_key_auth_context(key_id):
-    """Resolve an active key to server-owned connection and vault metadata.
 
-    Internal gateway use only. Never expose this result from a participant API:
-    it includes the opaque secret-manager reference, not secret material.
-    """
+def resolve_bridge_key_auth_context(key_id):
+    """Resolve an active key to server-owned connection and vault metadata."""
     if not isinstance(key_id, str) or not key_id:
         return None
     with get_connection() as connection:
