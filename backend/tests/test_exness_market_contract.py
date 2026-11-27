@@ -79,7 +79,7 @@ class ExnessMarketContractTests(unittest.TestCase):
             expected_server_symbol="XAUUSD",
             received_at=self.now,
         )
-        self.assertEqual(result["spread"], 0.15)
+        self.assertAlmostEqual(result["spread"], 0.15)
         self.assertEqual(result["evidence_id"], "exness:XAUUSD:1795773600000")
         self.assertEqual(result["verification_status"], "UNVERIFIED_PENDING_REVIEW")
         self.assertFalse(result["execution_eligible"])
