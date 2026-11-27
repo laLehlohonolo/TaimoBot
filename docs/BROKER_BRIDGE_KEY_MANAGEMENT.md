@@ -104,3 +104,19 @@ The provisioning protocol now requires an idempotency key on each secret-creatio
 The provisioning caller must durably create and persist the operation ID before making the vault request, then reuse that exact ID when retrying after a timeout, lost response, or process restart. The internal orchestration helper accepts this stable `operation_id` and passes it through as the vault idempotency key. If the caller generates a new ID on retry, the vault cannot correlate the attempt and duplicate/orphaned secrets remain possible.
 
 **Current boundary:** the repository defines and tests the idempotency contract, but does not yet implement a durable provisioning-operation table/worker or a production vault adapter. Therefore crash recovery is not yet end-to-end. Do not expose a production provisioning route until durable operation records, adapter-side idempotency/reconciliation, retry policy, and orphan cleanup are implemented and tested.
+
+
+## Durable provisioning operation registry (implemented)
+
+`backend/app/broker_bridge_provisioning_store.py` persists an operation record before the vault is called. The operation ID is a UUID and is bound immutably to the connection and verified administrator. Reusing it with a different actor or connection is rejected.
+
+Persisted states:
+- `PENDING`: vault result may be unknown; retry only with the same operation ID.
+- `SECRET_CREATED`: opaque vault reference is stored; metadata activation can resume.
+- `ACTIVATED`: key metadata activation is complete and the key ID is recorded.
+- `CLEANUP_REQUIRED`: vault deletion failed; automatic retry is blocked pending operator reconciliation.
+- `FAILED`: activation failed and the known vault secret was successfully deleted; the operation is terminal.
+
+The service recovers an ambiguous vault timeout by repeating the idempotent create call with the same operation ID. It also detects the crash window where key metadata committed but the operation status update did not, by reconciling the stored vault reference against bridge-key metadata. If the final operation-state write fails after key activation, the vault secret is deliberately not deleted; a retry repairs the operation record.
+
+The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no production vault integration, provisioning HTTP endpoint, operator cleanup workflow, or authenticated evidence-ingestion gateway.
