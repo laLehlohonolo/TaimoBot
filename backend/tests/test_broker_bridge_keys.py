@@ -286,11 +286,23 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
             "bridge-key-connection", self.admin_id, manager,
             operation_id=operation_id,
         )
+        with database.get_connection() as connection:
+            connection.execute(
+                """INSERT INTO participant_broker_connections (
+                    connection_id, participant_user_id, broker_id, platform,
+                    state, created_at, updated_at
+                ) VALUES (?, ?, 'avatrade', 'MT5', 'REQUESTED', ?, ?)""",
+                (
+                    "another-bridge-connection", self.participant_id,
+                    "2026-11-27T10:00:00+00:00",
+                    "2026-11-27T10:00:00+00:00",
+                ),
+            )
         with self.assertRaisesRegex(
             BridgeKeyProvisioningError, "original connection and actor"
         ):
             provision_bridge_key(
-                "bridge-key-connection", self.participant_id, manager,
+                "another-bridge-connection", self.admin_id, manager,
                 operation_id=operation_id,
             )
 
