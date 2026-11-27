@@ -1000,6 +1000,8 @@ def init_db():
         ensure_session_calendar_schema(connection)
         from .tssi import ensure_tssi_schema
         ensure_tssi_schema(connection)
+        from .broker_connections import ensure_broker_connection_schema
+        ensure_broker_connection_schema(connection)
 
         migrate_trade_columns(connection)
         migrate_trade_cost_ledger(connection)
