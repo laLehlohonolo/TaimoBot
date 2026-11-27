@@ -1,4 +1,4 @@
-"""Vault-neutral broker bridge key provisioning orchestration."""
+"""Vault-neutral broker bridge key provisioning orchestration.\n\nThis module defines a narrow production secret-manager contract but ships no\ncloud-vault adapter or HTTP endpoint. Secret bytes are generated server-side\nand never returned.\n"""
 import secrets
 import uuid
 from typing import Protocol
@@ -35,7 +35,7 @@ def provision_bridge_key(
     operation_id: str,
     now: str | None = None,
 ) -> dict:
-    """Create vault material, then activate metadata under a fenced lease."""
+    """Create vault material, then activate metadata under a fenced lease.\n\n    A production adapter must provide encrypted, private, auditable, idempotent\n    secret storage. Operation completion is committed atomically with key\n    metadata, and stale workers cannot perform compensation or overwrite state.\n    """
     if not isinstance(connection_id, str) or not connection_id:
         raise BridgeKeyProvisioningError("A valid broker connection is required.")
     if not isinstance(created_by, str) or not created_by:
