@@ -1002,6 +1002,8 @@ def init_db():
         ensure_tssi_schema(connection)
         from .broker_connections import ensure_broker_connection_schema
         ensure_broker_connection_schema(connection)
+        from .broker_bridge_security import ensure_bridge_security_schema
+        ensure_bridge_security_schema(connection)
 
         migrate_trade_columns(connection)
         migrate_trade_cost_ledger(connection)
