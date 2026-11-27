@@ -15,8 +15,14 @@ from .database import get_connection
 class SecretManager(Protocol):
     """Minimal secret-manager contract; implementations must encrypt at rest."""
 
-    def create_secret(self, *, name: str, value: bytes) -> str:
-        """Persist secret bytes and return an opaque vault:// or secretmanager:// ref."""
+    def create_secret(
+        self, *, name: str, value: bytes, idempotency_key: str
+    ) -> str:
+        """Persist secret bytes idempotently and return an opaque vault reference.
+
+        Repeating a call with the same idempotency key must return the same
+        secret reference and must never create a second secret.
+        """
         ...
 
     def delete_secret(self, secret_ref: str) -> None:
@@ -34,6 +40,7 @@ def provision_bridge_key(
     secret_manager: SecretManager,
     *,
     now: str | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     """Create vault material, then activate metadata; compensate on DB failure.
 
@@ -47,6 +54,13 @@ def provision_bridge_key(
         raise BridgeKeyProvisioningError("A valid broker connection is required.")
     if not isinstance(created_by, str) or not created_by:
         raise BridgeKeyProvisioningError("A verified administrator is required.")
+    # Callers that need crash/retry recovery must persist this operation ID
+    # before invoking the vault and pass the same ID on every retry.
+    operation_id = operation_id or str(uuid.uuid4())
+    try:
+        operation_id = str(uuid.UUID(operation_id))
+    except (AttributeError, TypeError, ValueError):
+        raise BridgeKeyProvisioningError("A valid provisioning operation ID is required.") from None
     if not callable(getattr(secret_manager, "create_secret", None)) or not callable(
         getattr(secret_manager, "delete_secret", None)
     ):
@@ -76,8 +90,9 @@ def provision_bridge_key(
     secret_ref = None
     try:
         secret_ref = secret_manager.create_secret(
-            name=f"taimobot/broker-bridge/{connection_id}/{uuid.uuid4().hex}",
+            name=f"taimobot/broker-bridge/{connection_id}/{operation_id}",
             value=secret_material,
+            idempotency_key=operation_id,
         )
         return activate_bridge_key(
             connection_id,
