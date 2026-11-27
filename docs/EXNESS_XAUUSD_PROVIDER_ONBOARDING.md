@@ -84,3 +84,16 @@ Do not set any Market trust flag to true merely because Exness was selected. Eac
 ## Current status
 
 **Selected candidate: Exness.** **Fallback: IC Markets.** No Exness demo account has been connected or inspected by this implementation. No XAUUSD feed, symbol mapping, broker specification, legal account entity or adapter is yet verified. No Market health promotion or execution permission is granted.
+
+
+## Read-only MT5 normalization contract (2026-11-27)
+
+Added `backend/app/exness_market_contract.py` with a provider-specific normalization boundary for data collected by a separately controlled MT5 bridge:
+
+- Symbol metadata is accepted only when the server symbol exactly matches an explicitly configured expected symbol; suffixes are never guessed.
+- Contract size, point, tick size/value, volume min/max/step, stop/freeze levels, calculation mode and digits are validated before normalization.
+- Quotes require finite positive bid/ask values, ask not below bid, a positive integer millisecond provider timestamp and a timezone-aware service receive time.
+- Provider time and service receive time are retained separately; evidence IDs are deterministic for a symbol/tick timestamp.
+- Every normalized record remains `UNVERIFIED_PENDING_REVIEW` and `execution_eligible=false`.
+
+Focused tests are in `backend/tests/test_exness_market_contract.py`. This is a pure validation/normalization module, not an MT5 connection, authenticated evidence adapter, durable observation store or broker verification. It has no order methods and does not ingest credentials. The next gate is to run CI, then implement and security-test an authenticated read-only evidence handoff only after the actual demo server/account environment is available.
