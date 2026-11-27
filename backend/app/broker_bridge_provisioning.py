@@ -150,6 +150,11 @@ def provision_bridge_key(
         if recovered is not None:
             return recovered
 
+    if not operation_store.claim_activation(operation_id):
+        raise BridgeKeyProvisioningError(
+            "Provisioning activation is already in progress; retry with the same operation ID."
+        )
+
     try:
         result = activate_bridge_key(
             connection_id, secret_ref, created_by=created_by, now=now
