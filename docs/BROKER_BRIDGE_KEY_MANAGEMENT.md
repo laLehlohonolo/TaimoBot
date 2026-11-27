@@ -90,7 +90,7 @@ The repository currently contains HMAC verification and persistent nonce-consump
 4. If metadata activation fails, attempt to delete the newly created secret.
 5. If compensation also fails, return a generic operator-cleanup error without disclosing the secret reference or key material.
 
-Provisioning requires a persisted administrator whose email is verified. Ordinary participants, unknown actors and unverified administrators fail closed. The metadata helper independently enforces the same authorization.
+Provisioning preflights a persisted administrator whose email is verified and a REQUESTED connection before any vault write. Ordinary participants, unknown actors, paused/revoked connections and unknown connections fail closed. The metadata helper independently repeats authorization and connection-state checks transactionally, closing the time-of-check/time-of-use gap; a state change during vault creation triggers compensation.
 
 **Not yet implemented:** a production vault adapter, vault access policy, secret retrieval/cache invalidation, provisioning HTTP route, audit event pipeline, or authenticated evidence-ingestion gateway. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
 
