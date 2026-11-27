@@ -93,12 +93,20 @@ def activate_bridge_key(connection_id, secret_ref, *, created_by=None, now=None)
         ).fetchone()
         if owner is None or owner["state"] != "REQUESTED":
             raise BridgeKeyMetadataError("Only an active requested connection can receive a key.")
-        if created_by is not None:
-            actor = connection.execute(
-                "SELECT 1 FROM users WHERE user_id = ?", (created_by,)
-            ).fetchone()
-            if actor is None:
-                raise BridgeKeyMetadataError("Key provisioning actor is unknown.")
+        if not isinstance(created_by, str) or not created_by:
+            raise BridgeKeyMetadataError("A verified administrator must provision bridge keys.")
+        actor = connection.execute(
+            "SELECT role, email_verified FROM users WHERE user_id = ?",
+            (created_by,),
+        ).fetchone()
+        if (
+            actor is None
+            or actor["role"] != "ADMIN"
+            or int(actor["email_verified"]) != 1
+        ):
+            raise BridgeKeyMetadataError(
+                "Only a verified administrator may provision bridge keys."
+            )
         latest = connection.execute(
             """
             SELECT COALESCE(MAX(rotation_sequence), 0) AS sequence
