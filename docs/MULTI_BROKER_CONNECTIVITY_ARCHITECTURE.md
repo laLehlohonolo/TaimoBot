@@ -173,10 +173,11 @@ Any future live order routing requires a separate explicit product decision, leg
 - Participant-scoped broker connection-intent lifecycle: implemented (create, list, pause, resume, revoke), with owner-scoped SQLite records and cross-participant denial tests. This does not connect to a broker terminal or feed.
 - Broker catalogue module and authenticated read-only `GET /brokers` API: implemented; it lists six candidates only, without claiming any broker is connected or execution-enabled.
 - Broker catalogue UI: not implemented.
-- MT5 bridge: not implemented.
-- Authenticated multi-tenant evidence gateway: not implemented.
+- MT5 bridge client/worker and broker session integration: not implemented.
+- Bridge request-authentication primitives: implemented as a reusable module with HMAC-SHA256, a 60-second default timestamp window, active-connection checks, and SQLite-persistent per-connection nonce consumption. It is not yet exposed as an ingestion endpoint and does not retrieve secrets from a vault.
+- Authenticated multi-tenant evidence ingestion gateway: not implemented.
 - Broker catalogue route authentication and candidate-only response tests: implemented.
-- Participant connection-intent isolation and lifecycle API tests: implemented for two participant fixtures. Concurrent live bridge/evidence isolation tests: not implemented.
+- Participant connection-intent isolation and lifecycle API tests: implemented for two participant fixtures. Bridge authentication tests cover valid signatures, body binding, stale timestamps, invalid keys/nonces, inactive connections and persistent replay rejection. Concurrent live bridge/evidence isolation tests: not implemented.
 - Live broker order routing: disabled and out of scope.
 
 
@@ -195,3 +196,19 @@ Security and capability boundaries:
 Added tests for authentication, two-participant isolation, cross-owner IDOR denial, pause/resume/revoke transitions, revoked-state rejection, unsupported broker/platform rejection, and credential-field rejection.
 
 The participant connection-intent lifecycle is an initial Phase 1 slice, not the complete connection manager/connector. A shared MT5 bridge, outbound participant-side worker, authenticated evidence gateway, persistent nonce replay protection, append-only audit stream, per-connection health and concurrent feed-isolation tests remain outstanding. CI for commit `a6981a263d71683a564b844f71e2cf86a5f63a48` is still running; no pass is claimed yet.
+
+
+## Read-only bridge authentication primitives (2026-11-27)
+
+Added `backend/app/broker_bridge_security.py`:
+- HMAC-SHA256 over a canonical message containing protocol version, immutable connection ID, request timestamp, nonce, and SHA-256 digest of the raw request body.
+- Constant-time signature comparison.
+- Strict timestamp parsing and a default 60-second clock-skew window.
+- Per-connection nonce uniqueness persisted in SQLite under a unique primary key, consumed inside `BEGIN IMMEDIATE` so concurrent replays cannot both pass.
+- The connection must exist and remain in `REQUESTED` state; paused/revoked/unknown connections fail closed.
+- The shared secret is passed in by a future vault integration. This module does not store or fetch secrets.
+- No HTTP evidence-ingestion endpoint, MT5 client, quote/specification parser, account snapshot or order method is included.
+
+The database initializer creates the nonce table after the participant connection table. Added tests for valid HMAC, persistent replay rejection, stale timestamp, wrong signature, raw-body binding, weak key, malformed nonce, and inactive/unknown connection rejection.
+
+This is authentication groundwork only. It does not prove broker provenance, does not connect a terminal, and does not make any broker integration operational. CI for the new head is pending; no pass is claimed.
