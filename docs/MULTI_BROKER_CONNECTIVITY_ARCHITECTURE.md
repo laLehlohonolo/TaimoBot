@@ -128,10 +128,10 @@ A participant's broker connection is not the same thing as a TaimoBot paper acco
 ## Delivery phases and acceptance gates
 
 ### Phase 1 — Core server and broker catalogue
-- Implement a provider-neutral broker catalogue and connection state model.
-- Add participant-scoped connection lifecycle APIs (create intent, status, pause, revoke) without accepting broker passwords.
-- Add immutable participant/connection ownership and audit records.
-- Add tests for cross-participant access denial, duplicate connection IDs, revoked keys, and tier entitlement enforcement once policy is confirmed.
+- Implement a provider-neutral broker catalogue and connection state model. (Catalogue and initial state model implemented.)
+- Add participant-scoped connection lifecycle APIs (create intent, list, pause, resume, revoke) without accepting broker passwords. (Implemented as intents only; no broker session is opened.)
+- Add immutable participant/connection ownership and audit records. (Owner-scoped persistence is implemented; a separate append-only audit event stream remains outstanding.)
+- Add tests for cross-participant access denial, duplicate connection IDs, revoked keys, and tier entitlement enforcement once policy is confirmed. (Cross-participant ownership denial and lifecycle tests added; key/replay tests await the bridge.)
 
 ### Phase 2 — Shared MT5 read-only bridge
 - Build one MT5 bridge protocol reusable across compatible brokers.
@@ -170,11 +170,28 @@ Any future live order routing requires a separate explicit product decision, leg
 - Existing provider-neutral Market health evaluator and server-owned trust configuration: present.
 - Exness-specific MT5 normalization: present, still unverified.
 - Multi-broker architecture contract: defined here.
-- Participant broker connection manager: not implemented.
+- Participant-scoped broker connection-intent lifecycle: implemented (create, list, pause, resume, revoke), with owner-scoped SQLite records and cross-participant denial tests. This does not connect to a broker terminal or feed.
 - Broker catalogue module and authenticated read-only `GET /brokers` API: implemented; it lists six candidates only, without claiming any broker is connected or execution-enabled.
 - Broker catalogue UI: not implemented.
 - MT5 bridge: not implemented.
 - Authenticated multi-tenant evidence gateway: not implemented.
 - Broker catalogue route authentication and candidate-only response tests: implemented.
-- Multiple participant/broker connection-isolation integration tests: not implemented.
+- Participant connection-intent isolation and lifecycle API tests: implemented for two participant fixtures. Concurrent live bridge/evidence isolation tests: not implemented.
 - Live broker order routing: disabled and out of scope.
+
+
+## Participant broker connection-intent API (2026-11-27)
+
+Added `backend/app/broker_connections.py` and initialized its owner-scoped SQLite table through the normal database initialization path. Authenticated participants can create a connection intent, list only their own intents, pause, resume, or revoke an intent through the `/broker-connections` routes.
+
+Security and capability boundaries:
+- Participant identity is derived from the authenticated session; request bodies cannot nominate an owner or connection owner.
+- Connection IDs are generated server-side and every read/update is constrained by both connection ID and authenticated participant ID.
+- The create request rejects extra fields, including broker passwords/tokens; no broker credential or secret reference is accepted or stored.
+- Broker and platform must match the candidate catalogue.
+- The API reports `REQUESTED` / `PAUSED` / `REVOKED` intent state and explicitly reports `NOT_CONNECTED`; it does not establish a broker session or claim an integration exists.
+- Live order routing remains false.
+
+Added tests for authentication, two-participant isolation, cross-owner IDOR denial, pause/resume/revoke transitions, revoked-state rejection, unsupported broker/platform rejection, and credential-field rejection.
+
+The participant connection-intent lifecycle is an initial Phase 1 slice, not the complete connection manager/connector. A shared MT5 bridge, outbound participant-side worker, authenticated evidence gateway, persistent nonce replay protection, append-only audit stream, per-connection health and concurrent feed-isolation tests remain outstanding. CI for commit `a6981a263d71683a564b844f71e2cf86a5f63a48` is still running; no pass is claimed yet.
