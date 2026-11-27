@@ -260,6 +260,15 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
         self.assertEqual(manager.secrets, {})
         self.assertEqual(manager.deleted, [])
 
+    def test_provisioning_rejects_unknown_connection_before_vault_write(self):
+        manager = FakeSecretManager()
+        with self.assertRaisesRegex(BridgeKeyProvisioningError, "active broker connection"):
+            provision_bridge_key(
+                "missing-connection", self.admin_id, manager
+            )
+        self.assertEqual(manager.secrets, {})
+        self.assertEqual(manager.deleted, [])
+
     def test_provisioning_reports_failed_vault_compensation_without_leaking_ref(self):
         def pause_connection():
             with database.get_connection() as connection:
