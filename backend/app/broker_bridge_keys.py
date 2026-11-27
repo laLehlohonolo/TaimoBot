@@ -55,7 +55,11 @@ def ensure_bridge_key_schema(connection):
 
 
 def _validate_secret_ref(secret_ref):
-    if not isinstance(secret_ref, str) or not _SECRET_REF_PATTERN.fullmatch(secret_ref):
+    if (
+        not isinstance(secret_ref, str)
+        or not _SECRET_REF_PATTERN.fullmatch(secret_ref)
+        or not secret_ref.startswith(("vault://", "secretmanager://"))
+    ):
         raise BridgeKeyMetadataError("A valid opaque secret-manager reference is required.")
     lowered = secret_ref.casefold()
     if any(marker in lowered for marker in ("password=", "token=", "secret=")):
