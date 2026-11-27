@@ -80,6 +80,7 @@ from .instruments import get_instrument
 from .layer_health import build_layer_health_snapshot
 from .market_health import evaluate_market_health
 from .market_provider_registry import load_market_provider_configuration
+from .broker_catalogue import list_broker_catalogue
 
 
 @asynccontextmanager
@@ -254,6 +255,12 @@ class DerivMarketSyncRequest(BaseModel):
     timeframe: str = Field(min_length=2, max_length=3)
     count: StrictInt = Field(default=100, ge=1, le=100)
     confirm_collection: bool
+
+
+@app.get("/brokers")
+def broker_catalogue(user=Depends(current_user)):
+    """Authenticated, read-only catalogue of broker integration candidates."""
+    return list_broker_catalogue()
 
 
 @app.get("/instruments")
