@@ -1,5 +1,4 @@
 """Vault-neutral broker bridge key provisioning orchestration.\n\nThis module defines a narrow production secret-manager contract but ships no\ncloud-vault adapter or HTTP endpoint. Secret bytes are generated server-side\nand never returned.\n"""
-import secrets
 import uuid
 from typing import Protocol
 
@@ -14,8 +13,13 @@ from . import broker_bridge_provisioning_store as operation_store
 class SecretManager(Protocol):
     """Minimal secret-manager contract; implementations must encrypt at rest."""
 
-    def create_secret(self, *, name: str, value: bytes, idempotency_key: str) -> str:
-        """Persist secret bytes idempotently and return an opaque vault reference."""
+    def create_secret(self, *, name: str, idempotency_key: str) -> str:
+        """Create one 256-bit secret per operation and return its opaque reference.
+
+        Repeated calls with the same idempotency key MUST return the same
+        reference and preserve the exact same secret bytes. The adapter, not
+        this retrying orchestrator, owns one-time secret generation.
+        """
         ...
 
     def delete_secret(self, secret_ref: str) -> None:
@@ -85,19 +89,15 @@ def provision_bridge_key(
 
     secret_ref = operation.get("secret_ref")
     if operation["status"] == "PENDING":
-        secret_material = secrets.token_bytes(32)
         try:
             secret_ref = secret_manager.create_secret(
                 name=f"taimobot/broker-bridge/{connection_id}/{operation_id}",
-                value=secret_material,
                 idempotency_key=operation_id,
             )
         except Exception:
             raise BridgeKeyProvisioningError(
                 "Vault creation outcome is uncertain; retry with the same operation ID."
             ) from None
-        finally:
-            del secret_material
         if not isinstance(secret_ref, str) or not secret_ref:
             raise BridgeKeyProvisioningError(
                 "Vault returned no usable reference; retry or reconcile the same operation."
