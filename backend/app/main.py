@@ -77,6 +77,15 @@ from .market_backfill import run_backfill_batch_with_connection_factory
 from .deriv_public_client import DerivPublicMarketDataClient
 from .market_observations import SUPPORTED_TIMEFRAMES
 from .instruments import get_instrument
+from .layer_health import build_layer_health_snapshot
+from .market_health import evaluate_market_health
+from .market_provider_registry import load_market_provider_configuration
+from .broker_catalogue import list_broker_catalogue
+from .broker_connections import (
+    create_connection_intent,
+    list_connection_intents,
+    transition_connection_intent,
+)
 
 
 @asynccontextmanager
@@ -246,11 +255,77 @@ class BackfillReviewRequest(BaseModel):
     rationale: str = Field(min_length=10, max_length=1000)
 
 
+class BrokerConnectionIntentRequest(BaseModel):
+    broker_id: str = Field(min_length=2, max_length=40, pattern=r"^[a-z0-9_]+$")
+    platform: str = Field(min_length=2, max_length=80)
+
+    class Config:
+        extra = "forbid"
+
+
 class DerivMarketSyncRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9._/-]+$")
     timeframe: str = Field(min_length=2, max_length=3)
     count: StrictInt = Field(default=100, ge=1, le=100)
     confirm_collection: bool
+
+
+@app.get("/brokers")
+def broker_catalogue(user=Depends(current_user)):
+    """Authenticated, read-only catalogue of broker integration candidates."""
+    return list_broker_catalogue()
+
+
+@app.post("/broker-connections", status_code=201)
+def create_broker_connection(request: BrokerConnectionIntentRequest, user=Depends(current_user)):
+    """Create a participant-owned connection intent; no credentials or session are accepted."""
+    try:
+        return create_connection_intent(user["user_id"], request.broker_id, request.platform)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.get("/broker-connections")
+def get_broker_connections(user=Depends(current_user)):
+    """List only the authenticated participant's broker connection intents."""
+    return {
+        "mode": "paper_trading",
+        "live_order_routing": False,
+        "connections": list_connection_intents(user["user_id"]),
+    }
+
+
+@app.post("/broker-connections/{connection_id}/pause")
+def pause_broker_connection(connection_id: str, user=Depends(current_user)):
+    try:
+        result = transition_connection_intent(user["user_id"], connection_id, "pause")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail="Broker connection not found.")
+    return result
+
+
+@app.post("/broker-connections/{connection_id}/resume")
+def resume_broker_connection(connection_id: str, user=Depends(current_user)):
+    try:
+        result = transition_connection_intent(user["user_id"], connection_id, "resume")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail="Broker connection not found.")
+    return result
+
+
+@app.post("/broker-connections/{connection_id}/revoke")
+def revoke_broker_connection(connection_id: str, user=Depends(current_user)):
+    try:
+        result = transition_connection_intent(user["user_id"], connection_id, "revoke")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail="Broker connection not found.")
+    return result
 
 
 @app.get("/instruments")
@@ -296,6 +371,18 @@ def health_check():
         "api": "TaimoBot",
         "trading_mode": "paper"
     }
+
+
+@app.get("/admin/brain/layer-health")
+def brain_layer_health(user=Depends(current_user)):
+    """Admin-only inventory of seven-layer health telemetry readiness."""
+    require_admin(user)
+    provider_configuration = load_market_provider_configuration()
+    market_health = evaluate_market_health(
+        trusted_provider_id=provider_configuration["provider_id"],
+        trusted_configuration=provider_configuration["trusted_configuration"],
+    )  # No evidence adapter is registered; fail closed.
+    return build_layer_health_snapshot(market_health=market_health)
 
 
 @app.post("/maintenance/retry")

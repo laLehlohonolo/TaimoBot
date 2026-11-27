@@ -205,6 +205,75 @@ function AdminSecurityPanel({ token, safety, onRefresh }) {
 }
 
 
+function AdminLayerHealthPanel({ token }) {
+  const [snapshot, setSnapshot] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadSnapshot = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await apiRequest("/admin/brain/layer-health", {}, token);
+      setSnapshot(result);
+    } catch (err) {
+      setSnapshot(null);
+      setError(err instanceof Error ? err.message : "Layer readiness could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => { loadSnapshot(); }, [loadSnapshot]);
+
+  const layers = snapshot?.layers || [];
+  const statusClass = status => {
+    if (status === "HEALTHY") return "layer-status healthy";
+    if (status === "DEGRADED" || status === "BLOCKED") return "layer-status attention";
+    if (status === "OFFLINE") return "layer-status offline";
+    return "layer-status pending";
+  };
+
+  return (
+    <section className="panel layer-health-panel" aria-label="Administrator seven-layer readiness">
+      <div className="layer-health-heading">
+        <div>
+          <p className="eyebrow">TAIMO BRAIN / SYSTEM READINESS</p>
+          <h2>Seven-layer architecture</h2>
+          <p className="muted">Evidence-led readiness inventory. A layer is not marked healthy without an authenticated, current evidence source.</p>
+        </div>
+        <button className="refresh" type="button" onClick={loadSnapshot} disabled={loading}>
+          {loading ? "Checking…" : "↻ Refresh layers"}
+        </button>
+      </div>
+      {error && <div className="notice error" role="alert">{error}</div>}
+      {loading && !snapshot ? <p className="muted">Loading layer readiness…</p> : (
+        <>
+          <div className="layer-health-grid">
+            {layers.map(layer => (
+              <article className="layer-health-card" key={layer.layer_id}>
+                <div className="layer-card-top">
+                  <span className="layer-card-name">{layer.layer_id}</span>
+                  <span className={statusClass(layer.status)}>{String(layer.status || "UNKNOWN").replaceAll("_", " ")}</span>
+                </div>
+                <p>{(layer.limitations || []).join(" ") || "No limitation detail supplied."}</p>
+                <small>{layer.capabilities?.length ? layer.capabilities.join(" · ") : "No registered live capability"}</small>
+              </article>
+            ))}
+          </div>
+          <div className="layer-health-foot">
+            <span>Overall: <strong>{snapshot?.overall_status || "UNKNOWN"}</strong></span>
+            <span>{snapshot?.telemetry_registered ? "Telemetry registered" : "Live telemetry not yet registered"}</span>
+            <span>{snapshot?.generated_at ? "Checked " + new Date(snapshot.generated_at).toLocaleString("en-ZA") : "Check time unavailable"}</span>
+          </div>
+        </>
+      )}
+      <p className="layer-health-disclaimer">Readiness visibility only. This panel does not generate signals, submit orders, approve strategies or enable execution. Paper-only mode and the backend 1% risk ceiling remain in force.</p>
+    </section>
+  );
+}
+
+
 function StrategyLibrary({ token }) {
   const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -686,6 +755,7 @@ export default function App() {
       {error && <div className="notice error" role="alert"><strong>Workspace notice</strong><span>{error}</span></div>}
 
       {verifiedAdmin && <AdminSecurityPanel token={session.access_token} safety={safety} onRefresh={refreshPublicStatus} />}
+      {verifiedAdmin && <AdminLayerHealthPanel token={session.access_token} />}
 
       {!session ? (
         <AuthPanel onAuthenticated={(nextSession, justRegistered) => { setSession(nextSession); setShowWelcome(Boolean(justRegistered)); }} />

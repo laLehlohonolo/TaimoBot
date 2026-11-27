@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from threading import Event, Thread
 from fastapi import HTTPException
 from unittest.mock import patch
 
@@ -10,12 +11,97 @@ from app import database
 from app.auth import register_user
 from app.database import init_db
 from app.maintenance import SAST
-from app.maintenance_scheduler import run_maintenance_for_date
+from app import maintenance_scheduler
+from app.maintenance_scheduler import (
+    _assert_claim_owned,
+    _claim_owned_deletion_guard,
+    _heartbeat_claim,
+    run_maintenance_for_date,
+)
 from app.main import MaintenanceRetryRequest, retry_maintenance
 from app.safety import deactivate_emergency_stop
 
 
 class MaintenanceSchedulerTests(unittest.TestCase):
+    def _create_claim(self, run_date: str, token: str, started_at: str) -> None:
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS maintenance_runs (
+                    run_date TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    run_token TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO maintenance_runs
+                    (run_date, status, started_at, run_token)
+                VALUES (?, 'RUNNING', ?, ?)
+                """,
+                (run_date, started_at, token),
+            )
+
+    def test_deletion_guard_holds_only_for_current_claim(self):
+        day = "2026-11-26"
+        started = datetime.now(SAST).isoformat()
+        self._create_claim(day, "current-token", started)
+        lost_event = Event()
+
+        with _claim_owned_deletion_guard(day, "current-token", lost_event):
+            self.assertFalse(lost_event.is_set())
+
+        with self.assertRaises(RuntimeError):
+            with _claim_owned_deletion_guard(day, "superseded-token", lost_event):
+                self.fail("A superseded worker must never enter the deletion section")
+        self.assertTrue(lost_event.is_set())
+
+    def test_heartbeat_renews_active_claim(self):
+        day = "2026-11-26"
+        old_started = (datetime.now(SAST) - timedelta(minutes=2)).isoformat()
+        self._create_claim(day, "active-token", old_started)
+        stop_event = Event()
+        lost_event = Event()
+        with patch.object(maintenance_scheduler, "LEASE_HEARTBEAT_SECONDS", 0.01):
+            worker = Thread(
+                target=_heartbeat_claim,
+                args=(day, "active-token", stop_event, lost_event),
+                daemon=True,
+            )
+            worker.start()
+            worker.join(timeout=0.1)
+            stop_event.set()
+            worker.join(timeout=1)
+        with database.get_connection() as connection:
+            row = connection.execute(
+                "SELECT started_at FROM maintenance_runs WHERE run_date = ?",
+                (day,),
+            ).fetchone()
+        self.assertFalse(lost_event.is_set())
+        self.assertGreater(datetime.fromisoformat(row["started_at"]), datetime.fromisoformat(old_started))
+
+    def test_heartbeat_fails_closed_when_claim_is_superseded(self):
+        day = "2026-11-26"
+        started = datetime.now(SAST).isoformat()
+        self._create_claim(day, "new-token", started)
+        stop_event = Event()
+        lost_event = Event()
+        with patch.object(maintenance_scheduler, "LEASE_HEARTBEAT_SECONDS", 0.01):
+            worker = Thread(
+                target=_heartbeat_claim,
+                args=(day, "stale-token", stop_event, lost_event),
+                daemon=True,
+            )
+            worker.start()
+            worker.join(timeout=0.1)
+            stop_event.set()
+            worker.join(timeout=1)
+        self.assertTrue(lost_event.is_set())
+        with self.assertRaises(RuntimeError):
+            _assert_claim_owned(day, "stale-token", lost_event)
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)

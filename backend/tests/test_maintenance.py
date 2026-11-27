@@ -1,4 +1,5 @@
 import os
+import stat
 import json
 import hashlib
 import sqlite3
@@ -1035,6 +1036,59 @@ class DailyMaintenanceTests(unittest.TestCase):
                 integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
             self.assertEqual(value, "preserve-me")
             self.assertEqual(integrity, "ok")
+
+    def test_backup_publication_fsyncs_file_before_rename_and_directory_after(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "live.sqlite3"
+            backup_dir = root / "backups"
+            with sqlite3.connect(source) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.execute("INSERT INTO sample VALUES ('durable')")
+
+            real_fsync = os.fsync
+            synced_modes = []
+
+            def record_fsync(descriptor):
+                synced_modes.append(os.fstat(descriptor).st_mode)
+                return real_fsync(descriptor)
+
+            with patch("app.maintenance.os.fsync", side_effect=record_fsync) as sync:
+                result = create_verified_backup(source_path=source, backup_dir=backup_dir)
+
+            self.assertEqual(result["status"], "BACKUP_VERIFIED")
+            self.assertEqual(sync.call_count, 2)
+            self.assertTrue(stat.S_ISREG(synced_modes[0]))
+            self.assertTrue(stat.S_ISDIR(synced_modes[1]))
+            self.assertTrue(Path(result["backup_file"]).is_file())
+
+    def test_backup_directory_fsync_failure_retains_published_artifact_for_reconciliation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "live.sqlite3"
+            backup_dir = root / "backups"
+            with sqlite3.connect(source) as connection:
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.execute("INSERT INTO sample VALUES ('published')")
+
+            real_fsync = os.fsync
+            calls = 0
+
+            def fail_directory_sync(descriptor):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated directory fsync failure")
+                return real_fsync(descriptor)
+
+            with patch("app.maintenance.os.fsync", side_effect=fail_directory_sync):
+                with self.assertRaisesRegex(OSError, "directory fsync failure"):
+                    create_verified_backup(source_path=source, backup_dir=backup_dir)
+
+            published = list(backup_dir.glob("taimobot-*.sqlite3"))
+            self.assertEqual(len(published), 1)
+            self.assertTrue(published[0].is_file())
+            self.assertFalse(list(backup_dir.glob(".*.tmp")))
 
     def test_concurrent_same_second_backups_publish_distinct_files(self):
         with tempfile.TemporaryDirectory() as directory:

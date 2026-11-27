@@ -2,9 +2,9 @@ name: TaimoBot application checks
 
 on:
   push:
-    branches: [main, test/restore-lock-valid-timestamps]
+    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases]
   pull_request:
-    branches: [main]
+    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases]
   workflow_dispatch:
 
 jobs:

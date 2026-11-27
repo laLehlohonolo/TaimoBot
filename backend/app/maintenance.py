@@ -15,7 +15,7 @@ import stat
 import time
 import tempfile
 import fcntl
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -840,8 +840,33 @@ def create_verified_backup(
             if integrity != "ok":
                 raise RuntimeError(f"Backup integrity check failed: {integrity}")
 
+        # A verified SQLite copy is not durable merely because SQLite closed
+        # it successfully. Flush the file contents before making the final name
+        # visible, then flush the containing directory after the atomic rename.
+        backup_fd = os.open(
+            str(temporary_path),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(backup_fd).st_mode):
+                raise RuntimeError("Temporary backup is not a regular file.")
+            os.fsync(backup_fd)
+        finally:
+            os.close(backup_fd)
+
         temporary_path.replace(final_path)
+
+        directory_fd = os.open(
+            str(destination_dir),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except Exception:
+        # If directory fsync fails after rename, retain the published artifact:
+        # its durability is uncertain and it must be reconciled, not deleted.
         temporary_path.unlink(missing_ok=True)
         raise
     finally:
@@ -924,6 +949,7 @@ def cleanup_expired_backups(
     retention_days: int = 365,
     dry_run: bool = True,
     live_database_path: Path | None = None,
+    deletion_guard=None,
 ) -> dict:
     """Safely plan or remove expired managed backups after validating recovery points.
 
@@ -1048,7 +1074,13 @@ def cleanup_expired_backups(
                     or after.st_mtime >= cutoff
                 ):
                     continue
-                candidate.unlink()
+                # The scheduler supplies a transaction-backed guard. It
+                # holds SQLite's write reservation from the final ownership
+                # check through unlink, preventing a concurrent worker from
+                # reclaiming the claim in that critical section.
+                guard = deletion_guard(candidate) if deletion_guard else nullcontext()
+                with guard:
+                    candidate.unlink()
                 deleted.append(candidate.name)
             except (sqlite3.Error, OSError, ValueError):
                 invalid.append(candidate.name)
