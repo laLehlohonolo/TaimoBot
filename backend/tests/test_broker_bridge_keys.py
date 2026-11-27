@@ -338,7 +338,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
 
         manager = FakeSecretManager(on_create=pause_connection)
         with self.assertRaisesRegex(
-            BridgeKeyProvisioningError, "retry with the same operation ID"
+            BridgeKeyProvisioningError, "no key was activated"
         ):
             provision_bridge_key(
                 "bridge-key-connection", self.admin_id, manager,
