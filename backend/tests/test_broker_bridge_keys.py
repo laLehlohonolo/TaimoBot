@@ -90,7 +90,6 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
             "bridge-key-connection", "vault://taimobot/bridge/key-one",
             created_by=self.admin_id,
             now="2026-11-27T12:00:00+00:00",
-            operation_id="11111111-1111-4111-8111-111111111111",
         )
         self.assertEqual(result["status"], "ACTIVE")
         self.assertFalse(result["secret_material_returned"])
@@ -229,6 +228,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
         result = provision_bridge_key(
             "bridge-key-connection", self.admin_id, manager,
             now="2026-11-27T12:00:00+00:00",
+            operation_id="11111111-1111-4111-8111-111111111111",
         )
         self.assertEqual(result["status"], "ACTIVE")
         self.assertNotIn("secret_ref", result)
