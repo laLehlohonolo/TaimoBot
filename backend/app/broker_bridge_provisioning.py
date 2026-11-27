@@ -46,10 +46,9 @@ def provision_bridge_key(
     """Create vault material, then activate metadata; compensate on DB failure.
 
     A production adapter must enforce private access, encryption at rest,
-    auditability and least privilege. This function never logs or returns the
-    generated 256-bit key. If metadata activation fails, it attempts to delete
-    the just-created vault item. A failed compensation is surfaced explicitly
-    for operator cleanup; the reference is never returned to the caller.
+    auditability, least privilege, and idempotent create semantics. This
+    function persists operation state before vault access, never logs or
+    returns the generated 256-bit key, and records cleanup failures for review.
     """
     if not isinstance(connection_id, str) or not connection_id:
         raise BridgeKeyProvisioningError("A valid broker connection is required.")
