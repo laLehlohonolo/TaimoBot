@@ -103,7 +103,7 @@ The provisioning protocol now requires an idempotency key on each secret-creatio
 
 The provisioning caller must durably create and persist the operation ID before making the vault request, then reuse that exact ID when retrying after a timeout, lost response, or process restart. The internal orchestration helper accepts this stable `operation_id` and passes it through as the vault idempotency key. If the caller generates a new ID on retry, the vault cannot correlate the attempt and duplicate/orphaned secrets remain possible.
 
-**Current boundary:** the repository defines and tests the idempotency contract, but does not yet implement a durable provisioning-operation table/worker or a production vault adapter. Therefore crash recovery is not yet end-to-end. Do not expose a production provisioning route until durable operation records, adapter-side idempotency/reconciliation, retry policy, and orphan cleanup are implemented and tested.
+**Current boundary:** the durable provisioning-operation table and recovery orchestration are implemented in `broker_bridge_provisioning_store.py` and `broker_bridge_provisioning.py`, with regression coverage using a fake secret manager. A production vault adapter, adapter-side idempotency guarantees, operator cleanup/reconciliation workflow, and provisioning route are still absent. Therefore crash recovery is covered at the application orchestration layer but is not yet end-to-end against a real vault. Do not expose a production provisioning route until the production adapter, retry/reconciliation policy, and audited operator cleanup path are implemented and tested.
 
 
 ## Durable provisioning operation registry (implemented)
