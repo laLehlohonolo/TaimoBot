@@ -18,7 +18,7 @@ A future implementation must satisfy all of the following:
 2. Authenticate a dedicated collector identity using HMAC-SHA256 over the exact raw request body. Do not sign a parsed-and-reserialized JSON object.
 3. Require these headers: `X-Taimo-Key-Id`, `X-Taimo-Timestamp`, `X-Taimo-Nonce`, and `X-Taimo-Signature`.
 4. Construct the signed message as the UTF-8 bytes of:
-   `v1\\n{key_id}\\n{timestamp}\\n{nonce}\\n{sha256_hex(raw_body)}`.
+   `v1\n{key_id}\n{timestamp}\n{nonce}\n{sha256_hex(raw_body)}`.
 5. Compare signatures with a constant-time comparison. Reject unknown, disabled, expired, or not-yet-valid key IDs.
 6. Keep HMAC keys in a managed secret store or deployment secret environment. Never put keys in source control, API responses, logs, frontend storage, or chat. Support planned key rotation with a bounded overlap and explicit revocation.
 7. Limit request body size, JSON nesting, field lengths, numeric ranges, and request rate. Reject unknown top-level fields unless a versioned schema explicitly permits them.
