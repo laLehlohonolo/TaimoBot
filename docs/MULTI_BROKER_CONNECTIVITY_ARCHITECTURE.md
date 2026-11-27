@@ -171,8 +171,10 @@ Any future live order routing requires a separate explicit product decision, leg
 - Exness-specific MT5 normalization: present, still unverified.
 - Multi-broker architecture contract: defined here.
 - Participant broker connection manager: not implemented.
-- Broker catalogue API/UI: not implemented.
+- Broker catalogue module and authenticated read-only `GET /brokers` API: implemented; it lists six candidates only, without claiming any broker is connected or execution-enabled.
+- Broker catalogue UI: not implemented.
 - MT5 bridge: not implemented.
 - Authenticated multi-tenant evidence gateway: not implemented.
-- Multiple participant/broker integration tests: not implemented.
+- Broker catalogue route authentication and candidate-only response tests: implemented.
+- Multiple participant/broker connection-isolation integration tests: not implemented.
 - Live broker order routing: disabled and out of scope.
