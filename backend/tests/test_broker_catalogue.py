@@ -206,7 +206,7 @@ class BrokerBridgeSecurityTests(unittest.TestCase):
             authenticate_bridge_request,
             sign_bridge_message,
         )
-        self.authenticate = authenticate_bridge_request
+        self.authenticate = lambda *args, **kwargs: authenticate_bridge_request(\n            *args, key_id="bridge-catalogue-key", **kwargs\n        )
         self.sign = sign_bridge_message
         self.secret = secrets.token_bytes(32)
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -229,6 +229,20 @@ class BrokerBridgeSecurityTests(unittest.TestCase):
                 (
                     "bridge-test-connection", self.participant_id, "exness",
                     "MT5", "2026-11-27T10:00:00+00:00",
+                    "2026-11-27T10:00:00+00:00",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO broker_bridge_keys (
+                    key_id, connection_id, secret_ref, status,
+                    rotation_sequence, created_at, activated_at
+                ) VALUES (?, ?, ?, 'ACTIVE', 1, ?, ?)
+                """,
+                (
+                    "bridge-catalogue-key", "bridge-test-connection",
+                    "vault://test/bridge/catalogue",
+                    "2026-11-27T10:00:00+00:00",
                     "2026-11-27T10:00:00+00:00",
                 ),
             )
