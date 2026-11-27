@@ -25,6 +25,16 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
             "BridgeKeyOwnerPassphrase-2026!",
         )
         self.participant_id = participant["user_id"]
+        admin = register_user(
+            "bridge-key-admin@taimobot.local",
+            "BridgeKeyAdminPassphrase-2026!",
+        )
+        self.admin_id = admin["user_id"]
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET role='ADMIN', email_verified=1 WHERE user_id = ?",
+                (self.admin_id,),
+            )
         with database.get_connection() as connection:
             connection.execute(
                 """
@@ -47,7 +57,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
     def test_activation_returns_only_non_secret_metadata(self):
         result = activate_bridge_key(
             "bridge-key-connection", "vault://taimobot/bridge/key-one",
-            created_by=self.participant_id,
+            created_by=self.admin_id,
             now="2026-11-27T12:00:00+00:00",
         )
         self.assertEqual(result["status"], "ACTIVE")
@@ -115,11 +125,30 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
                 now="2026-11-27T12:00:00",
             )
 
-    def test_unknown_provisioning_actor_is_rejected(self):
-        with self.assertRaisesRegex(BridgeKeyMetadataError, "actor is unknown"):
+    def test_unknown_or_unverified_non_admin_provisioner_is_rejected(self):
+        with self.assertRaisesRegex(BridgeKeyMetadataError, "verified administrator"):
             activate_bridge_key(
-                "bridge-key-connection", "vault://taimobot/bridge/key-four",
+                "bridge-key-connection", "vault://taimobot/bridge/key-four"
+            )
+        with self.assertRaisesRegex(BridgeKeyMetadataError, "verified administrator"):
+            activate_bridge_key(
+                "bridge-key-connection", "vault://taimobot/bridge/key-five",
                 created_by="not-a-real-user",
+            )
+        with self.assertRaisesRegex(BridgeKeyMetadataError, "verified administrator"):
+            activate_bridge_key(
+                "bridge-key-connection", "vault://taimobot/bridge/key-six",
+                created_by=self.participant_id,
+            )
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET email_verified=0 WHERE user_id = ?",
+                (self.admin_id,),
+            )
+        with self.assertRaisesRegex(BridgeKeyMetadataError, "verified administrator"):
+            activate_bridge_key(
+                "bridge-key-connection", "vault://taimobot/bridge/key-seven",
+                created_by=self.admin_id,
             )
 
     def test_auth_context_is_server_resolved_and_never_returns_key_bytes(self):
