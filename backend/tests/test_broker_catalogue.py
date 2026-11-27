@@ -206,7 +206,9 @@ class BrokerBridgeSecurityTests(unittest.TestCase):
             authenticate_bridge_request,
             sign_bridge_message,
         )
-        self.authenticate = lambda *args, **kwargs: authenticate_bridge_request(\n            *args, key_id="bridge-catalogue-key", **kwargs\n        )
+        self.authenticate = lambda *args, **kwargs: authenticate_bridge_request(
+            *args, key_id="bridge-catalogue-key", **kwargs
+        )
         self.sign = sign_bridge_message
         self.secret = secrets.token_bytes(32)
         self.temp_dir = tempfile.TemporaryDirectory()
