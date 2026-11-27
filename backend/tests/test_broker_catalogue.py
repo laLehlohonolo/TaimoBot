@@ -197,5 +197,128 @@ class BrokerConnectionIntentRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
 
+
+class BrokerBridgeSecurityTests(unittest.TestCase):
+    def setUp(self):
+        import secrets
+        from app.broker_bridge_security import (
+            ensure_bridge_security_schema,
+            authenticate_bridge_request,
+            sign_bridge_message,
+        )
+        self.authenticate = authenticate_bridge_request
+        self.sign = sign_bridge_message
+        self.secret = secrets.token_bytes(32)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_db_path = database.DB_PATH
+        database.DB_PATH = Path(self.temp_dir.name) / "bridge-security.db"
+        init_db()
+        participant = register_user(
+            "bridge-security-owner@taimobot.local",
+            "BridgeSecurityPassphrase-2026!",
+        )
+        self.participant_id = participant["user_id"]
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO participant_broker_connections (
+                    connection_id, participant_user_id, broker_id, platform,
+                    state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'REQUESTED', ?, ?)
+                """,
+                (
+                    "bridge-test-connection", self.participant_id, "exness",
+                    "MT5", "2026-11-27T10:00:00+00:00",
+                    "2026-11-27T10:00:00+00:00",
+                ),
+            )
+
+    def tearDown(self):
+        database.DB_PATH = self.original_db_path
+        self.temp_dir.cleanup()
+
+    def _request(self, nonce="nonce-0123456789abcdef", timestamp="1795773600",
+                 body=b'{"kind":"heartbeat","schema_version":1}'):
+        signature = self.sign(
+            "bridge-test-connection", timestamp, nonce, body, self.secret
+        )
+        return self.authenticate(
+            "bridge-test-connection", timestamp, nonce, signature, body,
+            self.secret, now=int(timestamp), max_clock_skew_seconds=60,
+        )
+
+    def test_valid_request_consumes_nonce_persistently(self):
+        result = self._request()
+        self.assertTrue(result["authenticated"])
+        self.assertEqual(result["replay_protection"], "PERSISTENT")
+        with self.assertRaisesRegex(ValueError, "already been used"):
+            self._request()
+
+    def test_wrong_signature_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "signature is invalid"):
+            self.authenticate(
+                "bridge-test-connection", "1795773600",
+                "nonce-1123456789abcdef", "0" * 64, b"{}", self.secret,
+                now=1795773600,
+            )
+
+    def test_stale_timestamp_is_rejected(self):
+        signature = self.sign(
+            "bridge-test-connection", "1795770000",
+            "nonce-2123456789abcdef", b"{}", self.secret
+        )
+        with self.assertRaisesRegex(ValueError, "outside the allowed window"):
+            self.authenticate(
+                "bridge-test-connection", "1795770000",
+                "nonce-2123456789abcdef", signature, b"{}", self.secret,
+                now=1795773600,
+            )
+
+    def test_unknown_or_inactive_connection_is_rejected(self):
+        signature = self.sign(
+            "unknown-connection", "1795773600",
+            "nonce-3123456789abcdef", b"{}", self.secret
+        )
+        with self.assertRaisesRegex(ValueError, "unknown or inactive"):
+            self.authenticate(
+                "unknown-connection", "1795773600",
+                "nonce-3123456789abcdef", signature, b"{}", self.secret,
+                now=1795773600,
+            )
+
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE participant_broker_connections SET state='PAUSED' "
+                "WHERE connection_id='bridge-test-connection'"
+            )
+        with self.assertRaisesRegex(ValueError, "unknown or inactive"):
+            self._request(nonce="nonce-4123456789abcdef")
+
+    def test_signature_is_bound_to_raw_body_and_connection(self):
+        signature = self.sign(
+            "bridge-test-connection", "1795773600",
+            "nonce-5123456789abcdef", b'{"kind":"heartbeat"}', self.secret
+        )
+        with self.assertRaisesRegex(ValueError, "signature is invalid"):
+            self.authenticate(
+                "bridge-test-connection", "1795773600",
+                "nonce-5123456789abcdef", signature, b'{"kind":"quote"}',
+                self.secret, now=1795773600,
+            )
+
+    def test_invalid_nonce_and_weak_key_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "nonce"):
+            self.authenticate(
+                "bridge-test-connection", "1795773600", "short", "0" * 64,
+                b"{}", self.secret, now=1795773600,
+            )
+        with self.assertRaisesRegex(ValueError, "unavailable or invalid"):
+            self.authenticate(
+                "bridge-test-connection", "1795773600",
+                "nonce-6123456789abcdef", "0" * 64, b"{}", b"weak",
+                now=1795773600,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
