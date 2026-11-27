@@ -73,9 +73,11 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
     def test_rotation_atomically_revokes_previous_key(self):
         first = activate_bridge_key(
             "bridge-key-connection", "vault://taimobot/bridge/key-one"
+            created_by=self.admin_id,
         )
         second = activate_bridge_key(
             "bridge-key-connection", "vault://taimobot/bridge/key-two"
+            created_by=self.admin_id,
         )
         self.assertNotEqual(first["key_id"], second["key_id"])
         self.assertEqual(second["rotation_sequence"], 2)
@@ -94,6 +96,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
     def test_revocation_is_connection_scoped_and_idempotent(self):
         key = activate_bridge_key(
             "bridge-key-connection", "vault://taimobot/bridge/key-one"
+            created_by=self.admin_id,
         )
         self.assertFalse(revoke_bridge_key("another-connection", key["key_id"]))
         self.assertTrue(revoke_bridge_key("bridge-key-connection", key["key_id"]))
@@ -110,6 +113,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeKeyMetadataError, "active requested connection"):
             activate_bridge_key(
                 "bridge-key-connection", "vault://taimobot/bridge/key-one"
+            created_by=self.admin_id,
             )
         with self.assertRaisesRegex(BridgeKeyMetadataError, "active requested connection"):
             activate_bridge_key(
@@ -122,6 +126,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeKeyMetadataError, "timezone-aware"):
             activate_bridge_key(
                 "bridge-key-connection", "vault://taimobot/bridge/key-three",
+            created_by=self.admin_id,
                 now="2026-11-27T12:00:00",
             )
 
@@ -129,6 +134,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeKeyMetadataError, "verified administrator"):
             activate_bridge_key(
                 "bridge-key-connection", "vault://taimobot/bridge/key-four"
+            created_by=self.admin_id,
             )
         with self.assertRaisesRegex(BridgeKeyMetadataError, "verified administrator"):
             activate_bridge_key(
@@ -154,6 +160,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
     def test_auth_context_is_server_resolved_and_never_returns_key_bytes(self):
         key = activate_bridge_key(
             "bridge-key-connection", "vault://taimobot/bridge/key-auth-context"
+            created_by=self.admin_id,
         )
         context = resolve_bridge_key_auth_context(key["key_id"])
         self.assertEqual(context["connection_id"], "bridge-key-connection")
@@ -167,6 +174,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
     def test_auth_context_rejects_unknown_revoked_and_paused_keys(self):
         key = activate_bridge_key(
             "bridge-key-connection", "vault://taimobot/bridge/key-auth-context-two"
+            created_by=self.admin_id,
         )
         self.assertIsNone(resolve_bridge_key_auth_context("unknown-key-id"))
         self.assertTrue(revoke_bridge_key("bridge-key-connection", key["key_id"]))
@@ -174,6 +182,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
 
         active = activate_bridge_key(
             "bridge-key-connection", "vault://taimobot/bridge/key-auth-context-three"
+            created_by=self.admin_id,
         )
         with database.get_connection() as connection:
             connection.execute(
