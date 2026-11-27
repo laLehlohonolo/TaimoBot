@@ -19,12 +19,13 @@ from app.broker_bridge_provisioning import (
 
 
 class FakeSecretManager:
-    def __init__(self, *, fail_create=False, fail_delete=False, on_create=None):
+    def __init__(self, *, fail_create=False, fail_delete=False, on_create=None, fail_after_create=False):
         self.secrets = {}
         self.deleted = []
         self.fail_create = fail_create
         self.fail_delete = fail_delete
         self.on_create = on_create
+        self.fail_after_create = fail_after_create
         self.idempotency = {}
 
     def create_secret(self, *, name, value, idempotency_key):
@@ -37,6 +38,9 @@ class FakeSecretManager:
         self.idempotency[idempotency_key] = ref
         if self.on_create is not None:
             self.on_create()
+        if self.fail_after_create:
+            self.fail_after_create = False
+            raise RuntimeError("vault response lost after commit")
         return ref
 
     def delete_secret(self, secret_ref):
@@ -241,6 +245,54 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
             "taimobot/broker-bridge/bridge-key-connection/11111111-1111-4111-8111-111111111111",
         )
         self.assertIn("11111111-1111-4111-8111-111111111111", manager.idempotency)
+
+    def test_ambiguous_vault_timeout_recovers_with_same_durable_operation_id(self):
+        manager = FakeSecretManager(fail_after_create=True)
+        operation_id = "33333333-3333-4333-8333-333333333333"
+        with self.assertRaisesRegex(
+            BridgeKeyProvisioningError, "retry with the same operation ID"
+        ):
+            provision_bridge_key(
+                "bridge-key-connection", self.admin_id, manager,
+                operation_id=operation_id,
+            )
+        with database.get_connection() as connection:
+            pending = connection.execute(
+                "SELECT status FROM broker_bridge_provisioning_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        self.assertEqual(pending["status"], "PENDING")
+        self.assertEqual(len(manager.secrets), 1)
+
+        result = provision_bridge_key(
+            "bridge-key-connection", self.admin_id, manager,
+            operation_id=operation_id,
+        )
+        self.assertEqual(result["status"], "ACTIVE")
+        self.assertEqual(len(manager.secrets), 1)
+        with database.get_connection() as connection:
+            completed = connection.execute(
+                "SELECT status, key_id, secret_ref FROM broker_bridge_provisioning_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        self.assertEqual(completed["status"], "ACTIVATED")
+        self.assertEqual(completed["key_id"], result["key_id"])
+        self.assertTrue(completed["secret_ref"].startswith("vault://"))
+
+    def test_operation_id_cannot_be_reused_for_another_connection_or_actor(self):
+        manager = FakeSecretManager()
+        operation_id = "44444444-4444-4444-8444-444444444444"
+        provision_bridge_key(
+            "bridge-key-connection", self.admin_id, manager,
+            operation_id=operation_id,
+        )
+        with self.assertRaisesRegex(
+            BridgeKeyProvisioningError, "original connection and actor"
+        ):
+            provision_bridge_key(
+                "bridge-key-connection", self.participant_id, manager,
+                operation_id=operation_id,
+            )
 
     def test_provisioning_requires_valid_operation_id(self):
         manager = FakeSecretManager()
