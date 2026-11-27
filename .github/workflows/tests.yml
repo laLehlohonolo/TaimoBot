@@ -22,12 +22,8 @@ jobs:
           python-version: "3.11"
       - name: Install backend dependencies
         run: pip install -r requirements.txt
-      - name: Run ten copy-recovery checks sequentially
-        run: python scripts/run_copy_recovery_group.py
-      - name: Run ten copy-safety checks sequentially
-        run: python scripts/run_copy_safety_group.py
-      - name: Run ten position-group accounting checks sequentially
-        run: python scripts/run_position_group_accounting.py
+      - name: Run thirty copy and position integrity checks sequentially
+        run: python scripts/run_copy_position_integrity_batch.py
       - name: Run ten close-cost ledger checks sequentially
         run: python scripts/run_close_cost_ledger_group.py
       - name: Run ten copied-ledger reconciliation checks sequentially
