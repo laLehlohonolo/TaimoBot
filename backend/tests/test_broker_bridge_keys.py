@@ -1,3 +1,4 @@
+import secrets
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,13 +31,16 @@ class FakeSecretManager:
         self.fail_after_create = fail_after_create
         self.idempotency = {}
 
-    def create_secret(self, *, name, value, idempotency_key):
+    def create_secret(self, *, name, idempotency_key):
         if self.fail_create:
             raise RuntimeError("vault unavailable")
         if idempotency_key in self.idempotency:
-            return self.idempotency[idempotency_key]
+            ref = self.idempotency[idempotency_key]
+            if self.secrets[ref]["name"] != name:
+                raise ValueError("idempotency key is already bound to another secret name")
+            return ref
         ref = "vault://taimobot/test/" + str(len(self.secrets) + 1)
-        self.secrets[ref] = {"name": name, "value": value}
+        self.secrets[ref] = {"name": name, "value": secrets.token_bytes(32)}
         self.idempotency[idempotency_key] = ref
         if self.on_create is not None:
             self.on_create()
@@ -265,6 +269,7 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(pending["status"], "PENDING")
         self.assertEqual(len(manager.secrets), 1)
+        original_secret = next(iter(manager.secrets.values()))["value"]
 
         result = provision_bridge_key(
             "bridge-key-connection", self.admin_id, manager,
@@ -272,6 +277,8 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "ACTIVE")
         self.assertEqual(len(manager.secrets), 1)
+        self.assertEqual(next(iter(manager.secrets.values()))["value"], original_secret)
+        self.assertEqual(len(original_secret), 32)
         with database.get_connection() as connection:
             completed = connection.execute(
                 "SELECT status, key_id, secret_ref FROM broker_bridge_provisioning_operations WHERE operation_id = ?",
@@ -319,16 +326,18 @@ class BrokerBridgeKeyMetadataTests(unittest.TestCase):
 
     def test_fake_secret_manager_reuses_reference_for_same_idempotency_key(self):
         manager = FakeSecretManager()
-        first = manager.create_secret(
-            name="taimobot/test/one", value=b"a" * 32,
-            idempotency_key="22222222-2222-4222-8222-222222222222",
-        )
-        second = manager.create_secret(
-            name="taimobot/test/retry", value=b"a" * 32,
-            idempotency_key="22222222-2222-4222-8222-222222222222",
-        )
+        operation_id = "22222222-2222-4222-8222-222222222222"
+        name = "taimobot/test/one"
+        first = manager.create_secret(name=name, idempotency_key=operation_id)
+        original_secret = manager.secrets[first]["value"]
+        second = manager.create_secret(name=name, idempotency_key=operation_id)
         self.assertEqual(first, second)
+        self.assertEqual(manager.secrets[first]["value"], original_secret)
+        self.assertEqual(len(original_secret), 32)
         self.assertEqual(len(manager.secrets), 1)
+
+        with self.assertRaisesRegex(ValueError, "another secret name"):
+            manager.create_secret(name="taimobot/test/other", idempotency_key=operation_id)
 
     def test_provisioning_compensates_if_connection_is_paused_during_vault_write(self):
         def pause_connection():
