@@ -84,8 +84,8 @@ The repository contains HMAC verification and persistent nonce-consumption primi
 
 `backend/app/broker_bridge_provisioning.py` defines a narrow `SecretManager` protocol and an internal orchestration boundary:
 
-1. Generate 256 bits of key material server-side using Python's cryptographic random source.
-2. Ask the injected secret manager to persist the material and return an opaque `vault://` or `secretmanager://` reference.
+1. Ask the injected secret manager to generate and persist 256 bits of cryptographically random key material under the durable operation ID.
+2. Require the secret manager to return the same opaque reference and preserve the exact same secret bytes when the same operation ID is retried after an ambiguous timeout. The adapter owns one-time generation; the orchestration layer never generates replacement bytes on retry.
 3. Activate non-secret database metadata only after secret creation succeeds.
 4. If metadata activation fails, attempt to delete the newly created secret.
 5. If compensation also fails, return a generic operator-cleanup error without disclosing the secret reference or key material.
@@ -99,9 +99,9 @@ The service does not enable broker connectivity or trading. Broker bridge eviden
 
 ## Idempotent vault creation and ambiguous timeouts
 
-The provisioning protocol now requires an idempotency key on each secret-creation call. The key is a UUID operation identifier, not secret material. A compliant vault adapter must guarantee that repeated create requests with the same idempotency key resolve to the same secret reference and do not create duplicate secret objects.
+The provisioning protocol now requires an idempotency key on each secret-creation call. The key is a UUID operation identifier, not secret material. A compliant vault adapter must generate the secret material once, atomically bind it to that operation ID, and guarantee that repeated create requests with the same idempotency key resolve to the same secret reference and the exact same secret bytes without creating duplicate secret objects. The orchestrator must not generate fresh bytes for a retry: after an ambiguous timeout it cannot know whether the original secret was committed, so new bytes could mismatch the already-created vault object.
 
-The provisioning caller must durably create and persist the operation ID before making the vault request, then reuse that exact ID when retrying after a timeout, lost response, or process restart. The internal orchestration helper accepts this stable `operation_id` and passes it through as the vault idempotency key. If the caller generates a new ID on retry, the vault cannot correlate the attempt and duplicate/orphaned secrets remain possible.
+The provisioning caller must durably create and persist the operation ID before making the vault request, then reuse that exact ID when retrying after a timeout, lost response, or process restart. The internal orchestration helper accepts this stable `operation_id` and passes it through as the vault idempotency key. Secret generation occurs inside the adapter's idempotent create operation, not in the retrying caller. If the caller generates a new ID on retry, the vault cannot correlate the attempt and duplicate/orphaned secrets remain possible. If an adapter cannot guarantee both reference and byte stability for a repeated operation ID, it is not compliant and must not be used for provisioning.
 
 **Current boundary:** the durable provisioning-operation table and recovery orchestration are implemented in `broker_bridge_provisioning_store.py` and `broker_bridge_provisioning.py`, with regression coverage using a fake secret manager. A production vault adapter, adapter-side idempotency guarantees, operator cleanup/reconciliation workflow, and provisioning route are still absent. Therefore crash recovery is covered at the application orchestration layer but is not yet end-to-end against a real vault. Do not expose a production provisioning route until the production adapter, retry/reconciliation policy, and audited operator cleanup path are implemented and tested.
 
