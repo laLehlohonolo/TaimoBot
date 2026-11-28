@@ -11,7 +11,7 @@ from app.broker_bridge_ingestion import (
     MAX_EVIDENCE_BODY_BYTES,
     ingest_authenticated_bridge_evidence,
 )
-from app.broker_bridge_security import sign_bridge_message
+from app.broker_bridge_security import BridgeAuthenticationError, sign_bridge_message
 from app.database import init_db
 
 
@@ -197,7 +197,7 @@ class BrokerBridgeIngestionServiceTests(unittest.TestCase):
     def test_replay_is_rejected_by_persistent_nonce_store(self):
         nonce = "nonce-service-replay-01"
         self._request(nonce=nonce)
-        with self.assertRaises(Exception):
+        with self.assertRaises(BridgeAuthenticationError):
             self._request(nonce=nonce)
 
     def test_identical_evidence_is_idempotent_across_fresh_requests(self):
