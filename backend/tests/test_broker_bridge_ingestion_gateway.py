@@ -369,7 +369,7 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
         self.assertEqual(evidence_count, 0)
 
 
-    def test_result_audit_failure_is_recoverable_by_idempotent_retry(self):
+    def test_result_audit_failure_rolls_back_evidence_and_retry_stores_once(self):
         import os
         from unittest.mock import patch
         from app import broker_bridge_ingestion_gateway as gateway
@@ -403,7 +403,7 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
                     "SELECT event_type, reason_code FROM broker_bridge_ingestion_audit "
                     "ORDER BY audit_id"
                 ).fetchall()
-            self.assertEqual(evidence_after_first, 1)
+            self.assertEqual(evidence_after_first, 0)
             self.assertEqual(
                 [(row["event_type"], row["reason_code"]) for row in audit_after_first],
                 [
@@ -425,7 +425,7 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
 
         client.close()
         self.assertEqual(retry.status_code, 200, retry.text)
-        self.assertEqual(retry.json()["status"], "DUPLICATE_IGNORED")
+        self.assertEqual(retry.json()["status"], "STORED")
         with database.get_connection() as connection:
             evidence_count = connection.execute(
                 "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
@@ -441,7 +441,7 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
                 ("ATTEMPT", "REQUEST_RECEIVED"),
                 ("RESULT", "INTERNAL_FAILURE"),
                 ("ATTEMPT", "REQUEST_RECEIVED"),
-                ("RESULT", "DUPLICATE_IGNORED"),
+                ("RESULT", "ACCEPTED"),
             ],
         )
 
