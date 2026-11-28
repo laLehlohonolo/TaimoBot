@@ -98,6 +98,11 @@ def _validate_evidence(evidence):
     return kind, evidence_id, provider_timestamp, normalized
 
 
+def validate_bridge_evidence(evidence):
+    """Validate the strict evidence schema without performing database I/O."""
+    return _validate_evidence(evidence)[3]
+
+
 def persist_authenticated_bridge_evidence(connection_id, evidence, *, accepted_at=None):
     """Persist evidence using connection ownership from the database, never payload claims.
 
