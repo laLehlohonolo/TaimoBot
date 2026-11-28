@@ -1,4 +1,4 @@
-"""Run thirty broker-bridge provisioning, lease, and authentication checks sequentially."""
+"""Run thirty-six broker-bridge provisioning, lease, vault, and authentication checks sequentially."""
 import importlib.util
 import sys
 import unittest
@@ -19,6 +19,7 @@ def load_module(module_name, relative_path):
 keys_module = load_module("broker_bridge_key_regression_tests", Path("tests") / "test_broker_bridge_keys.py")
 store_module = load_module("broker_bridge_lease_regression_tests", Path("tests") / "test_broker_bridge_provisioning_store.py")
 ingestion_module = load_module("broker_bridge_ingestion_regression_tests", Path("tests") / "test_broker_bridge_ingestion_primitives.py")
+vault_module = load_module("broker_bridge_vault_regression_tests", Path("tests") / "test_broker_bridge_vault.py")
 
 KEY_CASES = [
     "test_activation_returns_only_non_secret_metadata",
@@ -60,16 +61,27 @@ INGESTION_CASES = [
 ]
 
 
+VAULT_CASES = [
+    "test_reads_only_server_resolved_reference_and_returns_no_cache",
+    "test_unknown_or_revoked_key_fails_before_vault_read",
+    "test_vault_outage_fails_closed_without_leaking_adapter_error",
+    "test_short_or_non_bytes_secret_fails_closed",
+    "test_rotation_or_revocation_during_vault_read_fails_closed",
+    "test_untrusted_or_malformed_vault_reference_fails_before_read",
+]
+
+
 def main():
     suite = unittest.TestSuite()
     suite.addTests(keys_module.BrokerBridgeKeyMetadataTests(name) for name in KEY_CASES)
     suite.addTests(store_module.ProvisioningActivationLeaseTests(name) for name in LEASE_CASES)
     suite.addTests(ingestion_module.BrokerBridgeIngestionPrimitiveTests(name) for name in INGESTION_CASES)
+    suite.addTests(vault_module.BrokerBridgeVaultBoundaryTests(name) for name in VAULT_CASES)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if not result.wasSuccessful() or result.testsRun != 30:
-        print(f"BROKER BRIDGE SECURITY BATCH: {result.testsRun}/30 executed; failures={len(result.failures)}, errors={len(result.errors)}")
+    if not result.wasSuccessful() or result.testsRun != 36:
+        print(f"BROKER BRIDGE SECURITY BATCH: {result.testsRun}/36 executed; failures={len(result.failures)}, errors={len(result.errors)}")
         return 1
-    print("TAIMOBOT BROKER BRIDGE SECURITY BATCH: 30/30 PASSED SEQUENTIALLY.")
+    print("TAIMOBOT BROKER BRIDGE SECURITY BATCH: 36/36 PASSED SEQUENTIALLY.")
     return 0
 
 
