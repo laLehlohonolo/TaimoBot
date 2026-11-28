@@ -144,6 +144,33 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
         self.assertEqual(row["reason_code"], "ACCEPTED")
         self.assertEqual(row["body_bytes"], 42)
 
+    def test_failed_audit_trigger_migration_preserves_existing_immutability(self):
+        append_bridge_ingestion_audit(
+            request_id="request-migration-rollback", event_type="RESULT",
+            participant_user_id=self.owner, connection_id=self.connection_one,
+            key_id="key-migration-rollback", http_status=200,
+            reason_code="ACCEPTED", body_bytes=8,
+        )
+        with database.get_connection() as connection:
+            def deny_trigger_creation(action, _arg1, _arg2, _database, _trigger):
+                if action == sqlite3.SQLITE_CREATE_TRIGGER:
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            connection.set_authorizer(deny_trigger_creation)
+            with self.assertRaises(sqlite3.DatabaseError):
+                ensure_bridge_ingestion_gateway_schema(connection)
+            connection.set_authorizer(None)
+
+            # A failed replacement must roll back the DROP as well. The old
+            # immutability trigger remains active for other connections too.
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE broker_bridge_ingestion_audit "
+                    "SET reason_code='INTERNAL_FAILURE' "
+                    "WHERE request_id='request-migration-rollback'"
+                )
+
     def test_account_deletion_anonymises_audit_without_erasing_event(self):
         disposable_user = register_user(
             "gateway-deletion@taimobot.local",
