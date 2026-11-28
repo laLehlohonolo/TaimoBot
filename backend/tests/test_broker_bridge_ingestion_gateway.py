@@ -1,4 +1,6 @@
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,6 +97,64 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
             participant_capacity=1, connection_capacity=5,
         )
         self.assertTrue(result["allowed"])
+
+    def test_concurrent_requests_cannot_exceed_connection_capacity(self):
+        barrier = threading.Barrier(8)
+
+        def consume():
+            barrier.wait(timeout=10)
+            return self._limit(
+                self.connection_one,
+                now=1000,
+                participant_capacity=20,
+                connection_capacity=3,
+                window_seconds=60,
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _index: consume(), range(8)))
+
+        self.assertEqual(sum(1 for result in results if result["allowed"]), 3)
+        self.assertEqual(sum(1 for result in results if not result["allowed"]), 5)
+        self.assertTrue(all(
+            result["scope"] == "CONNECTION"
+            for result in results if not result["allowed"]
+        ))
+
+    def test_connection_deletion_cascades_its_rate_limit_bucket(self):
+        self._limit(self.connection_one)
+        with database.get_connection() as connection:
+            connection.execute(
+                "DELETE FROM participant_broker_connections WHERE connection_id = ?",
+                (self.connection_one,),
+            )
+            remaining = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_ingestion_rate_limits "
+                "WHERE bucket_scope = 'CONNECTION' AND connection_id = ?",
+                (self.connection_one,),
+            ).fetchone()["count"]
+        self.assertEqual(remaining, 0)
+
+    def test_legacy_orphaned_connection_buckets_are_swept(self):
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO broker_bridge_ingestion_rate_limits (
+                    bucket_key, bucket_scope, participant_user_id, connection_id,
+                    tokens, updated_at
+                ) VALUES (?, 'CONNECTION', ?, NULL, 4, 1000)
+                """,
+                ("connection:legacy-deleted-connection", self.owner),
+            )
+
+        result = self._limit(self.connection_two, now=1000)
+        self.assertTrue(result["allowed"])
+        with database.get_connection() as connection:
+            remaining = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_ingestion_rate_limits "
+                "WHERE bucket_scope = 'CONNECTION' AND connection_id IS NULL"
+            ).fetchone()["count"]
+        self.assertEqual(remaining, 0)
 
     def test_audit_stores_only_redacted_allowlisted_metadata(self):
         append_bridge_ingestion_audit(
