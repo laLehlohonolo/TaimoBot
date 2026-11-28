@@ -5,12 +5,10 @@ from pathlib import Path
 
 from app import database
 from app.auth import register_user
-from app.broker_bridge_provisioning_store import ensure_schema as ensure_provisioning_schema
 from app.broker_bridge_provisioning_store import load_or_create, update
 from app.broker_bridge_reconciliation_audit import (
     ReconciliationAuditError,
     append_event,
-    ensure_schema as ensure_audit_schema,
 )
 from app.database import init_db
 
@@ -49,8 +47,7 @@ class BrokerBridgeReconciliationAuditTests(unittest.TestCase):
                     "2026-11-27T10:00:00+00:00",
                 ),
             )
-        ensure_provisioning_schema()
-        self.operation_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+            self.operation_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
         load_or_create(
             self.operation_id, "audit-test-connection", self.admin_id
         )
@@ -59,7 +56,6 @@ class BrokerBridgeReconciliationAuditTests(unittest.TestCase):
             secret_ref="vault://test/audit-secret",
             error_code="TEST_ONLY",
         )
-        ensure_audit_schema()
 
     def tearDown(self):
         database.DB_PATH = self.original_db_path
@@ -88,6 +84,17 @@ class BrokerBridgeReconciliationAuditTests(unittest.TestCase):
         self.assertEqual(operation["secret_ref"], "vault://test/audit-secret")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["actor_user_id"], self.admin_id)
+
+    def test_application_database_bootstrap_creates_provisioning_and_audit_tables(self):
+        with database.get_connection() as connection:
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        self.assertIn("broker_bridge_provisioning_operations", tables)
+        self.assertIn("broker_bridge_reconciliation_audit", tables)
 
     def test_sensitive_reason_fragments_are_redacted_before_persistence(self):
         event = append_event(
