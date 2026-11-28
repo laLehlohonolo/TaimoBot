@@ -11,6 +11,7 @@ role ARNs, credentials, secret ARNs, or key material.
 This design separates:
 - ECS task execution role (ECS agent: image pull and log delivery).
 - Application provisioning role (create and recover secrets; tightly controlled).
+- Dedicated cleanup-worker role (delete only after a fenced cleanup reservation).
 - Application runtime retrieval role (read only).
 - Human operator reconciliation role (separately approved and audited).
 
@@ -67,7 +68,7 @@ Illustrative identity policy (not yet tested in an AWS account):
       }
     },
     {
-      "Sid": "RecoverAndCompensateBrokerBridgeSecrets",
+      "Sid": "RecoverProvisioningOperationSecrets",
       "Effect": "Allow",
       "Action": [
         "secretsmanager:DescribeSecret",
@@ -114,7 +115,7 @@ Illustrative identity policy (not yet tested in an AWS account):
 
 
 
-## 2A. Separate cleanup-worker role — draft
+## 2. Separate cleanup-worker role — draft
 
 Do not combine destructive cleanup with provisioning or runtime retrieval.
 If the adapter's compensation path is retained, run it through a dedicated
