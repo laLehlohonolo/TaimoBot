@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app import database
@@ -137,6 +138,66 @@ class BrokerBridgeReconciliationInspectionTests(unittest.TestCase):
                 actor_id=self.admin_id,
                 operation_id="missing-operation",
             )
+
+    def test_paused_connection_blocks_reconciliation_cleanup_recommendation(self):
+        with database.get_connection() as connection:
+            connection.execute(
+                "UPDATE participant_broker_connections SET state='PAUSED' WHERE connection_id = ?",
+                ("reconciliation-test-connection",),
+            )
+        result = preflight_provisioning_operation(
+            actor_id=self.admin_id,
+            operation_id=self.operation_id,
+        )
+        self.assertEqual(result["classification"], "BLOCKED_CONNECTION_NOT_ACTIVE")
+        self.assertEqual(result["proposed_action"], "ESCALATE_FOR_REVIEW")
+        self.assertEqual(result["connection_state"], "PAUSED")
+        self.assertFalse(result["mutated"])
+        self.assertFalse(result["vault_contacted"])
+
+    def test_expired_activation_lease_is_flagged_for_review_not_cleanup(self):
+        expired = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        with database.get_connection() as connection:
+            connection.execute(
+                """UPDATE broker_bridge_provisioning_operations
+                   SET status='ACTIVATING', lease_expires_at=?, activation_token='test-fence'
+                   WHERE operation_id=?""",
+                (expired, self.operation_id),
+            )
+        result = preflight_provisioning_operation(
+            actor_id=self.admin_id,
+            operation_id=self.operation_id,
+        )
+        self.assertEqual(
+            result["classification"], "EXPIRED_ACTIVATION_LEASE_REQUIRES_REVIEW"
+        )
+        self.assertEqual(result["proposed_action"], "OPERATOR_REVIEW_ONLY")
+        self.assertFalse(result["mutated"])
+        self.assertFalse(result["vault_contacted"])
+
+    def test_live_or_invalid_activation_lease_never_authorizes_cleanup(self):
+        for expiry in (
+            (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+            "not-a-timestamp",
+            None,
+        ):
+            with database.get_connection() as connection:
+                connection.execute(
+                    """UPDATE broker_bridge_provisioning_operations
+                       SET status='ACTIVATING', lease_expires_at=?, activation_token='test-fence'
+                       WHERE operation_id=?""",
+                    (expiry, self.operation_id),
+                )
+            result = preflight_provisioning_operation(
+                actor_id=self.admin_id,
+                operation_id=self.operation_id,
+            )
+            self.assertEqual(result["classification"], "REVIEW_ACTIVATION_LEASE")
+            self.assertEqual(
+                result["proposed_action"], "INSPECT_LEASE_AND_RETRY_STATE"
+            )
+            self.assertFalse(result["mutated"])
+            self.assertFalse(result["vault_contacted"])
 
 
 if __name__ == "__main__":
