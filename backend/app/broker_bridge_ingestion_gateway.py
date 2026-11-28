@@ -234,6 +234,7 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
     if os.getenv("TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED", "").lower() != "true":
         _http_rejection(404, "Broker evidence ingress is disabled.")
 
+    authenticated_audit_started = False
     try:
         content_type = request.headers.get("content-type", "")
         if content_type.split(";", 1)[0].strip().lower() != "application/json":
@@ -264,6 +265,7 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
         body_bytes = len(raw_body)
 
         def after_authenticate(_authentication, _secret_context):
+            nonlocal authenticated_audit_started
             # HMAC, persistent nonce, active-key status, and connection state have
             # passed. Only now may this request consume quota or create audit rows.
             append_bridge_ingestion_audit(
@@ -272,6 +274,7 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
                 key_id=key_id, http_status=0, reason_code="REQUEST_RECEIVED",
                 body_bytes=body_bytes,
             )
+            authenticated_audit_started = True
             limit = consume_bridge_ingestion_rate_limit(
                 participant_user_id, connection_id,
             )
@@ -315,5 +318,17 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
         )
         _http_rejection(status, "Evidence request rejected.")
     except Exception:
-        # Authenticated audit failures abort before evidence persistence.
+        # Once an authenticated ATTEMPT is durable, preserve a terminal failure
+        # classification when persistence or the success audit fails. This is
+        # best-effort: the request still fails closed if the audit store is down.
+        if authenticated_audit_started:
+            try:
+                append_bridge_ingestion_audit(
+                    request_id=request_id, event_type="RESULT",
+                    participant_user_id=participant_user_id, connection_id=connection_id,
+                    key_id=key_id, http_status=503, reason_code="INTERNAL_FAILURE",
+                    body_bytes=body_bytes,
+                )
+            except Exception:
+                pass
         _http_rejection(503, "Broker evidence ingress is temporarily unavailable.")
