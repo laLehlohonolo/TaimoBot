@@ -342,5 +342,78 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
         self.assertEqual(evidence_count, 0)
 
 
+    def test_result_audit_failure_is_recoverable_by_idempotent_retry(self):
+        import os
+        from unittest.mock import patch
+        from app import broker_bridge_ingestion_gateway as gateway
+        from app.broker_bridge_security import sign_bridge_message
+
+        client, body, headers = self._http_client_and_key()
+        original_append = gateway.append_bridge_ingestion_audit
+        failed = {"value": False}
+
+        def fail_first_result(**kwargs):
+            if kwargs["event_type"] == "RESULT" and not failed["value"]:
+                failed["value"] = True
+                raise RuntimeError("simulated result-audit storage failure")
+            return original_append(**kwargs)
+
+        endpoint = (
+            f"/internal/broker-bridge/connections/{self.connection_one}/evidence"
+        )
+        secret = b"gateway-http-test-secret-material-32-bytes"
+        with patch.dict(os.environ, {"TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED": "true"}):
+            with patch.object(gateway, "append_bridge_ingestion_audit",
+                              side_effect=fail_first_result):
+                first = client.post(endpoint, content=body, headers=headers)
+
+            self.assertEqual(first.status_code, 503)
+            with database.get_connection() as connection:
+                evidence_after_first = connection.execute(
+                    "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
+                ).fetchone()["count"]
+                audit_after_first = connection.execute(
+                    "SELECT event_type, reason_code FROM broker_bridge_ingestion_audit "
+                    "ORDER BY audit_id"
+                ).fetchall()
+            self.assertEqual(evidence_after_first, 1)
+            self.assertEqual(
+                [(row["event_type"], row["reason_code"]) for row in audit_after_first],
+                [("ATTEMPT", "REQUEST_RECEIVED")],
+            )
+
+            retry_headers = dict(headers)
+            retry_headers["x-taimo-nonce"] = "gateway-http-nonce-0002"
+            retry_headers["x-taimo-signature"] = sign_bridge_message(
+                self.connection_one,
+                retry_headers["x-taimo-timestamp"],
+                retry_headers["x-taimo-nonce"],
+                body,
+                secret,
+            )
+            retry = client.post(endpoint, content=body, headers=retry_headers)
+
+        client.close()
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(retry.json()["status"], "DUPLICATE_IGNORED")
+        with database.get_connection() as connection:
+            evidence_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
+            ).fetchone()["count"]
+            audit = connection.execute(
+                "SELECT event_type, reason_code FROM broker_bridge_ingestion_audit "
+                "ORDER BY audit_id"
+            ).fetchall()
+        self.assertEqual(evidence_count, 1)
+        self.assertEqual(
+            [(row["event_type"], row["reason_code"]) for row in audit],
+            [
+                ("ATTEMPT", "REQUEST_RECEIVED"),
+                ("ATTEMPT", "REQUEST_RECEIVED"),
+                ("RESULT", "DUPLICATE_IGNORED"),
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
