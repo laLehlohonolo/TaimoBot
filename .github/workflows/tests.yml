@@ -2,9 +2,9 @@ name: TaimoBot application checks
 
 on:
   push:
-    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests]
+    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests, hardening/broker-ingestion-http-gateway, hardening/broker-ingestion-audit-anonymization]
   pull_request:
-    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases]
+    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests]
   workflow_dispatch:
 
 jobs:
@@ -135,6 +135,8 @@ jobs:
         run: python scripts/run_broker_bridge_ingestion_service_batch.py
       - name: Run ten AWS Secrets Manager adapter contract checks sequentially
         run: python scripts/run_aws_secrets_manager_batch.py
+      - name: Run eleven broker ingestion gateway security checks sequentially
+        run: python scripts/run_broker_bridge_ingestion_gateway_batch.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application

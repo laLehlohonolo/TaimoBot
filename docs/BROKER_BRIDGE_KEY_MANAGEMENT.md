@@ -1,6 +1,6 @@
 # Broker Bridge Key Management Contract
 
-Status: security design contract with a partial implementation. The AWS Secrets Manager adapter and fake-client contract tests are implemented; live AWS integration, provisioning HTTP API, and authenticated bridge endpoint are not implemented.
+Status: security design contract with a partial implementation. The disabled HTTP evidence-ingestion router, persistent rate limits, redacted append-only audit records, and focused regression batch are implemented. Live AWS integration, production runtime secret composition, provisioning HTTP API, deployment controls, and MT5 bridge client remain unimplemented or unverified.
 
 ## Security objective
 
@@ -78,7 +78,7 @@ Enforce at most one ACTIVE key per connection with a database uniqueness constra
 
 ## Current implementation boundary
 
-The repository contains HMAC verification and persistent nonce-consumption primitives, participant-scoped heartbeat/quote evidence persistence, key metadata lifecycle helpers, and an internal vault-neutral provisioning orchestrator with fenced activation leases. It contains an AWS Secrets Manager adapter with fake-client contract tests, but does not yet contain live AWS integration, a provisioning HTTP route, authenticated HTTP ingestion endpoint, complete rate limiting, append-only security audit stream, or MT5 bridge client. No broker is connected or verified. Paper trading remains the only trading mode; live order routing remains disabled.
+The repository contains HMAC verification and persistent nonce-consumption primitives, participant-scoped heartbeat/quote evidence persistence, key metadata lifecycle helpers, an internal vault-neutral provisioning orchestrator with fenced activation leases, and a dedicated HTTP evidence-ingestion router. The router has persistent participant-wide and per-connection rate limits, bounded request streaming, authenticated request auditing, and regression coverage. It is deliberately not mounted in the application. Live AWS integration, production runtime secret composition, a provisioning HTTP route, deployment-level pre-authentication controls, monitoring/alerting, operator runbooks, and an MT5 bridge client remain outstanding. No broker is connected or verified. Paper trading remains the only trading mode; live order routing remains disabled.
 
 ## Vault-neutral provisioning service (implemented)
 
@@ -92,7 +92,7 @@ The repository contains HMAC verification and persistent nonce-consumption primi
 
 Provisioning preflights a persisted administrator whose email is verified and a REQUESTED connection before any vault write. Ordinary participants, unknown actors, paused/revoked connections and unknown connections fail closed. The metadata helper independently repeats authorization and connection-state checks transactionally, closing the time-of-check/time-of-use gap; a state change during vault creation triggers compensation.
 
-**Not yet implemented:** live AWS service integration and validated vault access policies, provisioning HTTP route, audit event pipeline, or authenticated evidence-ingestion gateway. The adapter's retrieval path is implemented without caching; production rotation/revocation and operational invalidation behavior still require cloud integration tests. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
+**Not yet implemented:** live AWS service integration and validated vault access policies, provisioning HTTP route, and production runtime composition of the secret reader. The HTTP evidence-ingestion gateway and its audit/rate-limit boundary are implemented but remain unmounted. The adapter's retrieval path is implemented without caching; production rotation/revocation and operational invalidation behavior still require cloud integration tests. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
 
 The service does not enable broker connectivity or trading. Broker bridge evidence remains read-only and paper trading remains separate.
 
@@ -120,7 +120,7 @@ Persisted states:
 
 Activation claims now return unique UUID fencing tokens. Reclaiming an expired lease replaces the token, so a delayed worker cannot activate metadata or complete the operation with its stale token. The key metadata write validates the current token and unexpired lease inside the same SQLite transaction that inserts the key and changes the operation to `ACTIVATED`; both changes commit or roll back together. Failure cleanup first atomically moves the operation to a non-reclaimable `CLEANUP_REQUIRED` state while the worker still owns the lease, and only then attempts vault deletion. A worker that has lost ownership does not delete the secret or overwrite the newer worker's state. Legacy metadata committed before this atomic transition can be reconciled only after a new worker claims a current lease. Regression tests cover token replacement, stale-worker rejection, expired-lease rejection, and atomic completion. The service still recovers an ambiguous vault timeout by repeating the idempotent create call with the same operation ID.
 
-The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no live AWS vault integration, provisioning HTTP endpoint, operator cleanup workflow, or authenticated evidence-ingestion gateway.
+The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no live AWS vault integration, provisioning HTTP endpoint, or operator cleanup workflow. The authenticated evidence-ingestion HTTP router is implemented but intentionally unmounted.
 
 
 ## Hosting and production secret-manager decision (2026-11-28)
@@ -181,4 +181,26 @@ The service currently enforces:
 - Existing HMAC verification, persistent nonce replay protection, active-key/connection transaction recheck, strict HEARTBEAT/QUOTE evidence schema, idempotent persistence, and database-derived participant ownership are reused.
 - Responses expose only evidence status/identity and explicitly report read-only behavior; no secret bytes, participant identity, broker account controls or order methods are returned.
 
-Thirteen focused service checks are added to CI. This is a local service boundary only: no FastAPI route, ingress authentication middleware, per-participant/per-connection rate limiter, durable redacted audit sink, public endpoint, production vault composition, or MT5 bridge client has been implemented. HMAC proves possession of the shared bridge key, not broker provenance. Do not treat a signed quote as independently verified broker market data, enable XAUUSD execution, or permit order/account-control operations on this basis.
+Thirteen focused service checks were added to CI for the internal composition service. The subsequent HTTP gateway is implemented separately in `backend/app/broker_bridge_ingestion_gateway.py`; its dedicated router is not mounted by `backend/app/main.py`. The HTTP gateway includes HMAC authentication, persistent nonce protection, bounded request bodies, participant-wide and per-connection rate limits, and redacted append-only ATTEMPT/RESULT audit records. Its focused CI batch currently contains 16 regression tests. This remains a disabled, read-only evidence boundary: no production vault composition, live AWS validation, public endpoint, or MT5 bridge client is available. HMAC proves possession of the shared bridge key, not broker provenance. Do not treat a signed quote as independently verified broker market data, enable XAUUSD execution, or permit order/account-control operations on this basis.
+
+
+## Disabled HTTP evidence-ingestion gateway (2026-11-28)
+
+The dedicated router in `backend/app/broker_bridge_ingestion_gateway.py` now provides an internal HTTP boundary for read-only HEARTBEAT/QUOTE evidence. It is intentionally not included by `backend/app/main.py`; setting `TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED=true` alone does not mount or expose it.
+
+Implemented controls:
+- Server-side key-to-connection and participant resolution; participant identity is never accepted from the evidence body.
+- HMAC authentication, persistent nonce/replay protection, and active-key/connection rechecks.
+- Bounded streaming request-body enforcement (16 KiB), content-type and content-length validation.
+- Persistent participant-wide and per-connection token buckets, atomically consumed only after authentication.
+- Redacted, allow-listed append-only ATTEMPT/RESULT audit records; evidence persistence and successful result auditing share a transaction.
+- Regression coverage for concurrent quota enforcement, bucket cleanup, authenticated rejection auditing, and evidence rollback when result auditing fails.
+
+The focused gateway CI batch reports 16/16 passing tests; the full backend suite reports 1,592 passing tests on the reviewed branch head. These results establish application-level regression coverage only. They do not establish deployment readiness, AWS behavior, broker provenance, or production security.
+
+Before any mounting or deployment, require all of the following:
+1. Implement and validate the production AWS Secrets Manager client composition with workload identity, scoped IAM/KMS policies, and non-production cloud failure-injection tests.
+2. Configure reverse-proxy or load-balancer request-size, connection, and pre-authentication rate controls; application streaming limits are not a substitute for volumetric protection.
+3. Add monitoring, alerting, dashboards, retention policy, and incident/runbook procedures for authentication failures, replay attempts, rate-limit events, vault errors, and gateway health.
+4. Complete independent security review and operator approval, including verification that the router remains read-only and cannot reach order/account-control operations.
+5. Keep broker connectivity and live order routing disabled; no participant credentials or broker account access may be introduced through this evidence-only gateway.

@@ -103,7 +103,9 @@ def validate_bridge_evidence(evidence):
     return _validate_evidence(evidence)[3]
 
 
-def persist_authenticated_bridge_evidence(connection_id, evidence, *, accepted_at=None):
+def persist_authenticated_bridge_evidence(
+    connection_id, evidence, *, accepted_at=None, after_persist=None,
+):
     """Persist evidence using connection ownership from the database, never payload claims.
 
     The caller must invoke this only after authenticate_bridge_request succeeds.
@@ -143,30 +145,37 @@ def persist_authenticated_bridge_evidence(connection_id, evidence, *, accepted_a
         if existing is not None:
             if existing["payload_json"] != payload_json:
                 raise BridgeEvidenceError("Evidence ID already exists with different content.")
-            return {
+            result = {
                 "status": "DUPLICATE_IGNORED",
                 "connection_id": connection_id,
                 "evidence_id": evidence_id,
                 "evidence_kind": kind,
                 "live_order_routing": False,
             }
-        connection.execute(
-            """
-            INSERT INTO broker_bridge_evidence (
-                connection_id, participant_user_id, evidence_id,
-                evidence_kind, provider_timestamp, received_at, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                connection_id, owner["participant_user_id"], evidence_id,
-                kind, provider_timestamp, received_at, payload_json,
-            ),
-        )
-    return {
-        "status": "STORED",
-        "connection_id": connection_id,
-        "evidence_id": evidence_id,
-        "evidence_kind": kind,
-        "received_at": received_at,
-        "live_order_routing": False,
-    }
+        else:
+            connection.execute(
+                """
+                INSERT INTO broker_bridge_evidence (
+                    connection_id, participant_user_id, evidence_id,
+                    evidence_kind, provider_timestamp, received_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    connection_id, owner["participant_user_id"], evidence_id,
+                    kind, provider_timestamp, received_at, payload_json,
+                ),
+            )
+            result = {
+                "status": "STORED",
+                "connection_id": connection_id,
+                "evidence_id": evidence_id,
+                "evidence_kind": kind,
+                "received_at": received_at,
+                "live_order_routing": False,
+            }
+
+        # The terminal audit callback shares this transaction. If it fails,
+        # evidence persistence rolls back rather than committing an unaudited row.
+        if after_persist is not None:
+            after_persist(connection, result)
+    return result

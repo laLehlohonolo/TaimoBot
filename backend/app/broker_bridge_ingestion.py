@@ -25,6 +25,15 @@ class BridgeIngestionRequestError(ValueError):
     """Generic request rejection safe to return without leaking secret data."""
 
 
+class BridgeIngestionRateLimitError(BridgeIngestionRequestError):
+    """Authenticated request exceeded its participant or connection quota."""
+
+    def __init__(self, retry_after, scope):
+        super().__init__("Bridge evidence rate limit exceeded.")
+        self.retry_after = max(1, int(retry_after))
+        self.scope = scope
+
+
 def _reject_constant(_value):
     raise BridgeIngestionRequestError("Evidence JSON contains a non-finite number.")
 
@@ -92,6 +101,8 @@ def ingest_authenticated_bridge_evidence(
     content_type,
     secret_reader,
     now=None,
+    after_authenticate=None,
+    after_persist=None,
 ):
     """Authenticate and persist one participant-scoped HEARTBEAT or QUOTE.
 
@@ -125,10 +136,16 @@ def ingest_authenticated_bridge_evidence(
         key_id=key_id,
         now=now_epoch,
     )
+    if after_authenticate is not None:
+        # This hook runs only after HMAC, nonce, key status, and connection state
+        # have been verified, but before any evidence is persisted.
+        after_authenticate(authentication, context)
+
     try:
         result = persist_authenticated_bridge_evidence(
             authentication["connection_id"],
             evidence,
+            after_persist=after_persist,
         )
     except BridgeEvidenceError as error:
         raise BridgeIngestionRequestError(str(error)) from None
