@@ -169,3 +169,16 @@ AWS documents that `ClientRequestToken` is the version identifier: a retry with 
 **Adapter test coverage added:** 10 tests cover 256-bit generation, KMS selection, operation-token binding, ambiguous create recovery, retry byte stability, name/reference validation, malformed secret rejection, tag mismatch, destructive cleanup invocation, and generic failure handling. Tests use a fake AWS client. They are local contract tests only; no AWS account calls have been made.
 
 **Current status:** adapter code and tests are committed to the draft branch. No production dependency wiring, cloud client construction, IAM policies, KMS key, AWS account resource, provisioning route, or deployment exists yet. The production route remains blocked until real AWS integration and operator-reconciliation tests pass.
+
+## Read-only evidence-ingestion service boundary (2026-11-28)
+
+Added `backend/app/broker_bridge_ingestion.py` as an internal composition service. It is not mounted as an HTTP endpoint and does not create a public ingestion surface. A future deployment must inject a least-privilege `SecretReader` only after cloud-vault integration and runtime identity are independently validated.
+
+The service currently enforces:
+- JSON content type and strict UTF-8 JSON parsing; duplicate object keys, non-finite numbers, non-object payloads, empty bodies and bodies over 16 KiB are rejected before vault access.
+- Provider timestamps must include a timezone, be no more than 15 minutes old, and be no more than 60 seconds in the future.
+- Key and connection are resolved from server-owned metadata; a caller-selected connection must match the resolved key binding.
+- Existing HMAC verification, persistent nonce replay protection, active-key/connection transaction recheck, strict HEARTBEAT/QUOTE evidence schema, idempotent persistence, and database-derived participant ownership are reused.
+- Responses expose only evidence status/identity and explicitly report read-only behavior; no secret bytes, participant identity, broker account controls or order methods are returned.
+
+Thirteen focused service checks are added to CI. This is a local service boundary only: no FastAPI route, ingress authentication middleware, per-participant/per-connection rate limiter, durable redacted audit sink, public endpoint, production vault composition, or MT5 bridge client has been implemented. HMAC proves possession of the shared bridge key, not broker provenance. Do not treat a signed quote as independently verified broker market data, enable XAUUSD execution, or permit order/account-control operations on this basis.
