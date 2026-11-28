@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt
 
 from .database import init_db, get_connection
+from .broker_bridge_ingestion_gateway import ensure_bridge_ingestion_gateway_schema
 from .maintenance_scheduler import (
     maintenance_scheduler,
     get_maintenance_status,
@@ -91,6 +92,8 @@ from .broker_connections import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    with get_connection() as connection:
+        ensure_bridge_ingestion_gateway_schema(connection)
     maintenance_task = asyncio.create_task(maintenance_scheduler())
     try:
         yield
