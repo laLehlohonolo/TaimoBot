@@ -14,7 +14,7 @@ from typing import Any
 _REF_PREFIX = "secretmanager://"
 _NAME_PREFIX = "taimobot/broker-bridge/"
 _ARN_RE = re.compile(
-    r"^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:\\d{12}:secret:[A-Za-z0-9/_+=.@-]+$"
+    r"^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$"
 )
 _MIN_SECRET_BYTES = 32
 
