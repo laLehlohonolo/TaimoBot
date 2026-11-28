@@ -369,6 +369,47 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
         self.assertEqual(evidence_count, 0)
 
 
+    def test_authenticated_request_rejection_writes_terminal_result(self):
+        import os
+        from unittest.mock import patch
+        from app import broker_bridge_ingestion_gateway as gateway
+        from app.broker_bridge_ingestion import BridgeIngestionRequestError
+
+        client, body, headers = self._http_client_and_key()
+
+        def reject_after_authentication(**kwargs):
+            kwargs["after_authenticate"](None, {})
+            raise BridgeIngestionRequestError("Evidence validation failed.")
+
+        with patch.dict(os.environ, {"TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED": "true"}):
+            with patch.object(
+                gateway, "ingest_authenticated_bridge_evidence",
+                side_effect=reject_after_authentication,
+            ):
+                response = client.post(
+                    f"/internal/broker-bridge/connections/{self.connection_one}/evidence",
+                    content=body, headers=headers,
+                )
+        client.close()
+        self.assertEqual(response.status_code, 400)
+        with database.get_connection() as connection:
+            audit = connection.execute(
+                "SELECT event_type, reason_code, http_status "
+                "FROM broker_bridge_ingestion_audit ORDER BY audit_id"
+            ).fetchall()
+            evidence_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
+            ).fetchone()["count"]
+        self.assertEqual(
+            [(row["event_type"], row["reason_code"], row["http_status"]) for row in audit],
+            [
+                ("ATTEMPT", "REQUEST_RECEIVED", 0),
+                ("RESULT", "REQUEST_REJECTED", 400),
+            ],
+        )
+        self.assertEqual(evidence_count, 0)
+
+
     def test_result_audit_failure_rolls_back_evidence_and_retry_stores_once(self):
         import os
         from unittest.mock import patch
