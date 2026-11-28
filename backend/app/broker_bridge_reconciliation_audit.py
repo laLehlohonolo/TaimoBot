@@ -140,3 +140,77 @@ def append_event(
         "outcome": outcome,
         "secret_material_exposed": False,
     }
+
+
+def list_events(
+    *,
+    actor_id,
+    operation_id=None,
+    limit=50,
+    before_created_at=None,
+    before_event_id=None,
+):
+    """Return a bounded, stable, admin-only audit page without secret references."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ReconciliationAuditError("Audit page size must be between 1 and 100.")
+    if operation_id is not None and (
+        not isinstance(operation_id, str) or not operation_id or len(operation_id) > 128
+    ):
+        raise ReconciliationAuditError("A valid operation ID is required.")
+    if (before_created_at is None) != (before_event_id is None):
+        raise ReconciliationAuditError("Both pagination cursor fields are required.")
+    if before_created_at is not None and (
+        not isinstance(before_created_at, str)
+        or not before_created_at
+        or len(before_created_at) > 40
+        or not isinstance(before_event_id, str)
+        or not re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            before_event_id,
+        )
+    ):
+        raise ReconciliationAuditError("Invalid audit pagination cursor.")
+
+    with get_connection() as connection:
+        if not _verified_admin(connection, actor_id):
+            raise ReconciliationAuditError("A verified administrator is required.")
+        clauses = []
+        params = []
+        if operation_id is not None:
+            clauses.append("operation_id = ?")
+            params.append(operation_id)
+        if before_created_at is not None:
+            clauses.append("(created_at < ? OR (created_at = ? AND event_id < ?))")
+            params.extend([before_created_at, before_created_at, before_event_id])
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = connection.execute(
+            """
+            SELECT event_id, operation_id, actor_user_id, reason,
+                   action, classification, outcome, created_at
+            FROM broker_bridge_reconciliation_audit
+            """
+            + where
+            + " ORDER BY created_at DESC, event_id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+
+    events = [
+        {
+            "event_id": row["event_id"],
+            "operation_id": row["operation_id"],
+            "actor_user_id": row["actor_user_id"],
+            "reason": row["reason"],
+            "action": row["action"],
+            "classification": row["classification"],
+            "outcome": row["outcome"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+    next_cursor = None
+    if len(events) == limit:
+        next_cursor = {
+            "before_created_at": events[-1]["created_at"],
+            "before_event_id": events[-1]["event_id"],
+        }
+    return {"events": events, "next_cursor": next_cursor}
