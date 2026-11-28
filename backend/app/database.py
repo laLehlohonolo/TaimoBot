@@ -1008,6 +1008,8 @@ def init_db():
         ensure_bridge_evidence_schema(connection)
         from .broker_bridge_keys import ensure_bridge_key_schema
         ensure_bridge_key_schema(connection)
+        from .broker_bridge_ingestion_gateway import ensure_bridge_ingestion_gateway_schema
+        ensure_bridge_ingestion_gateway_schema(connection)
 
         migrate_trade_columns(connection)
         migrate_trade_cost_ledger(connection)
