@@ -1,8 +1,8 @@
 """Rate-limited, audited HTTP boundary for read-only broker evidence.
 
-The router is deliberately NOT mounted by the application yet. Before mounting,
-deployment must inject a least-privilege SecretReader and explicitly enable the
-feature flag after proxy-level limits and operational monitoring are verified.
+The router is deliberately NOT mounted by the application yet. Deployment must
+supply a least-privilege SecretReader and verify proxy-level abuse controls.
+Only authenticated requests are written to the durable participant audit log.
 """
 import os
 import time
@@ -12,13 +12,14 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
 
 from .broker_bridge_ingestion import (
+    BridgeIngestionRateLimitError,
     BridgeIngestionRequestError,
     MAX_EVIDENCE_BODY_BYTES,
     ingest_authenticated_bridge_evidence,
 )
-from .broker_bridge_security import BridgeAuthenticationError
 from .broker_bridge_evidence import BridgeEvidenceError
 from .broker_bridge_keys import resolve_bridge_key_auth_context
+from .broker_bridge_security import BridgeAuthenticationError
 from .database import get_connection
 
 
@@ -161,11 +162,9 @@ def consume_bridge_ingestion_rate_limit(
             states.append((scope, bucket_key, capacity, tokens, refill_rate))
 
         limited = [
-            (scope, bucket_key, capacity, tokens, refill_rate)
-            for scope, bucket_key, capacity, tokens, refill_rate in states
-            if tokens < 1.0
+            state for state in states if state[3] < 1.0
         ]
-        for scope, bucket_key, capacity, tokens, _refill_rate in states:
+        for scope, bucket_key, _capacity, tokens, _refill_rate in states:
             connection.execute(
                 """
                 INSERT INTO broker_bridge_ingestion_rate_limits (
@@ -181,8 +180,7 @@ def consume_bridge_ingestion_rate_limit(
         if limited:
             retry_after = max(
                 1,
-                max(int((1.0 - tokens) / refill_rate) + 1
-                    for _scope, _key, _capacity, tokens, refill_rate in limited),
+                max(int((1.0 - state[3]) / state[4]) + 1 for state in limited),
             )
             return {"allowed": False, "scope": limited[0][0], "retry_after": retry_after}
 
@@ -200,6 +198,7 @@ def _http_rejection(status, detail, *, retry_after=None):
 
 
 async def _read_bounded_body(request):
+    # This is a memory bound, not a substitute for proxy-level pre-auth limits.
     chunks = []
     total = 0
     async for chunk in request.stream():
@@ -215,20 +214,10 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
     """Authenticated read-only evidence ingress; router is not mounted by default."""
     request_id = str(uuid.uuid4())
     key_id = request.headers.get("x-taimo-key-id")
-    participant_user_id = None
-    body_bytes = 0
     if os.getenv("TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED", "").lower() != "true":
-        append_bridge_ingestion_audit(
-            request_id=request_id, event_type="ATTEMPT", connection_id=connection_id,
-            key_id=key_id, http_status=404, reason_code="INGRESS_DISABLED",
-        )
+        # Do not create durable rows for unauthenticated traffic while disabled.
         _http_rejection(404, "Broker evidence ingress is disabled.")
 
-    # A durable attempt record must exist before any secret lookup or evidence write.
-    append_bridge_ingestion_audit(
-        request_id=request_id, event_type="ATTEMPT", connection_id=connection_id,
-        key_id=key_id, http_status=0, reason_code="REQUEST_RECEIVED",
-    )
     try:
         content_type = request.headers.get("content-type", "")
         if content_type.split(";", 1)[0].strip().lower() != "application/json":
@@ -246,70 +235,64 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
         if not all((connection_id, key_id, timestamp, nonce, signature)):
             _http_rejection(401, "Bridge authentication is required.")
 
+        # Read-only identity lookup is not a rate-limit debit or durable audit write.
         context = resolve_bridge_key_auth_context(key_id)
         if context is None or context.get("connection_id") != connection_id:
             _http_rejection(401, "Bridge identity is invalid.")
         participant_user_id = context["participant_user_id"]
 
-        limit = consume_bridge_ingestion_rate_limit(participant_user_id, connection_id)
-        if not limit["allowed"]:
-            append_bridge_ingestion_audit(
-                request_id=request_id, event_type="RESULT",
-                participant_user_id=participant_user_id, connection_id=connection_id,
-                key_id=key_id, http_status=429, reason_code="RATE_LIMITED",
-            )
-            _http_rejection(
-                429, "Bridge evidence rate limit exceeded.",
-                retry_after=limit["retry_after"],
-            )
-
         reader = getattr(request.app.state, "broker_bridge_secret_reader", None)
         if reader is None:
-            append_bridge_ingestion_audit(
-                request_id=request_id, event_type="RESULT",
-                participant_user_id=participant_user_id, connection_id=connection_id,
-                key_id=key_id, http_status=503, reason_code="KEY_UNAVAILABLE",
-            )
             _http_rejection(503, "Bridge authentication is unavailable.")
 
         raw_body = await _read_bounded_body(request)
         body_bytes = len(raw_body)
+
+        def after_authenticate(_authentication, _secret_context):
+            # HMAC, persistent nonce, active-key status, and connection state have
+            # passed. Only now may this request consume participant/connection quota
+            # or create durable audit rows.
+            append_bridge_ingestion_audit(
+                request_id=request_id, event_type="ATTEMPT",
+                participant_user_id=participant_user_id, connection_id=connection_id,
+                key_id=key_id, http_status=0, reason_code="REQUEST_RECEIVED",
+                body_bytes=body_bytes,
+            )
+            limit = consume_bridge_ingestion_rate_limit(
+                participant_user_id, connection_id,
+            )
+            if not limit["allowed"]:
+                append_bridge_ingestion_audit(
+                    request_id=request_id, event_type="RESULT",
+                    participant_user_id=participant_user_id, connection_id=connection_id,
+                    key_id=key_id, http_status=429, reason_code="RATE_LIMITED",
+                    body_bytes=body_bytes,
+                )
+                raise BridgeIngestionRateLimitError(
+                    limit["retry_after"], limit["scope"],
+                )
+
         result = ingest_authenticated_bridge_evidence(
             connection_id=connection_id, key_id=key_id,
             timestamp=timestamp, nonce=nonce, signature=signature,
             raw_body=raw_body, content_type=content_type,
-            secret_reader=reader,
+            secret_reader=reader, after_authenticate=after_authenticate,
         )
-        status = 200
         reason = "DUPLICATE_IGNORED" if result["status"] == "DUPLICATE_IGNORED" else "ACCEPTED"
         append_bridge_ingestion_audit(
             request_id=request_id, event_type="RESULT",
             participant_user_id=participant_user_id, connection_id=connection_id,
-            key_id=key_id, http_status=status, reason_code=reason, body_bytes=body_bytes,
+            key_id=key_id, http_status=200, reason_code=reason, body_bytes=body_bytes,
         )
         return result
-    except HTTPException as error:
-        reason = (
-            "CONTENT_TYPE_REJECTED" if error.status_code == 415 else
-            "BODY_TOO_LARGE" if error.status_code == 413 else
-            "AUTHENTICATION_REJECTED" if error.status_code == 401 else
-            "INTERNAL_FAILURE"
-        )
-        if error.status_code not in (404, 429, 503):
-            append_bridge_ingestion_audit(
-                request_id=request_id, event_type="RESULT",
-                participant_user_id=participant_user_id, connection_id=connection_id,
-                key_id=key_id, http_status=error.status_code,
-                reason_code=reason, body_bytes=body_bytes,
-            )
+    except BridgeIngestionRateLimitError as error:
+        _http_rejection(429, "Bridge evidence rate limit exceeded.", retry_after=error.retry_after)
+    except HTTPException:
+        # Pre-authentication failures are deliberately not written to the durable
+        # participant audit table. Enforce volumetric controls at the reverse proxy.
         raise
     except BridgeAuthenticationError:
-        append_bridge_ingestion_audit(
-            request_id=request_id, event_type="RESULT",
-            participant_user_id=participant_user_id, connection_id=connection_id,
-            key_id=key_id, http_status=401,
-            reason_code="AUTHENTICATION_REJECTED", body_bytes=body_bytes,
-        )
+        # Invalid HMACs and replay attempts must not be able to grow durable storage.
         _http_rejection(401, "Bridge authentication failed.")
     except (BridgeIngestionRequestError, BridgeEvidenceError) as error:
         message = str(error).lower()
@@ -318,22 +301,8 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
             413 if "size" in message else
             415 if "content type" in message else 400
         )
-        reason = (
-            "KEY_UNAVAILABLE" if status == 503 else
-            "BODY_TOO_LARGE" if status == 413 else
-            "CONTENT_TYPE_REJECTED" if status == 415 else "BODY_INVALID"
-        )
-        append_bridge_ingestion_audit(
-            request_id=request_id, event_type="RESULT",
-            participant_user_id=participant_user_id, connection_id=connection_id,
-            key_id=key_id, http_status=status, reason_code=reason, body_bytes=body_bytes,
-        )
         _http_rejection(status, "Evidence request rejected.")
     except Exception:
-        append_bridge_ingestion_audit(
-            request_id=request_id, event_type="RESULT",
-            participant_user_id=participant_user_id, connection_id=connection_id,
-            key_id=key_id, http_status=503,
-            reason_code="INTERNAL_FAILURE", body_bytes=body_bytes,
-        )
+        # Audit persistence is fail-closed after authentication: if the attempt
+        # record cannot be written, the callback aborts before evidence persistence.
         _http_rejection(503, "Broker evidence ingress is temporarily unavailable.")
