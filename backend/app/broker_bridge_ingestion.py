@@ -102,6 +102,7 @@ def ingest_authenticated_bridge_evidence(
     secret_reader,
     now=None,
     after_authenticate=None,
+    after_persist=None,
 ):
     """Authenticate and persist one participant-scoped HEARTBEAT or QUOTE.
 
@@ -144,6 +145,7 @@ def ingest_authenticated_bridge_evidence(
         result = persist_authenticated_bridge_evidence(
             authentication["connection_id"],
             evidence,
+            after_persist=after_persist,
         )
     except BridgeEvidenceError as error:
         raise BridgeIngestionRequestError(str(error)) from None
