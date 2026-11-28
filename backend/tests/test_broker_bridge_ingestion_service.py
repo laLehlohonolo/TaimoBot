@@ -120,6 +120,7 @@ class BrokerBridgeIngestionServiceTests(unittest.TestCase):
         evidence = {**self.evidence, "participant_user_id": self.other_owner}
         with self.assertRaises(BridgeIngestionRequestError):
             self._request(evidence=evidence)
+        self.assertEqual(self.reader.calls, [])
 
     def test_server_database_ownership_is_persisted(self):
         self._request()
