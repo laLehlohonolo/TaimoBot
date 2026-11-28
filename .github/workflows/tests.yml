@@ -129,7 +129,7 @@ jobs:
         run: python scripts/run_restore_approval_transaction_races.py
       - name: Run twenty live database symlink preflight checks sequentially
         run: python scripts/run_live_database_symlink_preflight.py
-      - name: Run thirty broker bridge provisioning and authentication checks sequentially
+      - name: Run thirty-six broker bridge provisioning, vault, and authentication checks sequentially
         run: python scripts/run_broker_bridge_security_batch.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
