@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timezone
 
 from .broker_bridge_evidence import (
+    BridgeEvidenceError,
     persist_authenticated_bridge_evidence,
     validate_bridge_evidence,
 )
@@ -102,7 +103,10 @@ def ingest_authenticated_bridge_evidence(
     evidence = _parse_body(raw_body, content_type)
     now_epoch = int(datetime.now(timezone.utc).timestamp()) if now is None else int(now)
     _validate_provider_freshness(evidence, now_epoch)
-    evidence = validate_bridge_evidence(evidence)
+    try:
+        evidence = validate_bridge_evidence(evidence)
+    except BridgeEvidenceError as error:
+        raise BridgeIngestionRequestError(str(error)) from None
 
     try:
         context = load_bridge_key_secret(key_id, secret_reader)
@@ -121,10 +125,13 @@ def ingest_authenticated_bridge_evidence(
         key_id=key_id,
         now=now_epoch,
     )
-    result = persist_authenticated_bridge_evidence(
-        authentication["connection_id"],
-        evidence,
-    )
+    try:
+        result = persist_authenticated_bridge_evidence(
+            authentication["connection_id"],
+            evidence,
+        )
+    except BridgeEvidenceError as error:
+        raise BridgeIngestionRequestError(str(error)) from None
     return {
         "status": result["status"],
         "connection_id": result["connection_id"],
