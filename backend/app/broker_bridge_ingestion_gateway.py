@@ -36,12 +36,12 @@ def ensure_bridge_ingestion_gateway_schema(connection):
             bucket_key TEXT PRIMARY KEY,
             bucket_scope TEXT NOT NULL CHECK (bucket_scope IN ('PARTICIPANT', 'CONNECTION')),
             participant_user_id TEXT NOT NULL,
-            connection_id TEXT NOT NULL,
+            connection_id TEXT,
             tokens REAL NOT NULL CHECK (tokens >= 0),
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (participant_user_id) REFERENCES users(user_id) ON DELETE CASCADE,
             FOREIGN KEY (connection_id)
-                REFERENCES participant_broker_connections(connection_id) ON DELETE CASCADE
+                REFERENCES participant_broker_connections(connection_id) ON DELETE SET NULL
         )
         """
     )
@@ -89,11 +89,6 @@ def ensure_bridge_ingestion_gateway_schema(connection):
         BEGIN SELECT RAISE(ABORT, 'Broker ingestion audit is append-only.'); END
         """
     )
-
-
-def _ensure_schema():
-    with get_connection() as connection:
-        ensure_bridge_ingestion_gateway_schema(connection)
 
 
 def append_bridge_ingestion_audit(
@@ -180,7 +175,8 @@ def consume_bridge_ingestion_rate_limit(
                 ON CONFLICT(bucket_key) DO UPDATE SET
                     tokens = excluded.tokens, updated_at = excluded.updated_at
                 """,
-                (bucket_key, scope, participant_user_id, connection_id, tokens, current),
+                (bucket_key, scope, participant_user_id,
+                 connection_id if scope == "CONNECTION" else None, tokens, current),
             )
         if limited:
             retry_after = max(
@@ -317,8 +313,16 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
         _http_rejection(401, "Bridge authentication failed.")
     except (BridgeIngestionRequestError, BridgeEvidenceError) as error:
         message = str(error).lower()
-        status = 413 if "size" in message else 415 if "content type" in message else 400
-        reason = "BODY_TOO_LARGE" if status == 413 else "CONTENT_TYPE_REJECTED" if status == 415 else "BODY_INVALID"
+        status = (
+            503 if "unavailable" in message else
+            413 if "size" in message else
+            415 if "content type" in message else 400
+        )
+        reason = (
+            "KEY_UNAVAILABLE" if status == 503 else
+            "BODY_TOO_LARGE" if status == 413 else
+            "CONTENT_TYPE_REJECTED" if status == 415 else "BODY_INVALID"
+        )
         append_bridge_ingestion_audit(
             request_id=request_id, event_type="RESULT",
             participant_user_id=participant_user_id, connection_id=connection_id,
