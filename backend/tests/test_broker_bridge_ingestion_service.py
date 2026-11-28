@@ -153,7 +153,7 @@ class BrokerBridgeIngestionServiceTests(unittest.TestCase):
         body = (
             '{"evidence_id":"heartbeat-service-0001",'
             '"kind":"HEARTBEAT","kind":"QUOTE",'
-            f'"provider_timestamp":"{self.provider_time}"}'
+            '"provider_timestamp":"' + self.provider_time + '"}'
         ).encode()
         with self.assertRaisesRegex(BridgeIngestionRequestError, "duplicate"):
             self._request(raw_body=body)
