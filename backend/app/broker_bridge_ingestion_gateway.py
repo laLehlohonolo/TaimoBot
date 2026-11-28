@@ -124,8 +124,9 @@ def ensure_bridge_ingestion_gateway_schema(connection):
 def append_bridge_ingestion_audit(
     *, request_id, event_type, participant_user_id=None, connection_id=None,
     key_id=None, http_status, reason_code, body_bytes=0, now=None,
+    connection=None,
 ):
-    """Append allow-listed metadata only; never persist body, signature, nonce or secrets."""
+    """Append allow-listed metadata; optionally join a caller's transaction."""
     allowed_events = {"ATTEMPT", "RESULT"}
     allowed_reasons = {
         "REQUEST_RECEIVED", "ACCEPTED", "DUPLICATE_IGNORED",
@@ -140,21 +141,23 @@ def append_bridge_ingestion_audit(
     if isinstance(body_bytes, bool) or not isinstance(body_bytes, int) or body_bytes < 0:
         raise ValueError("body_bytes must be a non-negative integer.")
     occurred_at = now or datetime.now(timezone.utc).isoformat()
-    with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO broker_bridge_ingestion_audit (
-                event_id, request_id, event_type, occurred_at,
-                participant_user_id, connection_id, key_id,
-                http_status, reason_code, body_bytes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(uuid.uuid4()), request_id, event_type, occurred_at,
-                participant_user_id, connection_id, key_id,
-                int(http_status), reason_code, body_bytes,
-            ),
-        )
+    params = (
+        str(uuid.uuid4()), request_id, event_type, occurred_at,
+        participant_user_id, connection_id, key_id,
+        int(http_status), reason_code, body_bytes,
+    )
+    statement = """
+        INSERT INTO broker_bridge_ingestion_audit (
+            event_id, request_id, event_type, occurred_at,
+            participant_user_id, connection_id, key_id,
+            http_status, reason_code, body_bytes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    if connection is not None:
+        connection.execute(statement, params)
+    else:
+        with get_connection() as db_connection:
+            db_connection.execute(statement, params)
 
 
 def consume_bridge_ingestion_rate_limit(
@@ -299,17 +302,25 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
                     limit["retry_after"], limit["scope"],
                 )
 
+        def append_terminal_result(db_connection, result):
+            reason = (
+                "DUPLICATE_IGNORED"
+                if result["status"] == "DUPLICATE_IGNORED"
+                else "ACCEPTED"
+            )
+            append_bridge_ingestion_audit(
+                request_id=request_id, event_type="RESULT",
+                participant_user_id=participant_user_id, connection_id=connection_id,
+                key_id=key_id, http_status=200, reason_code=reason,
+                body_bytes=body_bytes, connection=db_connection,
+            )
+
         result = ingest_authenticated_bridge_evidence(
             connection_id=connection_id, key_id=key_id,
             timestamp=timestamp, nonce=nonce, signature=signature,
             raw_body=raw_body, content_type=content_type,
             secret_reader=reader, after_authenticate=after_authenticate,
-        )
-        reason = "DUPLICATE_IGNORED" if result["status"] == "DUPLICATE_IGNORED" else "ACCEPTED"
-        append_bridge_ingestion_audit(
-            request_id=request_id, event_type="RESULT",
-            participant_user_id=participant_user_id, connection_id=connection_id,
-            key_id=key_id, http_status=200, reason_code=reason, body_bytes=body_bytes,
+            after_persist=append_terminal_result,
         )
         return result
     except BridgeIngestionRateLimitError as error:
