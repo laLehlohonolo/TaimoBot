@@ -8,7 +8,8 @@ from app.auth import register_user
 from app.broker_bridge_provisioning_store import load_or_create, update
 from app.broker_bridge_reconciliation_audit import (
     ReconciliationAuditError,
-    append_event,\n    list_events,
+    append_event,
+    list_events,
 )
 from app.database import init_db
 
