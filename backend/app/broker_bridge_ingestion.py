@@ -43,7 +43,7 @@ def _parse_body(raw_body, content_type):
         raise BridgeIngestionRequestError("A JSON content type is required.")
     media_type = content_type.split(";", 1)[0].strip().lower()
     if media_type != "application/json":
-        raise BridgeIngestionRequestError("Content type must be application/json.")
+        raise BridgeIngestionRequestError("content type must be application/json.")
     if not isinstance(raw_body, bytes) or not raw_body:
         raise BridgeIngestionRequestError("Evidence body must be non-empty bytes.")
     if len(raw_body) > MAX_EVIDENCE_BODY_BYTES:
