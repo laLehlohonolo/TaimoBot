@@ -174,5 +174,173 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
             )
 
 
+    def _http_client_and_key(self):
+        import json
+        import time
+        from datetime import datetime, timezone
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app import broker_bridge_ingestion_gateway as gateway
+        from app.broker_bridge_security import sign_bridge_message
+
+        key_id = "gateway-http-key"
+        secret_ref = "vault://gateway/http-test"
+        secret = b"gateway-http-test-secret-material-32-bytes"
+        with database.get_connection() as connection:
+            connection.execute(
+                """INSERT INTO broker_bridge_keys
+                   (key_id, connection_id, secret_ref, status,
+                    rotation_sequence, created_at, activated_at)
+                   VALUES (?, ?, ?, 'ACTIVE', 1, ?, ?)""",
+                (key_id, self.connection_one, secret_ref,
+                 "2026-11-28T00:00:00+00:00", "2026-11-28T00:00:00+00:00"),
+            )
+
+        class Reader:
+            def get_secret(self, requested_ref):
+                if requested_ref != secret_ref:
+                    raise RuntimeError("Unexpected secret reference.")
+                return secret
+
+        app = FastAPI()
+        app.include_router(gateway.router)
+        app.state.broker_bridge_secret_reader = Reader()
+        client = TestClient(app)
+
+        timestamp = str(int(time.time()))
+        nonce = "gateway-http-nonce-0001"
+        evidence = {
+            "evidence_id": "gateway-http-heartbeat-001",
+            "kind": "HEARTBEAT",
+            "provider_timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        body = json.dumps(evidence, separators=(",", ":")).encode("utf-8")
+        signature = sign_bridge_message(
+            self.connection_one, timestamp, nonce, body, secret,
+        )
+        headers = {
+            "content-type": "application/json",
+            "x-taimo-key-id": key_id,
+            "x-taimo-timestamp": timestamp,
+            "x-taimo-nonce": nonce,
+            "x-taimo-signature": signature,
+        }
+        return client, body, headers
+
+    def test_http_gateway_stores_authenticated_evidence_and_audit(self):
+        import os
+        from unittest.mock import patch
+
+        client, body, headers = self._http_client_and_key()
+        with patch.dict(os.environ, {"TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED": "true"}):
+            response = client.post(
+                f"/internal/broker-bridge/connections/{self.connection_one}/evidence",
+                content=body, headers=headers,
+            )
+        client.close()
+        self.assertEqual(response.status_code, 200, response.text)
+        with database.get_connection() as connection:
+            evidence_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
+            ).fetchone()["count"]
+            audit = connection.execute(
+                "SELECT event_type, reason_code FROM broker_bridge_ingestion_audit ORDER BY audit_id"
+            ).fetchall()
+            bucket_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_ingestion_rate_limits"
+            ).fetchone()["count"]
+        self.assertEqual(evidence_count, 1)
+        self.assertEqual([(row["event_type"], row["reason_code"]) for row in audit], [
+            ("ATTEMPT", "REQUEST_RECEIVED"), ("RESULT", "ACCEPTED"),
+        ])
+        self.assertEqual(bucket_count, 2)
+
+    def test_http_invalid_signature_creates_no_audit_or_rate_limit_debit(self):
+        import os
+        from unittest.mock import patch
+
+        client, body, headers = self._http_client_and_key()
+        headers["x-taimo-signature"] = "0" * 64
+        with patch.dict(os.environ, {"TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED": "true"}):
+            response = client.post(
+                f"/internal/broker-bridge/connections/{self.connection_one}/evidence",
+                content=body, headers=headers,
+            )
+        client.close()
+        self.assertEqual(response.status_code, 401)
+        with database.get_connection() as connection:
+            audit_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_ingestion_audit"
+            ).fetchone()["count"]
+            bucket_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_ingestion_rate_limits"
+            ).fetchone()["count"]
+            evidence_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
+            ).fetchone()["count"]
+        self.assertEqual(audit_count, 0)
+        self.assertEqual(bucket_count, 0)
+        self.assertEqual(evidence_count, 0)
+
+    def test_http_gateway_disabled_returns_not_found(self):
+        import os
+        from unittest.mock import patch
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.broker_bridge_ingestion_gateway import router
+
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+        with patch.dict(os.environ, {}, clear=True):
+            response = client.post(
+                f"/internal/broker-bridge/connections/{self.connection_one}/evidence",
+                content=b"{}",
+                headers={"content-type": "application/json"},
+            )
+        client.close()
+        self.assertEqual(response.status_code, 404)
+        with database.get_connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_ingestion_audit"
+            ).fetchone()["count"]
+        self.assertEqual(count, 0)
+
+    def test_http_rate_limit_rejection_is_audited_without_evidence(self):
+        import os
+        import time
+        from unittest.mock import patch
+
+        client, body, headers = self._http_client_and_key()
+        with database.get_connection() as connection:
+            connection.execute(
+                """INSERT INTO broker_bridge_ingestion_rate_limits
+                   (bucket_key, bucket_scope, participant_user_id, connection_id,
+                    tokens, updated_at)
+                   VALUES (?, 'PARTICIPANT', ?, NULL, 0, ?)""",
+                (f"participant:{self.owner}", self.owner, int(time.time()) + 3600),
+            )
+        with patch.dict(os.environ, {"TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED": "true"}):
+            response = client.post(
+                f"/internal/broker-bridge/connections/{self.connection_one}/evidence",
+                content=body, headers=headers,
+            )
+        client.close()
+        self.assertEqual(response.status_code, 429, response.text)
+        self.assertIn("retry-after", response.headers)
+        with database.get_connection() as connection:
+            audit = connection.execute(
+                "SELECT event_type, reason_code FROM broker_bridge_ingestion_audit ORDER BY audit_id"
+            ).fetchall()
+            evidence_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
+            ).fetchone()["count"]
+        self.assertEqual([(row["event_type"], row["reason_code"]) for row in audit], [
+            ("ATTEMPT", "REQUEST_RECEIVED"), ("RESULT", "RATE_LIMITED"),
+        ])
+        self.assertEqual(evidence_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
