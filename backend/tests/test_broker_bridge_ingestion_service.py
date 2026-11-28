@@ -83,7 +83,8 @@ class BrokerBridgeIngestionServiceTests(unittest.TestCase):
 
     def _request(self, *, evidence=None, raw_body=None, connection_id=None,
                  key_id=None, nonce="nonce-service-000001",
-                 content_type="application/json", reader=None, timestamp=None):
+                 content_type="application/json", reader=None, timestamp=None,
+                 after_authenticate=None, signature_override=None):
         body = raw_body if raw_body is not None else json.dumps(
             self.evidence if evidence is None else evidence,
             separators=(",", ":"),
@@ -101,11 +102,12 @@ class BrokerBridgeIngestionServiceTests(unittest.TestCase):
             key_id=self.key_id if key_id is None else key_id,
             timestamp=request_time,
             nonce=nonce,
-            signature=signature,
+            signature=signature if signature_override is None else signature_override,
             raw_body=body,
             content_type=content_type,
             secret_reader=self.reader if reader is None else reader,
             now=self.now,
+            after_authenticate=after_authenticate,
         )
 
     def test_valid_heartbeat_is_authenticated_and_persisted_read_only(self):
@@ -200,6 +202,32 @@ class BrokerBridgeIngestionServiceTests(unittest.TestCase):
         self._request(nonce=nonce)
         with self.assertRaises(BridgeAuthenticationError):
             self._request(nonce=nonce)
+
+
+    def test_after_authenticate_hook_runs_before_evidence_persistence(self):
+        calls = []
+        result = self._request(
+            after_authenticate=lambda authentication, context: calls.append(
+                (authentication["authenticated"], context["connection_id"])
+            ),
+        )
+        self.assertEqual(result["status"], "STORED")
+        self.assertEqual(calls, [(True, self.connection_id)])
+
+    def test_after_authenticate_hook_does_not_run_for_invalid_signature(self):
+        calls = []
+        with self.assertRaises(BridgeAuthenticationError):
+            self._request(
+                nonce="nonce-service-invalidsig1",
+                signature_override="0" * 64,
+                after_authenticate=lambda *_args: calls.append("called"),
+            )
+        self.assertEqual(calls, [])
+        with database.get_connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
+            ).fetchone()["count"]
+        self.assertEqual(count, 0)
 
     def test_identical_evidence_is_idempotent_across_fresh_requests(self):
         self._request(nonce="nonce-service-idempotent1")
