@@ -1,6 +1,6 @@
 # Broker Bridge Key Management Contract
 
-Status: security design contract with a partial internal implementation. A production vault adapter, provisioning HTTP API, and authenticated bridge endpoint are not implemented.
+Status: security design contract with a partial implementation. The AWS Secrets Manager adapter and fake-client contract tests are implemented; live AWS integration, provisioning HTTP API, and authenticated bridge endpoint are not implemented.
 
 ## Security objective
 
@@ -78,7 +78,7 @@ Enforce at most one ACTIVE key per connection with a database uniqueness constra
 
 ## Current implementation boundary
 
-The repository contains HMAC verification and persistent nonce-consumption primitives, participant-scoped heartbeat/quote evidence persistence, key metadata lifecycle helpers, and an internal vault-neutral provisioning orchestrator with fenced activation leases. It does not yet contain a managed vault adapter, provisioning HTTP route, authenticated HTTP ingestion endpoint, complete rate limiting, append-only security audit stream, or MT5 bridge client. No broker is connected or verified. Paper trading remains the only trading mode; live order routing remains disabled.
+The repository contains HMAC verification and persistent nonce-consumption primitives, participant-scoped heartbeat/quote evidence persistence, key metadata lifecycle helpers, and an internal vault-neutral provisioning orchestrator with fenced activation leases. It contains an AWS Secrets Manager adapter with fake-client contract tests, but does not yet contain live AWS integration, a provisioning HTTP route, authenticated HTTP ingestion endpoint, complete rate limiting, append-only security audit stream, or MT5 bridge client. No broker is connected or verified. Paper trading remains the only trading mode; live order routing remains disabled.
 
 ## Vault-neutral provisioning service (implemented)
 
@@ -92,7 +92,7 @@ The repository contains HMAC verification and persistent nonce-consumption primi
 
 Provisioning preflights a persisted administrator whose email is verified and a REQUESTED connection before any vault write. Ordinary participants, unknown actors, paused/revoked connections and unknown connections fail closed. The metadata helper independently repeats authorization and connection-state checks transactionally, closing the time-of-check/time-of-use gap; a state change during vault creation triggers compensation.
 
-**Not yet implemented:** a production vault adapter, vault access policy, secret retrieval/cache invalidation, provisioning HTTP route, audit event pipeline, or authenticated evidence-ingestion gateway. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
+**Not yet implemented:** live AWS service integration and validated vault access policies, provisioning HTTP route, audit event pipeline, or authenticated evidence-ingestion gateway. The adapter's retrieval path is implemented without caching; production rotation/revocation and operational invalidation behavior still require cloud integration tests. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
 
 The service does not enable broker connectivity or trading. Broker bridge evidence remains read-only and paper trading remains separate.
 
@@ -103,7 +103,7 @@ The provisioning protocol now requires an idempotency key on each secret-creatio
 
 The provisioning caller must durably create and persist the operation ID before making the vault request, then reuse that exact ID when retrying after a timeout, lost response, or process restart. The internal orchestration helper accepts this stable `operation_id` and passes it through as the vault idempotency key. Secret generation occurs inside the adapter's idempotent create operation, not in the retrying caller. If the caller generates a new ID on retry, the vault cannot correlate the attempt and duplicate/orphaned secrets remain possible. If an adapter cannot guarantee both reference and byte stability for a repeated operation ID, it is not compliant and must not be used for provisioning.
 
-**Current boundary:** the durable provisioning-operation table and recovery orchestration are implemented in `broker_bridge_provisioning_store.py` and `broker_bridge_provisioning.py`, with regression coverage using a fake secret manager. A production vault adapter, adapter-side idempotency guarantees, operator cleanup/reconciliation workflow, and provisioning route are still absent. Therefore crash recovery is covered at the application orchestration layer but is not yet end-to-end against a real vault. Do not expose a production provisioning route until the production adapter, retry/reconciliation policy, and audited operator cleanup path are implemented and tested.
+**Current boundary:** the durable provisioning-operation table and recovery orchestration are implemented in `broker_bridge_provisioning_store.py` and `broker_bridge_provisioning.py`, with regression coverage using a fake secret manager. The AWS adapter implements operation-token idempotency and ambiguous-response recovery in code, but real AWS semantics remain unverified. Operator cleanup/reconciliation workflow and provisioning route are still absent. Therefore crash recovery is covered at the application orchestration and fake-client contract layers, but is not yet proven end-to-end against AWS. Do not expose a production provisioning route until the production adapter, retry/reconciliation policy, and audited operator cleanup path are implemented and tested.
 
 
 ## Durable provisioning operation registry (implemented)
@@ -120,7 +120,7 @@ Persisted states:
 
 Activation claims now return unique UUID fencing tokens. Reclaiming an expired lease replaces the token, so a delayed worker cannot activate metadata or complete the operation with its stale token. The key metadata write validates the current token and unexpired lease inside the same SQLite transaction that inserts the key and changes the operation to `ACTIVATED`; both changes commit or roll back together. Failure cleanup first atomically moves the operation to a non-reclaimable `CLEANUP_REQUIRED` state while the worker still owns the lease, and only then attempts vault deletion. A worker that has lost ownership does not delete the secret or overwrite the newer worker's state. Legacy metadata committed before this atomic transition can be reconciled only after a new worker claims a current lease. Regression tests cover token replacement, stale-worker rejection, expired-lease rejection, and atomic completion. The service still recovers an ambiguous vault timeout by repeating the idempotent create call with the same operation ID.
 
-The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no production vault integration, provisioning HTTP endpoint, operator cleanup workflow, or authenticated evidence-ingestion gateway.
+The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no live AWS vault integration, provisioning HTTP endpoint, operator cleanup workflow, or authenticated evidence-ingestion gateway.
 
 
 ## Hosting and production secret-manager decision (2026-11-28)
@@ -135,7 +135,7 @@ The durable registry and orchestration are implemented and covered by tests usin
 - Separate provisioning, runtime retrieval, rotation, revocation, and operator-reconciliation permissions. The runtime service must not be able to create, rotate, or delete secrets unless a separately reviewed workflow requires it.
 - Use a customer-managed KMS key with a narrowly scoped key policy when the threat model and operational ownership justify it. Restrict decrypt permissions to the required workload role and secret resources; log and alert on key-policy or grant changes.
 - Store only opaque secret references and non-secret metadata in the application database. Never place broker passwords or bridge HMAC key bytes in environment variables, source control, logs, traces, API responses, or ChatGPT messages.
-- Preserve the existing provider-neutral `SecretManager` and `SecretReader` interfaces. Implement AWS adapters behind these interfaces; do not spread AWS SDK calls through domain logic.
+- Preserve the existing provider-neutral `SecretManager` and `SecretReader` interfaces. Keep the AWS Secrets Manager adapter behind these interfaces; do not spread AWS SDK calls through domain logic.
 - The adapter must prove durable idempotency for secret creation, exact-byte stability after ambiguous timeouts, least-privilege retrieval, rotation/revocation behavior, and safe cleanup/reconciliation before any production route is enabled.
 
 **Delivery sequence / gates:**
@@ -145,7 +145,7 @@ The durable registry and orchestration are implemented and covered by tests usin
 4. Complete deployment threat model, regional latency/cost/quota review, privacy/data-residency review, backup/recovery and incident-response runbooks.
 5. Only after those gates, consider a production provisioning route and read-only ingestion gateway behind explicit operator approval.
 
-**Current status:** AWS is selected as the target, but no AWS account, infrastructure, IAM role, KMS key, Secrets Manager secret, production adapter, or deployment has been created. No broker is connected; no participant credentials have been collected; paper trading remains the only trading mode and live order routing remains disabled.
+**Current status:** AWS is selected as the target and the adapter code exists, but no AWS account integration, infrastructure, IAM role, KMS key, Secrets Manager secret, or deployment has been created. No broker is connected; no participant credentials have been collected; paper trading remains the only trading mode and live order routing remains disabled.
 
 
 ## AWS Secrets Manager adapter (implemented; cloud verification pending)
