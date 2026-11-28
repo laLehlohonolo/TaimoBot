@@ -19,6 +19,10 @@ CASES = [
     "test_audit_is_immutable_except_for_privacy_anonymisation",
     "test_account_deletion_anonymises_audit_without_erasing_event",
     "test_unknown_audit_classification_is_rejected",
+    "test_http_gateway_stores_authenticated_evidence_and_audit",
+    "test_http_invalid_signature_creates_no_audit_or_rate_limit_debit",
+    "test_http_gateway_disabled_returns_not_found",
+    "test_http_rate_limit_rejection_is_audited_without_evidence",
 ]
 
 
