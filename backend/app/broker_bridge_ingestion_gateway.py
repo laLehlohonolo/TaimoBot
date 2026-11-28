@@ -1,4 +1,4 @@
-"""Rate-limited, audited HTTP boundary for read-only broker evidence.
+""""Rate-limited, audited HTTP boundary for read-only broker evidence.
 
 The router is deliberately NOT mounted by the application yet. Deployment must
 supply a least-privilege SecretReader and verify proxy-level abuse controls.
@@ -30,7 +30,7 @@ router = APIRouter()
 
 
 def ensure_bridge_ingestion_gateway_schema(connection):
-    """Create durable token buckets and append-only, redacted ingress audit."""
+    """Create durable token buckets and an immutable, privacy-anonymisable audit log."""
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS broker_bridge_ingestion_rate_limits (
@@ -76,11 +76,30 @@ def ensure_bridge_ingestion_gateway_schema(connection):
         ON broker_bridge_ingestion_audit(request_id, audit_id)
         """
     )
+    # SQLite implements ON DELETE SET NULL as an UPDATE. Permit exactly that
+    # privacy-preserving FK action while rejecting all edits to audit evidence.
+    connection.execute("DROP TRIGGER IF EXISTS trg_bridge_ingestion_audit_no_update")
     connection.execute(
         """
-        CREATE TRIGGER IF NOT EXISTS trg_bridge_ingestion_audit_no_update
+        CREATE TRIGGER trg_bridge_ingestion_audit_no_update
         BEFORE UPDATE ON broker_bridge_ingestion_audit
-        BEGIN SELECT RAISE(ABORT, 'Broker ingestion audit is append-only.'); END
+        WHEN NOT (
+            OLD.participant_user_id IS NOT NULL
+            AND NEW.participant_user_id IS NULL
+            AND NEW.audit_id IS OLD.audit_id
+            AND NEW.event_id IS OLD.event_id
+            AND NEW.request_id IS OLD.request_id
+            AND NEW.event_type IS OLD.event_type
+            AND NEW.occurred_at IS OLD.occurred_at
+            AND NEW.connection_id IS OLD.connection_id
+            AND NEW.key_id IS OLD.key_id
+            AND NEW.http_status IS OLD.http_status
+            AND NEW.reason_code IS OLD.reason_code
+            AND NEW.body_bytes IS OLD.body_bytes
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Broker ingestion audit is immutable except participant anonymisation.');
+        END
         """
     )
     connection.execute(
@@ -161,9 +180,7 @@ def consume_bridge_ingestion_rate_limit(
                 tokens = min(float(capacity), float(row["tokens"]) + elapsed * refill_rate)
             states.append((scope, bucket_key, capacity, tokens, refill_rate))
 
-        limited = [
-            state for state in states if state[3] < 1.0
-        ]
+        limited = [state for state in states if state[3] < 1.0]
         for scope, bucket_key, _capacity, tokens, _refill_rate in states:
             connection.execute(
                 """
@@ -215,7 +232,6 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
     request_id = str(uuid.uuid4())
     key_id = request.headers.get("x-taimo-key-id")
     if os.getenv("TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED", "").lower() != "true":
-        # Do not create durable rows for unauthenticated traffic while disabled.
         _http_rejection(404, "Broker evidence ingress is disabled.")
 
     try:
@@ -235,7 +251,6 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
         if not all((connection_id, key_id, timestamp, nonce, signature)):
             _http_rejection(401, "Bridge authentication is required.")
 
-        # Read-only identity lookup is not a rate-limit debit or durable audit write.
         context = resolve_bridge_key_auth_context(key_id)
         if context is None or context.get("connection_id") != connection_id:
             _http_rejection(401, "Bridge identity is invalid.")
@@ -250,8 +265,7 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
 
         def after_authenticate(_authentication, _secret_context):
             # HMAC, persistent nonce, active-key status, and connection state have
-            # passed. Only now may this request consume participant/connection quota
-            # or create durable audit rows.
+            # passed. Only now may this request consume quota or create audit rows.
             append_bridge_ingestion_audit(
                 request_id=request_id, event_type="ATTEMPT",
                 participant_user_id=participant_user_id, connection_id=connection_id,
@@ -288,11 +302,9 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
     except BridgeIngestionRateLimitError as error:
         _http_rejection(429, "Bridge evidence rate limit exceeded.", retry_after=error.retry_after)
     except HTTPException:
-        # Pre-authentication failures are deliberately not written to the durable
-        # participant audit table. Enforce volumetric controls at the reverse proxy.
+        # Pre-authentication failures are deliberately not written to durable audit.
         raise
     except BridgeAuthenticationError:
-        # Invalid HMACs and replay attempts must not be able to grow durable storage.
         _http_rejection(401, "Bridge authentication failed.")
     except (BridgeIngestionRequestError, BridgeEvidenceError) as error:
         message = str(error).lower()
@@ -303,6 +315,5 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
         )
         _http_rejection(status, "Evidence request rejected.")
     except Exception:
-        # Audit persistence is fail-closed after authentication: if the attempt
-        # record cannot be written, the callback aborts before evidence persistence.
+        # Authenticated audit failures abort before evidence persistence.
         _http_rejection(503, "Broker evidence ingress is temporarily unavailable.")
