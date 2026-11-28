@@ -5,13 +5,11 @@ deployment must inject a least-privilege SecretReader and explicitly enable the
 feature flag after proxy-level limits and operational monitoring are verified.
 """
 import os
-import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
 
 from .broker_bridge_ingestion import (
     BridgeIngestionRequestError,
@@ -223,7 +221,6 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
     key_id = request.headers.get("x-taimo-key-id")
     participant_user_id = None
     body_bytes = 0
-    _ensure_schema()
     if os.getenv("TAIMOBOT_BROKER_INGESTION_HTTP_ENABLED", "").lower() != "true":
         append_bridge_ingestion_audit(
             request_id=request_id, event_type="ATTEMPT", connection_id=connection_id,
@@ -255,10 +252,6 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
 
         context = resolve_bridge_key_auth_context(key_id)
         if context is None or context.get("connection_id") != connection_id:
-            append_bridge_ingestion_audit(
-                request_id=request_id, event_type="RESULT", connection_id=connection_id,
-                key_id=key_id, http_status=401, reason_code="IDENTITY_REJECTED",
-            )
             _http_rejection(401, "Bridge identity is invalid.")
         participant_user_id = context["participant_user_id"]
 
