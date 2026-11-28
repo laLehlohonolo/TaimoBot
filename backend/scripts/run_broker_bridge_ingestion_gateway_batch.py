@@ -1,4 +1,4 @@
-"""Run the focused broker-ingestion HTTP gateway security batch."""
+"""Run the focused broker-ingestion HTTP gateway security and regression batch."""
 import importlib.util
 import sys
 import unittest
@@ -15,6 +15,9 @@ CASES = [
     "test_connection_bucket_blocks_bursts_and_refills",
     "test_participant_bucket_limits_aggregate_connections",
     "test_rate_limit_buckets_are_isolated_between_participants",
+    "test_concurrent_requests_cannot_exceed_connection_capacity",
+    "test_connection_deletion_cascades_its_rate_limit_bucket",
+    "test_legacy_orphaned_connection_buckets_are_swept",
     "test_audit_stores_only_redacted_allowlisted_metadata",
     "test_audit_is_immutable_except_for_privacy_anonymisation",
     "test_account_deletion_anonymises_audit_without_erasing_event",
@@ -23,6 +26,8 @@ CASES = [
     "test_http_invalid_signature_creates_no_audit_or_rate_limit_debit",
     "test_http_gateway_disabled_returns_not_found",
     "test_http_rate_limit_rejection_is_audited_without_evidence",
+    "test_authenticated_request_rejection_writes_terminal_result",
+    "test_result_audit_failure_rolls_back_evidence_and_retry_stores_once",
 ]
 
 
