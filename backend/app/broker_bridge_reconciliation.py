@@ -4,7 +4,19 @@ This first reconciliation slice deliberately has no vault adapter and no
 mutating cleanup function. It exposes non-secret evidence only; destructive
 cleanup must be added behind a separately reviewed fencing/audit workflow.
 """
+from datetime import datetime, timezone
+
 from .database import get_connection
+
+
+def _parse_timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 class ReconciliationInspectionError(RuntimeError):
@@ -78,6 +90,9 @@ def preflight_provisioning_operation(*, actor_id, operation_id):
         ).fetchone() if operation["secret_ref"] else None
 
     status = operation["status"]
+    connection_state = broker_connection["state"] if broker_connection else None
+    lease_expiry = _parse_timestamp(operation["lease_expires_at"])
+    now = datetime.now(timezone.utc)
     if key_reference is not None:
         classification = "BLOCKED_KEY_METADATA_REFERENCE"
         proposed_action = "DO_NOT_DELETE"
@@ -86,10 +101,19 @@ def preflight_provisioning_operation(*, actor_id, operation_id):
         classification = "INCONSISTENT_ACTIVATED_WITHOUT_KEY"
         proposed_action = "ESCALATE_FOR_REVIEW"
         evidence = "Operation is marked activated but matching key metadata was not found."
+    elif connection_state != "REQUESTED":
+        classification = "BLOCKED_CONNECTION_NOT_ACTIVE"
+        proposed_action = "ESCALATE_FOR_REVIEW"
+        evidence = "The broker connection is missing, paused, or revoked; cleanup is not authorized."
     elif status == "ACTIVATING":
-        classification = "REVIEW_ACTIVATION_LEASE"
-        proposed_action = "INSPECT_LEASE_AND_RETRY_STATE"
-        evidence = "Activation may still be owned by a worker; no cleanup is authorized."
+        if lease_expiry is not None and lease_expiry <= now:
+            classification = "EXPIRED_ACTIVATION_LEASE_REQUIRES_REVIEW"
+            proposed_action = "OPERATOR_REVIEW_ONLY"
+            evidence = "The activation lease has expired; stale ownership must be fenced before any retry."
+        else:
+            classification = "REVIEW_ACTIVATION_LEASE"
+            proposed_action = "INSPECT_LEASE_AND_RETRY_STATE"
+            evidence = "Activation may still be owned by a worker, or lease evidence is invalid; no cleanup is authorized."
     elif status in ("SECRET_CREATED", "CLEANUP_REQUIRED"):
         classification = "REQUIRES_OPERATOR_REVIEW"
         proposed_action = "DRY_RUN_ONLY"
@@ -107,7 +131,7 @@ def preflight_provisioning_operation(*, actor_id, operation_id):
         "connection_id": operation["connection_id"],
         "created_by": operation["created_by"],
         "status": status,
-        "connection_state": broker_connection["state"] if broker_connection else None,
+        "connection_state": connection_state,
         "lease_expires_at": operation["lease_expires_at"],
         "created_at": operation["created_at"],
         "updated_at": operation["updated_at"],
