@@ -16,7 +16,8 @@ CASES = [
     "test_participant_bucket_limits_aggregate_connections",
     "test_rate_limit_buckets_are_isolated_between_participants",
     "test_audit_stores_only_redacted_allowlisted_metadata",
-    "test_audit_is_append_only",
+    "test_audit_is_immutable_except_for_privacy_anonymisation",
+    "test_account_deletion_anonymises_audit_without_erasing_event",
     "test_unknown_audit_classification_is_rejected",
 ]
 
