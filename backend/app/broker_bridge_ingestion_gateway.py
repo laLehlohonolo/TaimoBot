@@ -42,7 +42,7 @@ def ensure_bridge_ingestion_gateway_schema(connection):
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (participant_user_id) REFERENCES users(user_id) ON DELETE CASCADE,
             FOREIGN KEY (connection_id)
-                REFERENCES participant_broker_connections(connection_id) ON DELETE SET NULL
+                REFERENCES participant_broker_connections(connection_id) ON DELETE CASCADE
         )
         """
     )
@@ -50,6 +50,13 @@ def ensure_bridge_ingestion_gateway_schema(connection):
         """
         CREATE INDEX IF NOT EXISTS idx_bridge_ingestion_rate_owner
         ON broker_bridge_ingestion_rate_limits(participant_user_id, connection_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_bridge_ingestion_rate_connection
+        ON broker_bridge_ingestion_rate_limits(connection_id)
+        WHERE bucket_scope = 'CONNECTION'
         """
     )
     connection.execute(
@@ -180,6 +187,14 @@ def consume_bridge_ingestion_rate_limit(
     )
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        # Older schemas used ON DELETE SET NULL for connection buckets. Sweep
+        # those orphan rows during normal quota activity; new schemas cascade.
+        connection.execute(
+            """
+            DELETE FROM broker_bridge_ingestion_rate_limits
+            WHERE bucket_scope = 'CONNECTION' AND connection_id IS NULL
+            """
+        )
         states = []
         for scope, bucket_key, capacity, refill_rate in specifications:
             row = connection.execute(
