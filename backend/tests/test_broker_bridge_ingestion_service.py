@@ -7,6 +7,7 @@ from pathlib import Path
 from app import database
 from app.auth import register_user
 from app.broker_bridge_ingestion import (
+    BridgeIngestionRateLimitError,
     BridgeIngestionRequestError,
     MAX_EVIDENCE_BODY_BYTES,
     ingest_authenticated_bridge_evidence,
@@ -223,6 +224,21 @@ class BrokerBridgeIngestionServiceTests(unittest.TestCase):
                 after_authenticate=lambda *_args: calls.append("called"),
             )
         self.assertEqual(calls, [])
+        with database.get_connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
+            ).fetchone()["count"]
+        self.assertEqual(count, 0)
+
+
+    def test_authenticated_policy_rejection_blocks_evidence_persistence(self):
+        with self.assertRaises(BridgeIngestionRateLimitError):
+            self._request(
+                nonce="nonce-service-limited-001",
+                after_authenticate=lambda *_args: (_ for _ in ()).throw(
+                    BridgeIngestionRateLimitError(17, "PARTICIPANT")
+                ),
+            )
         with database.get_connection() as connection:
             count = connection.execute(
                 "SELECT COUNT(*) AS count FROM broker_bridge_evidence"
