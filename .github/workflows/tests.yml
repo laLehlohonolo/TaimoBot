@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests]
   pull_request:
-    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases]
+    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests]
   workflow_dispatch:
 
 jobs:
