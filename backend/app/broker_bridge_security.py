@@ -68,16 +68,22 @@ def authenticate_bridge_request(
     raw_body,
     shared_secret,
     *,
+    key_id,
     now=None,
     max_clock_skew_seconds=60,
 ):
-    """Authenticate one bridge request and atomically consume its nonce.
+    """Authenticate a request against the currently active key and consume its nonce.
 
-    The caller must resolve shared_secret from a managed vault using the
-    server-owned connection_id. The payload cannot choose its participant.
+    The caller resolves key_id to server-owned metadata and retrieves the secret
+    through the managed vault. This function rechecks the key-to-connection
+    binding, ACTIVE status, and connection state inside the same write
+    transaction that consumes the nonce. A rotation or revocation that wins
+    the transaction race therefore invalidates a previously retrieved secret.
     """
     if not isinstance(connection_id, str) or not connection_id:
         raise BridgeAuthenticationError("Invalid connection identity.")
+    if not isinstance(key_id, str) or not key_id:
+        raise BridgeAuthenticationError("Invalid bridge key identity.")
     if not isinstance(timestamp, str) or not timestamp.isdigit():
         raise BridgeAuthenticationError("Invalid request timestamp.")
     request_time = int(timestamp)
@@ -106,15 +112,23 @@ def authenticate_bridge_request(
     try:
         with get_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            owner = connection.execute(
+            key = connection.execute(
                 """
-                SELECT state FROM participant_broker_connections
-                WHERE connection_id = ?
+                SELECT k.connection_id, k.status, c.state AS connection_state
+                FROM broker_bridge_keys k
+                JOIN participant_broker_connections c
+                  ON c.connection_id = k.connection_id
+                WHERE k.key_id = ?
                 """,
-                (connection_id,),
+                (key_id,),
             ).fetchone()
-            if owner is None or owner["state"] != "REQUESTED":
-                raise BridgeAuthenticationError("Bridge connection is unknown or inactive.")
+            if (
+                key is None
+                or key["status"] != "ACTIVE"
+                or key["connection_id"] != connection_id
+                or key["connection_state"] != "REQUESTED"
+            ):
+                raise BridgeAuthenticationError("Bridge key or connection is unknown or inactive.")
             connection.execute(
                 """
                 INSERT INTO broker_bridge_nonces (
@@ -128,6 +142,7 @@ def authenticate_bridge_request(
 
     return {
         "authenticated": True,
+        "key_id": key_id,
         "connection_id": connection_id,
         "request_timestamp": request_time,
         "accepted_at": accepted_at,

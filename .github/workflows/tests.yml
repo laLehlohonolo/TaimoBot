@@ -2,9 +2,9 @@ name: TaimoBot application checks
 
 on:
   push:
-    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases]
+    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests]
   pull_request:
-    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases]
+    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests]
   workflow_dispatch:
 
 jobs:
@@ -22,12 +22,8 @@ jobs:
           python-version: "3.11"
       - name: Install backend dependencies
         run: pip install -r requirements.txt
-      - name: Run ten copy-recovery checks sequentially
-        run: python scripts/run_copy_recovery_group.py
-      - name: Run ten copy-safety checks sequentially
-        run: python scripts/run_copy_safety_group.py
-      - name: Run ten position-group accounting checks sequentially
-        run: python scripts/run_position_group_accounting.py
+      - name: Run thirty copy and position integrity checks sequentially
+        run: python scripts/run_copy_position_integrity_batch.py
       - name: Run ten close-cost ledger checks sequentially
         run: python scripts/run_close_cost_ledger_group.py
       - name: Run ten copied-ledger reconciliation checks sequentially
@@ -133,6 +129,12 @@ jobs:
         run: python scripts/run_restore_approval_transaction_races.py
       - name: Run twenty live database symlink preflight checks sequentially
         run: python scripts/run_live_database_symlink_preflight.py
+      - name: Run thirty-six broker bridge provisioning, vault, and authentication checks sequentially
+        run: python scripts/run_broker_bridge_security_batch.py
+      - name: Run thirteen read-only broker evidence-ingestion service checks sequentially
+        run: python scripts/run_broker_bridge_ingestion_service_batch.py
+      - name: Run ten AWS Secrets Manager adapter contract checks sequentially
+        run: python scripts/run_aws_secrets_manager_batch.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Verify FastAPI application

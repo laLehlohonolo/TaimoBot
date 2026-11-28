@@ -4,3 +4,4 @@ uvicorn[standard]
 pydantic
 httpx
 websockets>=12,<16
+boto3>=1.35,<2

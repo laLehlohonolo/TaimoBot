@@ -1,6 +1,6 @@
 # Broker Bridge Key Management Contract
 
-Status: design contract only. No vault adapter, key-provisioning API, key rotation service, or bridge endpoint is implemented by this document.
+Status: security design contract with a partial implementation. The AWS Secrets Manager adapter and fake-client contract tests are implemented; live AWS integration, provisioning HTTP API, and authenticated bridge endpoint are not implemented.
 
 ## Security objective
 
@@ -78,32 +78,32 @@ Enforce at most one ACTIVE key per connection with a database uniqueness constra
 
 ## Current implementation boundary
 
-The repository currently contains HMAC verification and persistent nonce-consumption primitives, plus participant-scoped heartbeat/quote evidence persistence. It does not yet contain a managed vault adapter, key metadata/provisioning/rotation/revocation service, authenticated HTTP ingestion endpoint, rate limiting, append-only security audit stream, or MT5 bridge client. No broker is connected or verified. Paper trading remains the only trading mode; live order routing remains disabled.
+The repository contains HMAC verification and persistent nonce-consumption primitives, participant-scoped heartbeat/quote evidence persistence, key metadata lifecycle helpers, and an internal vault-neutral provisioning orchestrator with fenced activation leases. It contains an AWS Secrets Manager adapter with fake-client contract tests, but does not yet contain live AWS integration, a provisioning HTTP route, authenticated HTTP ingestion endpoint, complete rate limiting, append-only security audit stream, or MT5 bridge client. No broker is connected or verified. Paper trading remains the only trading mode; live order routing remains disabled.
 
 ## Vault-neutral provisioning service (implemented)
 
 `backend/app/broker_bridge_provisioning.py` defines a narrow `SecretManager` protocol and an internal orchestration boundary:
 
-1. Generate 256 bits of key material server-side using Python's cryptographic random source.
-2. Ask the injected secret manager to persist the material and return an opaque `vault://` or `secretmanager://` reference.
+1. Ask the injected secret manager to generate and persist 256 bits of cryptographically random key material under the durable operation ID.
+2. Require the secret manager to return the same opaque reference and preserve the exact same secret bytes when the same operation ID is retried after an ambiguous timeout. The adapter owns one-time generation; the orchestration layer never generates replacement bytes on retry.
 3. Activate non-secret database metadata only after secret creation succeeds.
 4. If metadata activation fails, attempt to delete the newly created secret.
 5. If compensation also fails, return a generic operator-cleanup error without disclosing the secret reference or key material.
 
 Provisioning preflights a persisted administrator whose email is verified and a REQUESTED connection before any vault write. Ordinary participants, unknown actors, paused/revoked connections and unknown connections fail closed. The metadata helper independently repeats authorization and connection-state checks transactionally, closing the time-of-check/time-of-use gap; a state change during vault creation triggers compensation.
 
-**Not yet implemented:** a production vault adapter, vault access policy, secret retrieval/cache invalidation, provisioning HTTP route, audit event pipeline, or authenticated evidence-ingestion gateway. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
+**Not yet implemented:** live AWS service integration and validated vault access policies, provisioning HTTP route, audit event pipeline, or authenticated evidence-ingestion gateway. The adapter's retrieval path is implemented without caching; production rotation/revocation and operational invalidation behavior still require cloud integration tests. The included fake secret manager exists only in tests and is not a production secret store. Python cannot guarantee zeroization of immutable `bytes`; the generated value is kept within the short provisioning call and is never returned or logged.
 
 The service does not enable broker connectivity or trading. Broker bridge evidence remains read-only and paper trading remains separate.
 
 
 ## Idempotent vault creation and ambiguous timeouts
 
-The provisioning protocol now requires an idempotency key on each secret-creation call. The key is a UUID operation identifier, not secret material. A compliant vault adapter must guarantee that repeated create requests with the same idempotency key resolve to the same secret reference and do not create duplicate secret objects.
+The provisioning protocol now requires an idempotency key on each secret-creation call. The key is a UUID operation identifier, not secret material. A compliant vault adapter must generate the secret material once, atomically bind it to that operation ID, and guarantee that repeated create requests with the same idempotency key resolve to the same secret reference and the exact same secret bytes without creating duplicate secret objects. The orchestrator must not generate fresh bytes for a retry: after an ambiguous timeout it cannot know whether the original secret was committed, so new bytes could mismatch the already-created vault object.
 
-The provisioning caller must durably create and persist the operation ID before making the vault request, then reuse that exact ID when retrying after a timeout, lost response, or process restart. The internal orchestration helper accepts this stable `operation_id` and passes it through as the vault idempotency key. If the caller generates a new ID on retry, the vault cannot correlate the attempt and duplicate/orphaned secrets remain possible.
+The provisioning caller must durably create and persist the operation ID before making the vault request, then reuse that exact ID when retrying after a timeout, lost response, or process restart. The internal orchestration helper accepts this stable `operation_id` and passes it through as the vault idempotency key. Secret generation occurs inside the adapter's idempotent create operation, not in the retrying caller. If the caller generates a new ID on retry, the vault cannot correlate the attempt and duplicate/orphaned secrets remain possible. If an adapter cannot guarantee both reference and byte stability for a repeated operation ID, it is not compliant and must not be used for provisioning.
 
-**Current boundary:** the repository defines and tests the idempotency contract, but does not yet implement a durable provisioning-operation table/worker or a production vault adapter. Therefore crash recovery is not yet end-to-end. Do not expose a production provisioning route until durable operation records, adapter-side idempotency/reconciliation, retry policy, and orphan cleanup are implemented and tested.
+**Current boundary:** the durable provisioning-operation table and recovery orchestration are implemented in `broker_bridge_provisioning_store.py` and `broker_bridge_provisioning.py`, with regression coverage using a fake secret manager. The AWS adapter implements operation-token idempotency and ambiguous-response recovery in code, but real AWS semantics remain unverified. Operator cleanup/reconciliation workflow and provisioning route are still absent. Therefore crash recovery is covered at the application orchestration and fake-client contract layers, but is not yet proven end-to-end against AWS. Do not expose a production provisioning route until the production adapter, retry/reconciliation policy, and audited operator cleanup path are implemented and tested.
 
 
 ## Durable provisioning operation registry (implemented)
@@ -118,6 +118,67 @@ Persisted states:
 - `CLEANUP_REQUIRED`: vault deletion failed; automatic retry is blocked pending operator reconciliation.
 - `FAILED`: activation failed and the known vault secret was successfully deleted; the operation is terminal.
 
-An atomic database claim prevents two workers from activating the same operation concurrently. The lease is time-bounded so an interrupted worker does not permanently block recovery. The service recovers an ambiguous vault timeout by repeating the idempotent create call with the same operation ID. It also detects the crash window where key metadata committed but the operation status update did not, by reconciling the stored vault reference against bridge-key metadata. If the final operation-state write fails after key activation, the vault secret is deliberately not deleted; a retry repairs the operation record.
+Activation claims now return unique UUID fencing tokens. Reclaiming an expired lease replaces the token, so a delayed worker cannot activate metadata or complete the operation with its stale token. The key metadata write validates the current token and unexpired lease inside the same SQLite transaction that inserts the key and changes the operation to `ACTIVATED`; both changes commit or roll back together. Failure cleanup first atomically moves the operation to a non-reclaimable `CLEANUP_REQUIRED` state while the worker still owns the lease, and only then attempts vault deletion. A worker that has lost ownership does not delete the secret or overwrite the newer worker's state. Legacy metadata committed before this atomic transition can be reconciled only after a new worker claims a current lease. Regression tests cover token replacement, stale-worker rejection, expired-lease rejection, and atomic completion. The service still recovers an ambiguous vault timeout by repeating the idempotent create call with the same operation ID.
 
-The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no production vault integration, provisioning HTTP endpoint, operator cleanup workflow, or authenticated evidence-ingestion gateway.
+The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no live AWS vault integration, provisioning HTTP endpoint, operator cleanup workflow, or authenticated evidence-ingestion gateway.
+
+
+## Hosting and production secret-manager decision (2026-11-28)
+
+**Decision: AWS is the selected primary cloud platform.** The initial production target is Amazon ECS on AWS Fargate for the FastAPI backend, with AWS Secrets Manager as the managed secret store, AWS KMS customer-managed encryption keys where justified, and IAM task roles for workload identity. This is an architectural decision only; it does not authorize account creation, cloud provisioning, deployment, or enabling broker connectivity.
+
+**Initial region: Africa (Cape Town), `af-south-1`.** AWS documentation currently lists Fargate, ECS, and Secrets Manager as available in this region. The region is opt-in for AWS accounts, so it must be explicitly enabled before use. Region choice remains subject to a measured latency, availability, service-quota, pricing, and data-residency review before production launch. Do not silently fall back to another region; any change requires an explicit documented review.
+
+**Identity and access model:**
+- The FastAPI workload receives a dedicated ECS task role. Grant only the exact Secrets Manager actions and secret ARNs required for its runtime function; do not use long-lived IAM user access keys in containers.
+- Keep the ECS task execution role separate from the application task role. The execution role is for agent operations such as image pulls/log delivery and task-definition secret injection; the application task role is for application API calls.
+- Separate provisioning, runtime retrieval, rotation, revocation, and operator-reconciliation permissions. The runtime service must not be able to create, rotate, or delete secrets unless a separately reviewed workflow requires it.
+- Use a customer-managed KMS key with a narrowly scoped key policy when the threat model and operational ownership justify it. Restrict decrypt permissions to the required workload role and secret resources; log and alert on key-policy or grant changes.
+- Store only opaque secret references and non-secret metadata in the application database. Never place broker passwords or bridge HMAC key bytes in environment variables, source control, logs, traces, API responses, or ChatGPT messages.
+- Preserve the existing provider-neutral `SecretManager` and `SecretReader` interfaces. Keep the AWS Secrets Manager adapter behind these interfaces; do not spread AWS SDK calls through domain logic.
+- The adapter must prove durable idempotency for secret creation, exact-byte stability after ambiguous timeouts, least-privilege retrieval, rotation/revocation behavior, and safe cleanup/reconciliation before any production route is enabled.
+
+**Delivery sequence / gates:**
+1. Add AWS adapter contract tests using fakes and local deterministic tests; do not claim these prove AWS behavior.
+2. Implement and test AWS Secrets Manager adapters with workload identity and resource-scoped IAM policies in a non-production AWS account.
+3. Verify real AWS idempotency/retry semantics, KMS policy behavior, audit logging, rotation, revocation, deletion/compensation, outage handling, and operator cleanup under failure injection.
+4. Complete deployment threat model, regional latency/cost/quota review, privacy/data-residency review, backup/recovery and incident-response runbooks.
+5. Only after those gates, consider a production provisioning route and read-only ingestion gateway behind explicit operator approval.
+
+**Current status:** AWS is selected as the target and the adapter code exists, but no AWS account integration, infrastructure, IAM role, KMS key, Secrets Manager secret, or deployment has been created. No broker is connected; no participant credentials have been collected; paper trading remains the only trading mode and live order routing remains disabled.
+
+
+## AWS Secrets Manager adapter (implemented; cloud verification pending)
+
+Added `backend/app/aws_secrets_manager.py`, implementing the existing `SecretManager` and `SecretReader` contracts through an injected AWS SDK client. The adapter does not construct a boto3 client or accept static AWS credentials; the deployment composition layer must inject a client using the ECS task role. A customer-managed KMS key ID is mandatory.
+
+Provisioning behavior:
+- Generates 32 random bytes and calls `CreateSecret` with `SecretBinary`, the durable operation UUID as `ClientRequestToken`, the configured KMS key, and tags binding purpose, operation ID, and a digest of the connection path segment.
+- Uses a deterministic secret name supplied by the existing orchestration operation. It rejects names outside the broker-bridge namespace or whose final path segment does not match the operation UUID.
+- If the create response is ambiguous or reports an error, it attempts recovery by describing the deterministic name, verifying the expected tags, and retrieving the exact secret version by `VersionId=operation_id`. It never returns the newly generated retry bytes as if they were the committed version.
+- Returns only an opaque `secretmanager://` reference. Retrieval accepts only a validated Secrets Manager ARN and returns binary material without caching. Deletion uses immediate deletion and must be callable only after the provisioning store has fenced the operation into its cleanup state.
+
+AWS documents that `ClientRequestToken` is the version identifier: a retry with the same token and same bytes is idempotent, while different bytes for an existing token are rejected. The adapter's recovery read is therefore essential after an ambiguous response. This design still requires integration tests against AWS to verify real service behavior, concurrency and IAM policy effects; fake-client tests are not proof of cloud semantics.
+
+**IAM separation required before deployment:**
+- Provisioning role: resource-scoped `secretsmanager:CreateSecret`, `secretsmanager:TagResource`, `secretsmanager:DescribeSecret`, `secretsmanager:GetSecretValue`, and `secretsmanager:DeleteSecret` for the broker-bridge secret namespace; only the required KMS `kms:GenerateDataKey` and `kms:Decrypt` permissions on the dedicated key.
+- Runtime retrieval role: resource-scoped `secretsmanager:GetSecretValue` and required KMS decrypt access only. It must not receive create, tag, rotate, or delete permissions.
+- Operator reconciliation role: separate, audited, human-controlled access; no participant bridge or Taimo Brain permission to provision or delete secrets.
+- ECS task execution role remains separate from the application task role. The task role is the identity used by application code to call AWS services; execution-role permissions are for ECS/Fargate agent operations.
+
+**Adapter test coverage added:** 10 tests cover 256-bit generation, KMS selection, operation-token binding, ambiguous create recovery, retry byte stability, name/reference validation, malformed secret rejection, tag mismatch, destructive cleanup invocation, and generic failure handling. Tests use a fake AWS client. They are local contract tests only; no AWS account calls have been made.
+
+**Current status:** adapter code and tests are committed to the draft branch. No production dependency wiring, cloud client construction, IAM policies, KMS key, AWS account resource, provisioning route, or deployment exists yet. The production route remains blocked until real AWS integration and operator-reconciliation tests pass.
+
+## Read-only evidence-ingestion service boundary (2026-11-28)
+
+Added `backend/app/broker_bridge_ingestion.py` as an internal composition service. It is not mounted as an HTTP endpoint and does not create a public ingestion surface. A future deployment must inject a least-privilege `SecretReader` only after cloud-vault integration and runtime identity are independently validated.
+
+The service currently enforces:
+- JSON content type and strict UTF-8 JSON parsing; duplicate object keys, non-finite numbers, non-object payloads, empty bodies and bodies over 16 KiB are rejected before vault access.
+- Provider timestamps must include a timezone, be no more than 15 minutes old, and be no more than 60 seconds in the future.
+- Key and connection are resolved from server-owned metadata; a caller-selected connection must match the resolved key binding.
+- Existing HMAC verification, persistent nonce replay protection, active-key/connection transaction recheck, strict HEARTBEAT/QUOTE evidence schema, idempotent persistence, and database-derived participant ownership are reused.
+- Responses expose only evidence status/identity and explicitly report read-only behavior; no secret bytes, participant identity, broker account controls or order methods are returned.
+
+Thirteen focused service checks are added to CI. This is a local service boundary only: no FastAPI route, ingress authentication middleware, per-participant/per-connection rate limiter, durable redacted audit sink, public endpoint, production vault composition, or MT5 bridge client has been implemented. HMAC proves possession of the shared bridge key, not broker provenance. Do not treat a signed quote as independently verified broker market data, enable XAUUSD execution, or permit order/account-control operations on this basis.
