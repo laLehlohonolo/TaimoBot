@@ -24,8 +24,9 @@ The current adapter calls:
 - `CreateSecret` with tags and a customer-managed KMS key.
 - `DescribeSecret` and `GetSecretValue` to recover the exact operation version
   after an ambiguous create response.
-- `DeleteSecret` only for fenced compensation after the provisioning store
-  reserves cleanup state.
+- No delete operation in the provisioning role. Destructive compensation is
+  assigned to a separate cleanup worker after the provisioning store reserves
+  a non-reclaimable cleanup state and records the required evidence.
 
 Because the adapter includes tags in `CreateSecret`, AWS requires
 `secretsmanager:TagResource` as well as `secretsmanager:CreateSecret`.
@@ -52,6 +53,10 @@ Illustrative identity policy (not yet tested in an AWS account):
         "StringEquals": {
           "aws:RequestTag/TaimoBotPurpose": "broker-bridge-key"
         },
+        "Null": {
+          "aws:RequestTag/TaimoBotOperationId": "false",
+          "aws:RequestTag/TaimoBotConnectionDigest": "false"
+        },
         "ForAllValues:StringEquals": {
           "aws:TagKeys": [
             "TaimoBotPurpose",
@@ -66,8 +71,7 @@ Illustrative identity policy (not yet tested in an AWS account):
       "Effect": "Allow",
       "Action": [
         "secretsmanager:DescribeSecret",
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:DeleteSecret"
+        "secretsmanager:GetSecretValue"
       ],
       "Resource": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:taimobot/broker-bridge/*"
     },
@@ -91,13 +95,15 @@ Illustrative identity policy (not yet tested in an AWS account):
 ```
 
 **Important review points**
-- This role is high impact because it can delete secrets. Keep it isolated to a
+- The provisioning role cannot delete secrets. Keep it isolated to a
   dedicated provisioning worker/service, not the general API runtime.
-- The current adapter uses immediate deletion
-  (`ForceDeleteWithoutRecovery=true`). Before granting `DeleteSecret`, review
-  whether that destructive behavior is acceptable for non-production and define
-  operator recovery controls. Prefer a separately isolated cleanup worker if
-  the architecture can support it.
+- The adapter currently exposes immediate deletion
+  (`ForceDeleteWithoutRecovery=true`). If that behavior remains necessary,
+  grant `secretsmanager:DeleteSecret` only to a separate cleanup-worker task
+  role, scoped to this namespace, after a durable non-reclaimable cleanup
+  reservation. Do not attach that permission to the general API or provisioning
+  role. Require operator-visible audit evidence and failure-injection tests
+  before enabling the cleanup worker.
 - The resource ARN wildcard must be tested against the actual Secrets Manager
   ARN suffix behavior and the service authorization model. Do not broaden to
   `Resource: "*"` as a workaround.
@@ -106,7 +112,38 @@ Illustrative identity policy (not yet tested in an AWS account):
   `CreateSecret` and `TagResource` in IAM policy simulation and live tests.
 - The adapter's current tag set is exactly the three keys shown above.
 
-## 2. Runtime retrieval task-role permissions — draft
+
+
+## 2A. Separate cleanup-worker role — draft
+
+Do not combine destructive cleanup with provisioning or runtime retrieval.
+If the adapter's compensation path is retained, run it through a dedicated
+cleanup worker with its own ECS task role. The worker should accept only
+durably reserved cleanup jobs, revalidate the operation/secret binding, and
+emit an auditable result. Its illustrative identity policy is deliberately
+small:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DeleteOnlyBrokerBridgeSecrets",
+      "Effect": "Allow",
+      "Action": "secretsmanager:DeleteSecret",
+      "Resource": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:taimobot/broker-bridge/*"
+    }
+  ]
+}
+```
+
+This remains a destructive permission. Validate the secret ARN scope and
+cleanup state machine in a non-production account; consider a recovery window
+instead of immediate force deletion where compatible with the adapter and
+security requirements. The cleanup worker must not receive create, tag, or
+general runtime permissions unless a separately reviewed need is demonstrated.
+
+## 3. Runtime retrieval task-role permissions — draft
 
 The current adapter's read path calls only `GetSecretValue`. It does not call
 `DescribeSecret`, list secrets, create, tag, rotate, or delete.
@@ -141,7 +178,7 @@ Do not grant runtime `CreateSecret`, `TagResource`, `PutSecretValue`,
 `UpdateSecret`, `RotateSecret`, `DeleteSecret`, `ListSecrets`, or
 `BatchGetSecretValue`.
 
-## 3. ECS task execution role
+## 4. ECS task execution role
 
 Keep this role separate from the application task role. Grant only the
 permissions required by the chosen deployment features, typically scoped ECR
@@ -152,7 +189,7 @@ If a future task definition injects a secret as an ECS container environment
 secret, that is a different access path and must be reviewed separately; this
 design assumes the application calls Secrets Manager using its task role.
 
-## 4. KMS key policy requirements
+## 5. KMS key policy requirements
 
 The KMS key policy must enable the intended account/roles to use the key while
 constraining cryptographic use to Secrets Manager in the selected region.
@@ -174,7 +211,7 @@ https://docs.aws.amazon.com/secretsmanager/latest/userguide/security-encryption.
 Do not copy a broad sample KMS key policy into an account without adapting and
 reviewing its principals and conditions.
 
-## 5. Required trust and deployment controls
+## 6. Required trust and deployment controls
 
 Before creating roles:
 1. Trust only `ecs-tasks.amazonaws.com` for ECS task roles.
@@ -191,7 +228,7 @@ Before creating roles:
 8. Apply permissions boundaries/SCPs where appropriate and verify effective
    permissions, not only the attached policy JSON.
 
-## 6. Pre-attachment validation checklist
+## 7. Pre-attachment validation checklist
 
 - [ ] Confirm account ownership and explicit authorization for a non-production
       AWS environment.
@@ -202,8 +239,8 @@ Before creating roles:
 - [ ] Simulate allowed and denied calls for both roles.
 - [ ] Prove runtime role cannot create, tag, describe (unless separately needed),
       rotate, update, or delete secrets.
-- [ ] Prove provisioning role cannot access unrelated secrets or unrelated KMS
-      keys.
+- [ ] Prove provisioning role cannot delete secrets or access unrelated secrets or
+      unrelated KMS keys; prove only the cleanup role can delete within the namespace.
 - [ ] Test tag conditions, secret ARN matching, KMS ViaService conditions and
       key policy interaction in the non-production account.
 - [ ] Test ambiguous create recovery, concurrent retries, exact version lookup,
