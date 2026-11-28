@@ -135,7 +135,7 @@ jobs:
         run: python scripts/run_broker_bridge_ingestion_service_batch.py
       - name: Run ten AWS Secrets Manager adapter contract checks sequentially
         run: python scripts/run_aws_secrets_manager_batch.py
-      - name: Run seven broker ingestion gateway security checks sequentially
+      - name: Run eleven broker ingestion gateway security checks sequentially
         run: python scripts/run_broker_bridge_ingestion_gateway_batch.py
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
