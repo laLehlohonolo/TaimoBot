@@ -132,7 +132,7 @@ def append_bridge_ingestion_audit(
         "REQUEST_RECEIVED", "ACCEPTED", "DUPLICATE_IGNORED",
         "CONTENT_TYPE_REJECTED", "BODY_TOO_LARGE", "BODY_INVALID",
         "AUTHENTICATION_REJECTED", "KEY_UNAVAILABLE", "IDENTITY_REJECTED",
-        "RATE_LIMITED", "INGRESS_DISABLED", "INTERNAL_FAILURE",
+        "RATE_LIMITED", "REQUEST_REJECTED", "INGRESS_DISABLED", "INTERNAL_FAILURE",
     }
     if event_type not in allowed_events or reason_code not in allowed_reasons:
         raise ValueError("Unsupported broker-ingestion audit classification.")
@@ -337,6 +337,19 @@ async def ingest_bridge_evidence_http(connection_id: str, request: Request):
             413 if "size" in message else
             415 if "content type" in message else 400
         )
+        # An authenticated ATTEMPT must have a terminal classification even
+        # when validation or persistence rejects the evidence. Keep the audit
+        # payload allow-listed and best-effort if the audit store itself fails.
+        if authenticated_audit_started:
+            try:
+                append_bridge_ingestion_audit(
+                    request_id=request_id, event_type="RESULT",
+                    participant_user_id=participant_user_id, connection_id=connection_id,
+                    key_id=key_id, http_status=status,
+                    reason_code="REQUEST_REJECTED", body_bytes=body_bytes,
+                )
+            except Exception:
+                pass
         _http_rejection(status, "Evidence request rejected.")
     except Exception:
         # Once an authenticated ATTEMPT is durable, preserve a terminal failure
