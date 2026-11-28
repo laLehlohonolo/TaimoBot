@@ -1040,6 +1040,13 @@ def init_db():
             """
         )
 
+    # Provisioning and its operator audit ledger are part of the application
+    # database bootstrap. Create the parent operation table before its audit FK.
+    from .broker_bridge_provisioning_store import ensure_schema as ensure_provisioning_schema
+    ensure_provisioning_schema()
+    from .broker_bridge_reconciliation_audit import ensure_schema as ensure_reconciliation_audit_schema
+    ensure_reconciliation_audit_schema()
+
 
 if __name__ == "__main__":
     init_db()

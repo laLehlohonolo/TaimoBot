@@ -2,7 +2,7 @@ name: TaimoBot application checks
 
 on:
   push:
-    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests]
+    branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests, feature/broker-bridge-reconciliation-ci]
   pull_request:
     branches: [main, test/restore-lock-valid-timestamps, hardening/renewable-maintenance-leases, hardening/broker-provisioning-lease-tests]
   workflow_dispatch:
