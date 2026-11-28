@@ -78,30 +78,40 @@ def ensure_bridge_ingestion_gateway_schema(connection):
     )
     # SQLite implements ON DELETE SET NULL as an UPDATE. Permit exactly that
     # privacy-preserving FK action while rejecting all edits to audit evidence.
-    connection.execute("DROP TRIGGER IF EXISTS trg_bridge_ingestion_audit_no_update")
-    connection.execute(
-        """
-        CREATE TRIGGER IF NOT EXISTS trg_bridge_ingestion_audit_no_update
-        BEFORE UPDATE ON broker_bridge_ingestion_audit
-        WHEN NOT (
-            OLD.participant_user_id IS NOT NULL
-            AND NEW.participant_user_id IS NULL
-            AND NEW.audit_id IS OLD.audit_id
-            AND NEW.event_id IS OLD.event_id
-            AND NEW.request_id IS OLD.request_id
-            AND NEW.event_type IS OLD.event_type
-            AND NEW.occurred_at IS OLD.occurred_at
-            AND NEW.connection_id IS OLD.connection_id
-            AND NEW.key_id IS OLD.key_id
-            AND NEW.http_status IS OLD.http_status
-            AND NEW.reason_code IS OLD.reason_code
-            AND NEW.body_bytes IS OLD.body_bytes
+    # Replace the trigger inside a savepoint: without this, DROP is committed
+    # before CREATE and concurrent app startup can briefly remove audit
+    # immutability (or leave it absent if recreation fails).
+    connection.execute("SAVEPOINT bridge_ingestion_audit_trigger_migration")
+    try:
+        connection.execute("DROP TRIGGER IF EXISTS trg_bridge_ingestion_audit_no_update")
+        connection.execute(
+            """
+            CREATE TRIGGER trg_bridge_ingestion_audit_no_update
+            BEFORE UPDATE ON broker_bridge_ingestion_audit
+            WHEN NOT (
+                OLD.participant_user_id IS NOT NULL
+                AND NEW.participant_user_id IS NULL
+                AND NEW.audit_id IS OLD.audit_id
+                AND NEW.event_id IS OLD.event_id
+                AND NEW.request_id IS OLD.request_id
+                AND NEW.event_type IS OLD.event_type
+                AND NEW.occurred_at IS OLD.occurred_at
+                AND NEW.connection_id IS OLD.connection_id
+                AND NEW.key_id IS OLD.key_id
+                AND NEW.http_status IS OLD.http_status
+                AND NEW.reason_code IS OLD.reason_code
+                AND NEW.body_bytes IS OLD.body_bytes
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'Broker ingestion audit is immutable except participant anonymisation.');
+            END
+            """
         )
-        BEGIN
-            SELECT RAISE(ABORT, 'Broker ingestion audit is immutable except participant anonymisation.');
-        END
-        """
-    )
+        connection.execute("RELEASE SAVEPOINT bridge_ingestion_audit_trigger_migration")
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT bridge_ingestion_audit_trigger_migration")
+        connection.execute("RELEASE SAVEPOINT bridge_ingestion_audit_trigger_migration")
+        raise
     connection.execute(
         """
         CREATE TRIGGER IF NOT EXISTS trg_bridge_ingestion_audit_no_delete
