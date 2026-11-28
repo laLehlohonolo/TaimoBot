@@ -7,7 +7,10 @@ the payload, and no broker order or account-control capability exists here.
 import json
 from datetime import datetime, timezone
 
-from .broker_bridge_evidence import persist_authenticated_bridge_evidence
+from .broker_bridge_evidence import (
+    persist_authenticated_bridge_evidence,
+    validate_bridge_evidence,
+)
 from .broker_bridge_security import authenticate_bridge_request
 from .broker_bridge_vault import load_bridge_key_secret
 
@@ -99,6 +102,7 @@ def ingest_authenticated_bridge_evidence(
     evidence = _parse_body(raw_body, content_type)
     now_epoch = int(datetime.now(timezone.utc).timestamp()) if now is None else int(now)
     _validate_provider_freshness(evidence, now_epoch)
+    evidence = validate_bridge_evidence(evidence)
 
     try:
         context = load_bridge_key_secret(key_id, secret_reader)
