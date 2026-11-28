@@ -81,7 +81,7 @@ def ensure_bridge_ingestion_gateway_schema(connection):
     connection.execute("DROP TRIGGER IF EXISTS trg_bridge_ingestion_audit_no_update")
     connection.execute(
         """
-        CREATE TRIGGER trg_bridge_ingestion_audit_no_update
+        CREATE TRIGGER IF NOT EXISTS trg_bridge_ingestion_audit_no_update
         BEFORE UPDATE ON broker_bridge_ingestion_audit
         WHEN NOT (
             OLD.participant_user_id IS NOT NULL
