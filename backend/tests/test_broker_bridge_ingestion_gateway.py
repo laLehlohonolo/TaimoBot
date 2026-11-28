@@ -119,7 +119,7 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
         self.assertEqual(row["reason_code"], "REQUEST_RECEIVED")
         self.assertEqual(row["connection_id"], self.connection_one)
 
-    def test_audit_is_append_only(self):
+    def test_audit_is_immutable_except_for_privacy_anonymisation(self):
         append_bridge_ingestion_audit(
             request_id="request-safe-002", event_type="RESULT",
             participant_user_id=self.owner, connection_id=self.connection_one,
@@ -133,6 +133,38 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
                 )
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute("DELETE FROM broker_bridge_ingestion_audit")
+            connection.execute(
+                "UPDATE broker_bridge_ingestion_audit SET participant_user_id = NULL"
+            )
+            row = connection.execute(
+                "SELECT participant_user_id, reason_code, body_bytes "
+                "FROM broker_bridge_ingestion_audit"
+            ).fetchone()
+        self.assertIsNone(row["participant_user_id"])
+        self.assertEqual(row["reason_code"], "ACCEPTED")
+        self.assertEqual(row["body_bytes"], 42)
+
+    def test_account_deletion_anonymises_audit_without_erasing_event(self):
+        disposable_user = register_user(
+            "gateway-deletion@taimobot.local",
+            "GatewayDeletionPassphrase-2026!",
+        )["user_id"]
+        append_bridge_ingestion_audit(
+            request_id="request-delete-001", event_type="RESULT",
+            participant_user_id=disposable_user, http_status=200,
+            reason_code="ACCEPTED", body_bytes=12,
+        )
+        with database.get_connection() as connection:
+            connection.execute("DELETE FROM users WHERE user_id = ?", (disposable_user,))
+            row = connection.execute(
+                "SELECT participant_user_id, request_id, reason_code, body_bytes "
+                "FROM broker_bridge_ingestion_audit WHERE request_id = ?",
+                ("request-delete-001",),
+            ).fetchone()
+        self.assertIsNone(row["participant_user_id"])
+        self.assertEqual(row["request_id"], "request-delete-001")
+        self.assertEqual(row["reason_code"], "ACCEPTED")
+        self.assertEqual(row["body_bytes"], 12)
 
     def test_unknown_audit_classification_is_rejected(self):
         with self.assertRaises(ValueError):
