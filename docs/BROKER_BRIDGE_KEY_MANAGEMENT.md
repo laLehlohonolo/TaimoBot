@@ -146,3 +146,26 @@ The durable registry and orchestration are implemented and covered by tests usin
 5. Only after those gates, consider a production provisioning route and read-only ingestion gateway behind explicit operator approval.
 
 **Current status:** AWS is selected as the target, but no AWS account, infrastructure, IAM role, KMS key, Secrets Manager secret, production adapter, or deployment has been created. No broker is connected; no participant credentials have been collected; paper trading remains the only trading mode and live order routing remains disabled.
+
+
+## AWS Secrets Manager adapter (implemented; cloud verification pending)
+
+Added `backend/app/aws_secrets_manager.py`, implementing the existing `SecretManager` and `SecretReader` contracts through an injected AWS SDK client. The adapter does not construct a boto3 client or accept static AWS credentials; the deployment composition layer must inject a client using the ECS task role. A customer-managed KMS key ID is mandatory.
+
+Provisioning behavior:
+- Generates 32 random bytes and calls `CreateSecret` with `SecretBinary`, the durable operation UUID as `ClientRequestToken`, the configured KMS key, and tags binding purpose, operation ID, and a digest of the connection path segment.
+- Uses a deterministic secret name supplied by the existing orchestration operation. It rejects names outside the broker-bridge namespace or whose final path segment does not match the operation UUID.
+- If the create response is ambiguous or reports an error, it attempts recovery by describing the deterministic name, verifying the expected tags, and retrieving the exact secret version by `VersionId=operation_id`. It never returns the newly generated retry bytes as if they were the committed version.
+- Returns only an opaque `secretmanager://` reference. Retrieval accepts only a validated Secrets Manager ARN and returns binary material without caching. Deletion uses immediate deletion and must be callable only after the provisioning store has fenced the operation into its cleanup state.
+
+AWS documents that `ClientRequestToken` is the version identifier: a retry with the same token and same bytes is idempotent, while different bytes for an existing token are rejected. The adapter's recovery read is therefore essential after an ambiguous response. This design still requires integration tests against AWS to verify real service behavior, concurrency and IAM policy effects; fake-client tests are not proof of cloud semantics.
+
+**IAM separation required before deployment:**
+- Provisioning role: resource-scoped `secretsmanager:CreateSecret`, `secretsmanager:TagResource`, `secretsmanager:DescribeSecret`, `secretsmanager:GetSecretValue`, and `secretsmanager:DeleteSecret` for the broker-bridge secret namespace; only the required KMS `kms:GenerateDataKey` and `kms:Decrypt` permissions on the dedicated key.
+- Runtime retrieval role: resource-scoped `secretsmanager:GetSecretValue` and required KMS decrypt access only. It must not receive create, tag, rotate, or delete permissions.
+- Operator reconciliation role: separate, audited, human-controlled access; no participant bridge or Taimo Brain permission to provision or delete secrets.
+- ECS task execution role remains separate from the application task role. The task role is the identity used by application code to call AWS services; execution-role permissions are for ECS/Fargate agent operations.
+
+**Adapter test coverage added:** 10 tests cover 256-bit generation, KMS selection, operation-token binding, ambiguous create recovery, retry byte stability, name/reference validation, malformed secret rejection, tag mismatch, destructive cleanup invocation, and generic failure handling. Tests use a fake AWS client. They are local contract tests only; no AWS account calls have been made.
+
+**Current status:** adapter code and tests are committed to the draft branch. No production dependency wiring, cloud client construction, IAM policies, KMS key, AWS account resource, provisioning route, or deployment exists yet. The production route remains blocked until real AWS integration and operator-reconciliation tests pass.
