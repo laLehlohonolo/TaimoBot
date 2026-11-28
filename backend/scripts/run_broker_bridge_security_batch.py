@@ -62,7 +62,7 @@ INGESTION_CASES = [
 
 def main():
     suite = unittest.TestSuite()
-    suite.addTests(keys_module.BrokerBridgeKeyTests(name) for name in KEY_CASES)
+    suite.addTests(keys_module.BrokerBridgeKeyMetadataTests(name) for name in KEY_CASES)
     suite.addTests(store_module.ProvisioningActivationLeaseTests(name) for name in LEASE_CASES)
     suite.addTests(ingestion_module.BrokerBridgeIngestionPrimitiveTests(name) for name in INGESTION_CASES)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
