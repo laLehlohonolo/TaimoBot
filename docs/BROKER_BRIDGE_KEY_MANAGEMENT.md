@@ -121,3 +121,28 @@ Persisted states:
 Activation claims now return unique UUID fencing tokens. Reclaiming an expired lease replaces the token, so a delayed worker cannot activate metadata or complete the operation with its stale token. The key metadata write validates the current token and unexpired lease inside the same SQLite transaction that inserts the key and changes the operation to `ACTIVATED`; both changes commit or roll back together. Failure cleanup first atomically moves the operation to a non-reclaimable `CLEANUP_REQUIRED` state while the worker still owns the lease, and only then attempts vault deletion. A worker that has lost ownership does not delete the secret or overwrite the newer worker's state. Legacy metadata committed before this atomic transition can be reconciled only after a new worker claims a current lease. Regression tests cover token replacement, stale-worker rejection, expired-lease rejection, and atomic completion. The service still recovers an ambiguous vault timeout by repeating the idempotent create call with the same operation ID.
 
 The durable registry and orchestration are implemented and covered by tests using a fake secret manager. A production adapter must still guarantee idempotency at the vault side. The fake adapter does not prove that a cloud vault provides this guarantee. There is still no production vault integration, provisioning HTTP endpoint, operator cleanup workflow, or authenticated evidence-ingestion gateway.
+
+
+## Hosting and production secret-manager decision (2026-11-28)
+
+**Decision: AWS is the selected primary cloud platform.** The initial production target is Amazon ECS on AWS Fargate for the FastAPI backend, with AWS Secrets Manager as the managed secret store, AWS KMS customer-managed encryption keys where justified, and IAM task roles for workload identity. This is an architectural decision only; it does not authorize account creation, cloud provisioning, deployment, or enabling broker connectivity.
+
+**Initial region: Africa (Cape Town), `af-south-1`.** AWS documentation currently lists Fargate, ECS, and Secrets Manager as available in this region. The region is opt-in for AWS accounts, so it must be explicitly enabled before use. Region choice remains subject to a measured latency, availability, service-quota, pricing, and data-residency review before production launch. Do not silently fall back to another region; any change requires an explicit documented review.
+
+**Identity and access model:**
+- The FastAPI workload receives a dedicated ECS task role. Grant only the exact Secrets Manager actions and secret ARNs required for its runtime function; do not use long-lived IAM user access keys in containers.
+- Keep the ECS task execution role separate from the application task role. The execution role is for agent operations such as image pulls/log delivery and task-definition secret injection; the application task role is for application API calls.
+- Separate provisioning, runtime retrieval, rotation, revocation, and operator-reconciliation permissions. The runtime service must not be able to create, rotate, or delete secrets unless a separately reviewed workflow requires it.
+- Use a customer-managed KMS key with a narrowly scoped key policy when the threat model and operational ownership justify it. Restrict decrypt permissions to the required workload role and secret resources; log and alert on key-policy or grant changes.
+- Store only opaque secret references and non-secret metadata in the application database. Never place broker passwords or bridge HMAC key bytes in environment variables, source control, logs, traces, API responses, or ChatGPT messages.
+- Preserve the existing provider-neutral `SecretManager` and `SecretReader` interfaces. Implement AWS adapters behind these interfaces; do not spread AWS SDK calls through domain logic.
+- The adapter must prove durable idempotency for secret creation, exact-byte stability after ambiguous timeouts, least-privilege retrieval, rotation/revocation behavior, and safe cleanup/reconciliation before any production route is enabled.
+
+**Delivery sequence / gates:**
+1. Add AWS adapter contract tests using fakes and local deterministic tests; do not claim these prove AWS behavior.
+2. Implement and test AWS Secrets Manager adapters with workload identity and resource-scoped IAM policies in a non-production AWS account.
+3. Verify real AWS idempotency/retry semantics, KMS policy behavior, audit logging, rotation, revocation, deletion/compensation, outage handling, and operator cleanup under failure injection.
+4. Complete deployment threat model, regional latency/cost/quota review, privacy/data-residency review, backup/recovery and incident-response runbooks.
+5. Only after those gates, consider a production provisioning route and read-only ingestion gateway behind explicit operator approval.
+
+**Current status:** AWS is selected as the target, but no AWS account, infrastructure, IAM role, KMS key, Secrets Manager secret, production adapter, or deployment has been created. No broker is connected; no participant credentials have been collected; paper trading remains the only trading mode and live order routing remains disabled.
