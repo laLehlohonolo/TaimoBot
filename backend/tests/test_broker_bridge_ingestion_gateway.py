@@ -379,7 +379,10 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
             self.assertEqual(evidence_after_first, 1)
             self.assertEqual(
                 [(row["event_type"], row["reason_code"]) for row in audit_after_first],
-                [("ATTEMPT", "REQUEST_RECEIVED")],
+                [
+                    ("ATTEMPT", "REQUEST_RECEIVED"),
+                    ("RESULT", "INTERNAL_FAILURE"),
+                ],
             )
 
             retry_headers = dict(headers)
@@ -409,6 +412,7 @@ class BrokerBridgeIngestionGatewayTests(unittest.TestCase):
             [(row["event_type"], row["reason_code"]) for row in audit],
             [
                 ("ATTEMPT", "REQUEST_RECEIVED"),
+                ("RESULT", "INTERNAL_FAILURE"),
                 ("ATTEMPT", "REQUEST_RECEIVED"),
                 ("RESULT", "DUPLICATE_IGNORED"),
             ],
